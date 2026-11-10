@@ -6,7 +6,30 @@
 **一個 agent（一段指示）加上一組工具（你既有的函式）**。框架負責其餘
 的事：呼叫模型、執行工具、把結果送回模型、保存對話、權限確認。
 
-框架本身用 TypeScript 寫，但你的專案不必是 TypeScript：
+## 兩個版本
+
+這個 repo 有兩個實作，使用**同一種專案格式**（同一份 `harness.yaml` 與
+`agents/*.md`），對話紀錄也互通。差別在於工具怎麼接、能嵌進什麼程式：
+
+| | TypeScript 版（本文件） | [Python 版](python/README.md) |
+|---|---|---|
+| 指令 | `harness` | `pyharness` |
+| Python 專案的工具 | 透過 MCP 伺服器（另一個行程） | 直接 import，加 `@harness.tool` |
+| TypeScript 專案的工具 | 直接載入 `tools/*.ts` | 不支援 |
+| 可以嵌進 | Node.js 服務 | Python 服務（FastAPI、Streamlit…） |
+| 模型 | 任何 OpenAI 相容端點 | litellm（直接連供應商或連端點） |
+| 連接 MCP 伺服器 | 支援 | 尚未支援 |
+
+怎麼選：
+
+- **專案是 Python、想用最少的步驟接上**，或要把 agent 嵌進既有的 Python
+  網頁服務：用 [Python 版](python/README.md)。
+- **專案是 TypeScript / Node.js**，或要連接現成的 MCP 伺服器：用
+  TypeScript 版。
+
+`examples/report_bot` 同時提供兩種工具寫法，所以兩個版本都能直接執行它。
+
+以下是 TypeScript 版的說明。
 
 ```
                     ┌────────────────────────┐
@@ -447,11 +470,11 @@ chat 與 run 共用的選項：
 
 ## 目前的限制與還沒有的功能
 
-- **Python 程式不能直接呼叫 harness。** 既有的 Python 網頁服務要用它，
-  目前只能透過 `harness run` 指令；HTTP 服務模式還沒做。
+- **Python 程式不能直接呼叫 TypeScript 版。** 要把 agent 嵌進既有的
+  Python 網頁服務，請用 [Python 版](python/README.md)。
 - **`deps` 不會傳到 Python 工具伺服器。** 伺服器是獨立的行程，使用者
   身分這類資訊目前只能靠環境變數傳遞，所以一個伺服器只適合服務一位
-  使用者。
+  使用者。需要依使用者區分資料時，同樣請用 Python 版。
 - Subagents 與 handoffs（agent 之間互相呼叫或轉交）
 - Skills（需要時才載入的說明文件）
 - 跨對話的長期記憶

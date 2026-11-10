@@ -4,8 +4,18 @@
 使用它的功能。
 
 完整的例子在 [`examples/report_bot`](../examples/report_bot)：
-`legacy/` 是「原本就存在」的 Python 程式碼，`tools/report_server.py` 是
-新加的那一層。
+`legacy/` 是「原本就存在」的 Python 程式碼，`tools/` 是新加的那一層。
+
+## 先選版本
+
+| 你的專案 | 建議 | 工具怎麼寫 |
+|---|---|---|
+| Python | [Python 版](../python/README.md)（`pyharness`） | `tools/*.py`，函式加 `@harness.tool` |
+| Python，但要和 TypeScript 專案共用同一套 agent | TypeScript 版（`harness`） | Python 端寫 MCP 伺服器 |
+| TypeScript / Node.js | TypeScript 版（`harness`） | `tools/*.ts` |
+
+兩個版本的專案格式相同，之後要換版本只需要換工具那一層。下面先講共同
+的步驟，再分別說明兩種工具寫法。
 
 ## 移轉後的樣子
 
@@ -19,17 +29,23 @@ my_project/                 ← 既有專案
 ├── harness.yaml            ← 新增
 ├── AGENTS.md               ← 新增
 ├── agents/main.md          ← 新增
-└── tools/server.py         ← 新增：把既有函式公開成工具
+└── tools/reports.py        ← 新增：把既有函式包成工具
 ```
-
-`tools/server.py` 是一個小小的 Python 程式（MCP 伺服器）。`harness chat`
-啟動時會自動執行它，結束時自動關閉，你不需要另外啟動。
 
 ## 步驟
 
 ### 1. 安裝並建立範本
 
-先依 README 的「安裝」裝好 `harness` 指令，然後：
+Python 版：
+
+```bash
+pip install "git+https://github.com/xian-ai-1057/Agent.git#subdirectory=python"
+cd my_project
+pyharness new .
+```
+
+TypeScript 版：先依[根目錄 README 的「安裝」](../README.md#安裝)裝好
+`harness` 指令，然後：
 
 ```bash
 cd my_project
@@ -37,9 +53,8 @@ pip install "mcp>=2"        # Python 端的工具伺服器套件
 harness new .
 ```
 
-`harness new .` 只會建立不存在的檔案，不會覆寫任何既有檔案。
-
-模型的連線設定見 README 的「設定模型」。
+`new` 只會建立不存在的檔案，不會覆寫任何既有檔案。模型的連線設定見
+各版本 README 的「模型設定」。
 
 ### 2. 列出專案「能做的事」
 
@@ -54,11 +69,38 @@ harness new .
 從使用者的問題出發，而不是從既有函式出發。一個工具應該對應一件使用者
 在意的事，內部可以串接好幾個既有函式。
 
-### 3. 把功能公開成工具
+### 3. 把功能包成工具
 
-編輯 `tools/server.py`：
+#### 寫法 A：Python 版（直接 import）
 
 ```python
+# tools/reports.py
+import harness
+from my_project import reports
+
+
+@harness.tool
+def get_sales_summary(month: str) -> dict[str, int]:
+    """取得某個月份各產品的銷售總額。
+
+    Args:
+        month: 月份，格式為 YYYY-MM，例如 2026-10。
+    """
+    records = reports.load_sales(month)
+    if not records:
+        raise harness.ToolError(
+            f"{month} 沒有銷售資料，請先用 list_months 確認"
+        )
+    return reports.summarize(records)
+```
+
+專案根目錄會自動加入 Python 的搜尋路徑，所以可以直接
+`import my_project`。檔名（`reports`）就是 toolset 名稱。
+
+#### 寫法 B：TypeScript 版（MCP 伺服器）
+
+```python
+# tools/server.py
 import pathlib
 import sys
 
@@ -90,9 +132,8 @@ if __name__ == "__main__":
     mcp.run()
 ```
 
-專案已經用 `pip install -e .` 安裝過的話，不需要 `sys.path` 那一行。
-
-`harness.yaml` 裡對應的設定（`harness new` 已經幫你寫好）：
+`harness.yaml` 裡對應的設定（`harness new` 已經幫你寫好）。伺服器名稱
+就是 toolset 名稱：
 
 ```yaml
 mcpServers:
@@ -101,8 +142,17 @@ mcpServers:
     args: [tools/server.py]
 ```
 
-專案使用虛擬環境時，先啟用虛擬環境再執行 `harness chat`，或把
-`command` 改成虛擬環境裡的 Python，例如 `.venv/bin/python`。
+`harness chat` 啟動時會自動執行這個伺服器，結束時自動關閉。專案使用
+虛擬環境時，先啟用虛擬環境再執行 `harness chat`，或把 `command` 改成
+虛擬環境裡的 Python，例如 `.venv/bin/python`。
+
+#### 兩個版本都要能跑
+
+兩種寫法可以並存，就像 `examples/report_bot`：`tools/report.py`（寫法
+A）與 `tools/report_server.py`（寫法 B）包裝同一份既有程式碼，
+`mcpServers` 裡的伺服器也叫 `report`。agent 檔案寫 `tools: [report]`，
+兩個版本各自找到自己的那一份。Python 版會自動略過被 `mcpServers`
+當成伺服器執行的檔案。
 
 ### 4. 寫 agent 的指示
 
@@ -113,7 +163,7 @@ mcpServers:
 ```markdown
 ---
 name: main
-tools: [tools]
+tools: [reports]
 ---
 你是銷售報告助手。
 
@@ -126,13 +176,15 @@ tools: [tools]
 ### 5. 測試
 
 ```bash
-harness chat
+pyharness chat      # 或 harness chat
 ```
 
-工具本身是普通的 Python 函式，可以直接用 pytest 測試。
+工具本身是普通的 Python 函式，可以直接用 pytest 測試。Python 版要測試
+「agent 加工具」的整體行為而不花錢呼叫模型，可以用假的模型函式，寫法見
+[`python/tests/test_example_report_bot.py`](../python/tests/test_example_report_bot.py)。
 
-伺服器啟動失敗時，harness 會顯示它的錯誤訊息（通常是 import 錯誤或
-少裝套件）。要看伺服器執行期間的完整 log：
+TypeScript 版的工具伺服器啟動失敗時，harness 會顯示它的錯誤訊息（通常
+是 import 錯誤或少裝套件）。要看伺服器執行期間的完整 log：
 
 ```bash
 HARNESS_DEBUG=1 harness chat
@@ -143,20 +195,25 @@ HARNESS_DEBUG=1 harness chat
 **說明要具體。** 模型只看得到工具名稱、docstring 和參數說明。格式
 （`YYYY-MM`）、單位、範例值都寫進去。
 
-**錯誤要用 `ToolError`，而且告訴模型下一步。**
+**錯誤訊息要告訴模型下一步，而且用 `ToolError`。**
 `raise ToolError("2026-13 沒有資料，請先用 list_months 確認")` 模型會
-照著做。用一般的 `ValueError` 的話，模型只會看到「執行失敗」，看不到
-你寫的訊息。
+照著做。在 MCP 伺服器裡這點特別重要：一般的例外（例如 `ValueError`）
+模型只會看到「執行失敗」，看不到你寫的訊息。
 
 **回傳模型需要的資料就好。** 回傳內容會佔用模型的 context。查詢類工具
 回傳整理過的摘要或前幾筆，不要回傳整張資料表。
 
 **有副作用的工具要先問使用者。** 會寄信、改資料庫、花錢的工具，在
-`harness.yaml` 的 `permissions.ask` 加上名稱樣式，或在 Python 端標記
-`destructiveHint=True`（寫法見 README）。
+`harness.yaml` 的 `permissions.ask` 加上名稱樣式（兩個版本通用），或在
+定義工具時標記（Python 版 `needs_approval=True`，MCP 伺服器
+`destructiveHint=True`）。
 
-**執行很久的工具要調整逾時。** 單次工具呼叫預設最多等 300 秒，產生
-大型報告需要更久的話，在伺服器設定加上 `timeoutSeconds`：
+**使用者身分不要讓模型填。** Python 版從 `RunContext.deps` 取得目前的
+使用者、權限、資料庫連線，不要做成工具的參數，否則模型可以填別人的
+ID。MCP 伺服器拿不到 `deps`，需要依使用者區分資料的服務請用 Python 版。
+
+**執行很久的工具要調整逾時（MCP 伺服器）。** 單次工具呼叫預設最多等
+300 秒，產生大型報告需要更久的話，在伺服器設定加上 `timeoutSeconds`：
 
 ```yaml
 mcpServers:
@@ -166,12 +223,18 @@ mcpServers:
     timeoutSeconds: 1800
 ```
 
-## 非 Python 的專案
+## 嵌進既有的網頁服務
 
-- **TypeScript / JavaScript 專案**：不需要伺服器，直接在 `tools/*.ts`
-  匯出工具，寫法見 README 的「用 TypeScript 寫工具」。
+既有專案已經有 Python 網頁介面（FastAPI、Streamlit、Flask）時，用
+Python 版直接在請求處理函式裡呼叫 `harness.run_stream(...)`，寫法見
+[Python 版 README](../python/README.md#嵌進既有的網頁服務)。Node.js 服務
+則用 TypeScript 版的 `runStream`。
+
+## 其他語言的專案
+
 - **其他語言**：任何語言只要有 MCP SDK（Go、Java、C#、Rust 等都有），
-  做法和 Python 相同，把 `command` 換成啟動那個程式的指令。
+  做法和寫法 B 相同，把 `command` 換成啟動那個程式的指令，搭配
+  TypeScript 版使用。
 - **已經是 HTTP 服務的專案**：伺服器支援 MCP 的 Streamable HTTP 時，
   設定改用 `url`：
 
@@ -185,11 +248,12 @@ mcpServers:
 
 ## 檢查清單
 
-- [ ] `harness.yaml`、`agents/main.md`、`tools/server.py` 已建立
+- [ ] `harness.yaml`、`agents/main.md`、`tools/` 已建立
 - [ ] 每個使用者會用到的功能都有對應的工具
 - [ ] 每個工具都有具體的 docstring 與參數說明
 - [ ] 預期中的錯誤都用 `ToolError`，訊息有說明下一步
-- [ ] 有副作用的工具已列入 `permissions.ask`
+- [ ] 有副作用的工具已列入 `permissions.ask` 或在定義時標記
+- [ ] 使用者身分從 `RunContext.deps` 取得，不是工具參數（Python 版）
 - [ ] 原本寫死的 prompt 已搬到 `agents/*.md`
 - [ ] `.harness/` 已加入 `.gitignore`
-- [ ] `harness chat` 實際問過幾個常見問題
+- [ ] 實際聊天問過幾個常見問題
