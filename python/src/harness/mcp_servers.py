@@ -29,6 +29,13 @@ DEFAULT_STARTUP_TIMEOUT_SECONDS = 300
 _STDERR_TAIL_CHARS = 2000
 _CLOSE_TIMEOUT_SECONDS = 10
 _CLIENT_NAME = "agent-harness"
+# Claude Code、Cursor 等工具的 MCP 設定會寫 type，值與需要的欄位對應。
+_TRANSPORT_TYPES = {
+    "stdio": "command",
+    "http": "url",
+    "streamable-http": "url",
+    "streamableHttp": "url",
+}
 
 
 class McpConnection:
@@ -255,8 +262,13 @@ def connect(
         if isinstance(error, TimeoutError):
             detail = f"{startup_timeout_seconds} 秒內沒有完成連線\n{detail}"
             detail = detail.strip()
+        action = (
+            f"連上 MCP 伺服器 {name}（{url}）"
+            if url
+            else f"啟動 MCP 伺服器 {name}"
+        )
         raise RuntimeError(
-            f"無法啟動 MCP 伺服器 {name}：\n{detail or _describe(error)}"
+            f"無法{action}：\n{detail or _describe(error)}"
         ) from error
     if stderr is not None:
         stderr.release_writer()
@@ -270,20 +282,23 @@ def from_config(
 
     Args:
         name: 伺服器名稱。
-        config: 設定（command、args、env、url、headers、timeoutSeconds）。
+        config: 設定（command、args、env、url、headers、timeoutSeconds，
+            以及從 Claude Code 等工具複製過來時會有的 type）。
         cwd: 啟動本機伺服器時的工作目錄（專案根目錄）。
 
     Returns:
         已連線的 McpConnection。
     """
     config = config or {}
-    known = {"command", "args", "env", "url", "headers", "timeoutSeconds"}
+    known = {"type", "command", "args", "env", "url", "headers"}
+    known.add("timeoutSeconds")
     unknown = sorted(set(config) - known)
     if unknown:
         raise ValueError(
             f"mcpServers.{name} 有不認得的設定：{unknown}，"
             f"可用的有：{sorted(known)}"
         )
+    _check_type(name, config)
     return connect(
         name,
         command=config.get("command"),
@@ -294,6 +309,28 @@ def from_config(
         headers={k: str(v) for k, v in (config.get("headers") or {}).items()},
         timeout_seconds=config.get("timeoutSeconds") or DEFAULT_TIMEOUT_SECONDS,
     )
+
+
+def _check_type(name: str, config: dict[str, Any]) -> None:
+    """確認 type 與 command / url 一致；沒寫 type 時不檢查。"""
+    kind = config.get("type")
+    if kind is None:
+        return
+    if kind == "sse":
+        raise ValueError(
+            f"mcpServers.{name} 使用舊的 SSE 傳輸，目前不支援；請改用伺服器"
+            "的 Streamable HTTP 端點（通常是 /mcp），並把 type 改成 http"
+        )
+    if kind not in _TRANSPORT_TYPES:
+        raise ValueError(
+            f"mcpServers.{name} 的 type 不認得：{kind}，"
+            f"可用的有：{sorted(_TRANSPORT_TYPES)}"
+        )
+    needed = _TRANSPORT_TYPES[kind]
+    if not config.get(needed):
+        raise ValueError(
+            f"mcpServers.{name} 的 type 是 {kind}，需要設定 {needed}"
+        )
 
 
 def content_to_text(content: Any, structured: Any) -> str:
