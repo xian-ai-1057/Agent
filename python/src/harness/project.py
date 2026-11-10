@@ -482,12 +482,33 @@ def _load_knowledge(
     path = root / str(settings.get("path") or DEFAULT_KNOWLEDGE_DIR)
     if not path.is_dir():
         raise ValueError(f"找不到知識庫資料夾：{path}")
+    unknown = sorted(set(settings) - _KNOWLEDGE_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"{CONFIG_FILE} 的 knowledge 有不認得的設定：{unknown}，"
+            f"可用的有：{sorted(_KNOWLEDGE_FIELDS)}"
+        )
     return knowledge_lib.Knowledge(
         path,
         embedding_model=settings.get("embeddingModel"),
         chunk_size=settings.get("chunkSize") or 800,
         cache_dir=root / KNOWLEDGE_CACHE_DIR,
+        reranker=settings.get("reranker"),
+        rerank_candidates=settings.get("rerankCandidates") or 20,
+        min_similarity=settings.get("minSimilarity"),
+        min_rerank_score=settings.get("minRerankScore"),
     )
+
+
+_KNOWLEDGE_FIELDS = {
+    "path",
+    "embeddingModel",
+    "chunkSize",
+    "reranker",
+    "rerankCandidates",
+    "minSimilarity",
+    "minRerankScore",
+}
 
 
 _COMPACTION_FIELDS = {

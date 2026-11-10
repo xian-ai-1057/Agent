@@ -196,16 +196,25 @@ async def _show_knowledge(
     """印出知識庫的概況與搜尋結果。"""
     stats = await kb.stats()
     mode = "關鍵字 + 語意（embedding）" if stats["embedding"] else "關鍵字"
+    if stats["reranker"]:
+        mode += "，再用 reranker 重新排序"
     print(
         f"{stats['sources']} 個檔案、{stats['chunks']} 個片段，檢索方式：{mode}"
     )
+    thresholds = []
+    if stats["min_similarity"] is not None:
+        thresholds.append(f"相似度 ≥ {stats['min_similarity']}")
+    if stats["min_rerank_score"] is not None:
+        thresholds.append(f"rerank ≥ {stats['min_rerank_score']}")
+    if thresholds:
+        print(f"門檻：{'、'.join(thresholds)}")
     for warning in stats["warnings"]:
         print(f"  ⚠ {warning}")
     if not query:
         return 0
     hits = await kb.search(query, labels=labels)
     print()
-    print(knowledge_lib.format_hits(hits))
+    print(knowledge_lib.format_hits(hits, show_scores=True))
     return 0
 
 
@@ -334,8 +343,27 @@ async def _run_turn(
             _print_compaction(event.data["result"])
         elif event.type == "compaction_failed":
             print(f"  ⚠ 自動壓縮失敗：{event.data['error']}")
+        elif event.type == "subagent":
+            _print_subagent_progress(event)
         elif event.type == "run_end":
             _print_stop_notice(event.data["result"])
+
+
+def _print_subagent_progress(event: datatypes.Event) -> None:
+    """印出 subagent 呼叫的工具與錯誤，縮排表示它在哪一層。
+
+    subagent 的文字回覆不逐字印出：最後的回覆會當成工具結果交回上一層，
+    由上一層的 agent 整理後回答。
+    """
+    inner = event.data["event"]
+    indent = "  " * (len(event.data["path"]) + 1)
+    agent = event.data["agent"]
+    if inner.type == "tool_call":
+        call = inner.data["call"]
+        arguments = loop.format_arguments(call)
+        print(f"{indent}↳ {agent} ⚙ {call.name}({arguments})")
+    elif inner.type == "tool_result" and inner.data["result"].is_error:
+        print(f"{indent}↳ {agent} ✗ {inner.data['result'].output}")
 
 
 async def _compact_now(

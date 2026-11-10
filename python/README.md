@@ -214,6 +214,10 @@ mcpServers:
     headers: {X-Team: sales}               # 選用，附帶的 HTTP 標頭
 ```
 
+從 Claude Code、Cursor 等工具複製過來的設定可以直接用，裡面的 `type`
+（`stdio`、`http`）會被接受；舊的 `sse` 傳輸不支援，請改用伺服器的
+Streamable HTTP 端點（通常是 `/mcp`）。
+
 agent 用伺服器名稱引用整組工具，也可以只列出其中幾個工具的名稱：
 
 ```markdown
@@ -305,7 +309,9 @@ async for event in harness.run_stream(agent, "給我十月的報告"):
 ```
 
 事件種類：`text_delta`、`message`、`tool_call`、`tool_result`、
-`handoff`、`run_end`。
+`handoff`、`subagent`、`run_end`（另有對話壓縮的 `compaction`、
+`compaction_failed`）。`subagent` 是 subagent 內部的進度，見
+[看到 subagent 的進度](#看到-subagent-的進度)。
 
 ### 嵌進既有的網頁服務
 
@@ -419,6 +425,29 @@ Subagent 的細節：
 - subagent 可以再有自己的 subagent，最多 3 層。
 - 它在輪數上限內沒做完時，主 agent 會收到錯誤說明與它最後的回覆。
 
+### 看到 subagent 的進度
+
+subagent 工作時，它自己的每個事件（呼叫工具、拿到結果、逐字輸出的
+文字等）都會包成 `subagent` 事件，在它還在做的時候就送出，不用等它做完：
+
+```python
+async for event in harness.run_stream(main, "十月賣得如何？"):
+    if event.type == "subagent":
+        inner = event.data["event"]  # subagent 原本的事件
+        if inner.type == "tool_call":
+            print(f"  {event.data['agent']} 呼叫 {inner.data['call'].name}")
+```
+
+| 欄位 | 內容 |
+|---|---|
+| `agent` | 產生這個事件的 subagent |
+| `path` | 由外到內經過的 agent，例如 `["researcher", "helper"]`（subagent 再交給 subagent 時） |
+| `call_id` | 最上層那次 `ask_<名稱>` 工具呼叫的 id，可以用來把進度放在對應的 `tool_call` 底下 |
+| `event` | subagent 原本的事件（`text_delta`、`tool_call`、`tool_result`、`message`、`run_end` 等） |
+
+同一輪同時交給好幾個 subagent 時，用 `call_id` 區分各自的進度。命令列
+與網頁版會把 subagent 呼叫的工具顯示在交辦的步驟底下。
+
 Handoff 的細節：
 
 - **每次都傳入同一個起始 agent 即可。** 目前由誰負責是從對話紀錄推算
@@ -458,8 +487,11 @@ agent 會得到 `search_knowledge` 工具，搜尋結果附上來源檔案與所
   再加上語意檢索，兩者的排名合併（hybrid search），同義詞、換句話說
   也找得到。
 - **檔案改了會自動更新。** 每次搜尋前會檢查檔案有沒有變動，有就重建
-  索引。embedding 依片段內容快取在 `.harness/knowledge/`，沒變的片段
-  不會重新計算。
+  索引。embedding 存在內建的向量資料庫，沒變的片段不會重新計算（見
+  [向量資料庫](#向量資料庫)）。
+- **過濾不相關的結果與重新排序。** 可以設定相似度門檻，把與問題不夠
+  相似的片段丟掉；也可以用 reranker 重新評估前幾名的相關度（見
+  [相似度門檻與 reranker](#相似度門檻與-reranker)）。
 - **切片。** 依段落切成約 `chunkSize` 字的片段，不會從段落中間切開。
 - 支援 `.md`、`.txt`、`.pdf`；其他格式會略過，用 `pyharness knowledge`
   可以看到哪些檔案被略過。讀取 PDF 需要 pypdf：
@@ -475,10 +507,72 @@ knowledge:
   path: knowledge                              # 預設
   embeddingModel: openai/text-embedding-3-small  # 省略時只用關鍵字
   chunkSize: 800                               # 預設
+  minSimilarity: 0.3            # 選用，語意相似度門檻（需要 embeddingModel）
+  reranker: cohere/rerank-v3.5  # 選用，重新排序用的模型
+  rerankCandidates: 20          # 交給 reranker 的候選數，預設 20
+  minRerankScore: 0.2           # 選用，rerank 分數門檻（需要 reranker）
 ```
 
-`embeddingModel` 是 litellm 的模型名稱；有設定 `HARNESS_BASE_URL` 時
-會改連那個端點，和聊天模型一樣。
+`embeddingModel` 與 `reranker` 是 litellm 的模型名稱；有設定
+`HARNESS_BASE_URL` 時會改連那個端點，和聊天模型一樣（reranker 走
+LiteLLM Proxy 的 `/v1/rerank`）。
+
+### 相似度門檻與 reranker
+
+只靠排名的話，知識庫裡就算沒有答案，也一定會回傳「最接近」的幾段，
+agent 可能拿不相關的內容硬湊答案。兩種設定可以擋掉這些結果：
+
+- **`minSimilarity`**：語意相似度（餘弦，-1 到 1）低於門檻的片段不回傳，
+  關鍵字找到的片段也一樣要過門檻。需要設定 `embeddingModel`。
+- **`reranker`**：先用關鍵字與語意檢索取出前 `rerankCandidates` 名，
+  再交給 rerank 模型逐段判斷與問題的相關度、重新排序，排名比單純的
+  向量相似度準確。可以搭配 **`minRerankScore`** 丟掉分數太低的片段。
+  litellm 支援的 rerank 服務都能用（Cohere、Voyage、Jina、Together、
+  自架的 Infinity / vLLM 等），例如 `cohere/rerank-v3.5`
+  （環境變數 `COHERE_API_KEY`）。
+
+全部被擋下時，agent 收到「知識庫裡沒有找到相關的內容」，會照指示回答
+找不到資料，而不是自己編造。
+
+**門檻的合適值依模型而定**（不同 embedding 模型的相似度分布差很多），
+用 `pyharness knowledge "問題"` 試搜尋，結果會列出每筆的相似度與 rerank
+分數，拿相關與不相關的問題各試幾次再決定：
+
+```
+$ pyharness knowledge "特休怎麼算"
+3 個檔案、12 個片段，檢索方式：關鍵字 + 語意（embedding），再用 reranker 重新排序
+門檻：相似度 ≥ 0.3、rerank ≥ 0.2
+
+[1] 來源：hr/leave.md › 請假規定 › 特休（相似度 0.712、rerank 0.954）
+到職滿六個月給三天特休……
+```
+
+### 向量資料庫
+
+embedding 存在內建的向量資料庫裡，不需要另外安裝或架設服務：
+
+- 專案的向量存在 `.harness/knowledge/vectors.sqlite3`（一個 SQLite 檔案），
+  以「模型名稱 + 片段內容」識別。重新啟動、檔案部分改動時，只有新的
+  或改過的片段需要重新計算 embedding；刪掉的檔案，它的向量也會一併
+  清掉。舊版的 `embeddings.json` 會自動搬進來。
+- 搜尋在記憶體中計算，有安裝 numpy 時用它加速（一萬個片段約 0.02 秒），
+  沒有的話用純 Python（幾千個片段以內也很快）：
+
+  ```bash
+  pip install numpy
+  ```
+
+要改用外部的向量資料庫（pgvector、Qdrant 等），實作
+`harness.VectorStore` 的四個方法（`missing`、`add`、`retain`、`search`），
+在程式裡交給知識庫：
+
+```python
+project = harness.load_project(".")
+project.knowledge.vector_store = MyPgVectorStore(...)
+```
+
+一個向量資料庫只給一個知識庫使用：`retain` 會刪除這個知識庫用不到的
+向量。
 
 ### 依部門限制可以搜尋的文件
 
@@ -530,14 +624,21 @@ agent 設定的 `labels` 與 `label_filter` 同時存在時，兩者都允許的
 kb = harness.Knowledge(
     "knowledge",
     embedding_model="openai/text-embedding-3-small",  # 可省略
-    cache_dir="data/kb-cache",  # 可省略
+    cache_dir="data/kb-cache",  # 向量資料庫的位置，省略時只存在記憶體
+    min_similarity=0.3,  # 可省略
+    reranker="cohere/rerank-v3.5",  # 可省略
+    min_rerank_score=0.2,  # 可省略
 )
 kb.add_text("退貨請在七天內申請", source="FAQ#3")  # 也可以直接加文字
 
 agent = harness.Agent(name="faq", instructions="...", tools=[kb.as_tool()])
 
 hits = await kb.search("退貨期限")  # 也可以直接搜尋
+hits[0].similarity, hits[0].rerank_score  # 沒有使用時是 None
 ```
+
+用自己的 reranker（例如本機的 cross-encoder）時，傳入
+`rerank_fn=async (query, documents) -> list[float]`，分數越大越相關。
 
 ## Skills
 
@@ -873,6 +974,9 @@ pyharness web --port 8080   # 換埠號
 Python 版另外會處理：
 
 - **Handoff**：對話轉交後，網頁上顯示的 agent 會換成接手的那個。
+- **Subagent 的進度**：subagent 呼叫的工具即時列在交辦步驟底下，標出
+  是哪個 subagent，「工作中」也會顯示它正在做什麼。subagent 的對話不
+  存檔，所以伺服器重新啟動後只剩交辦內容與結果。
 - **對話壓縮**：壓縮的地方會標出「對話已壓縮」。
 - **訊息防護**：使用者的訊息被擋下時，顯示被擋下的原因。
 - **金鑰**：沒有設定 `HARNESS_BASE_URL`（直接連供應商）時，設定頁會
@@ -900,8 +1004,6 @@ Python 版另外會處理：
 
 ## 目前還沒有的功能
 
-- 串流時顯示 subagent 內部的進度（目前只看得到交辦與結果）
 - Slack / Telegram 等訊息平台的接口
-- 知識庫的 Reranker、相似度門檻，以及自帶向量資料庫
 - 網頁版的「工作中」只列出這次啟動後跑過的對話；更早的對話仍然可以
   在列表裡打開、接著問

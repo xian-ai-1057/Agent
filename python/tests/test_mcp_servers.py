@@ -190,6 +190,13 @@ def test_server_that_never_answers_times_out(tmp_path):
     assert time.monotonic() - started < 10
 
 
+def test_unreachable_remote_server_names_the_url():
+    port = _free_port()  # 沒有人在聽的連接埠
+
+    with pytest.raises(RuntimeError, match=f"127.0.0.1:{port}/mcp"):
+        mcp_servers.connect("doc", url=f"http://127.0.0.1:{port}/mcp")
+
+
 def test_env_is_added_to_the_server_environment(tmp_path):
     script = tmp_path / "env_server.py"
     script.write_text(
@@ -221,6 +228,34 @@ def test_connect_requires_exactly_one_of_command_or_url():
         mcp_servers.connect("nothing")
     with pytest.raises(ValueError, match="command 或 url"):
         mcp_servers.connect("both", command="python3", url="http://x/mcp")
+
+
+def test_from_config_accepts_type_copied_from_other_tools(
+    server_script, tmp_path
+):
+    # Claude Code 的 .mcp.json 會寫 type；整段貼進 harness.yaml 也要能用。
+    config = {
+        "type": "stdio",
+        "command": sys.executable,
+        "args": [str(server_script)],
+    }
+
+    with mcp_servers.from_config("demo", config, tmp_path) as connection:
+        assert _tool(connection, "add").name == "add"
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"type": "sse", "url": "http://x/sse"}, "SSE"),
+        ({"type": "websocket", "url": "ws://x"}, "type 不認得"),
+        ({"type": "http", "command": "python3"}, "需要設定 url"),
+        ({"type": "stdio", "url": "http://x/mcp"}, "需要設定 command"),
+    ],
+)
+def test_from_config_rejects_unusable_type(tmp_path, config, message):
+    with pytest.raises(ValueError, match=message):
+        mcp_servers.from_config("doc", config, tmp_path)
 
 
 def test_content_to_text_falls_back_to_structured_content():

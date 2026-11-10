@@ -42,6 +42,8 @@ from harness.skills import Skill
 from harness.tools import Tool
 from harness.tools import ToolError
 from harness.tools import tool
+from harness.vectorstore import SqliteVectorStore
+from harness.vectorstore import VectorStore
 
 __all__ = [
     "Agent",
@@ -59,11 +61,13 @@ __all__ = [
     "RunResult",
     "Session",
     "Skill",
+    "SqliteVectorStore",
     "Tool",
     "ToolCall",
     "ToolError",
     "ToolResult",
     "Usage",
+    "VectorStore",
     "allow",
     "compact",
     "connect_mcp_server",

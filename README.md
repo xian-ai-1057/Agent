@@ -1,4 +1,4 @@
-# Harness
+# Agent Harness
 
 把既有專案的功能包成工具，交給聊天 agent 使用的輕量框架。
 

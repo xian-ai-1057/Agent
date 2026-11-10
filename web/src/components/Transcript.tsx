@@ -76,8 +76,9 @@ function StepGroup({ steps }: { steps: Step[] }) {
 
   let label = `已執行 ${steps.length} 個步驟`;
   if (errors > 0) label += ` · ${errors} 個工具錯誤`;
-  if (active?.status === "waiting") label = `等你確認 ${active.name}`;
-  else if (active) label = `執行 ${active.name}…`;
+  const who = active?.agent ? `${active.agent}：` : "";
+  if (active?.status === "waiting") label = `${who}等你確認 ${active.name}`;
+  else if (active) label = `${who}執行 ${active.name}…`;
 
   return (
     <div className="anim-in">
@@ -123,6 +124,7 @@ function StepRow({ step }: { step: Step }) {
         <span className="step-icon">
           <StepIcon status={step.status} />
         </span>
+        {step.agent && <span className="step-agent">{step.agent}</span>}
         <span className="step-name">{step.name}</span>
         <span className="step-args">{args}</span>
         {step.status === "done" && step.result && (
@@ -154,6 +156,13 @@ function StepRow({ step }: { step: Step }) {
             </>
           )}
         </div>
+      )}
+      {step.children && (
+        <ol className="step-list substeps" aria-label="subagent 的步驟">
+          {step.children.map((child) => (
+            <StepRow key={child.id} step={child} />
+          ))}
+        </ol>
       )}
     </li>
   );

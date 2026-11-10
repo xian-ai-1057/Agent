@@ -115,6 +115,9 @@ class _FakeEndpoint(http.server.BaseHTTPRequestHandler):
         if self.path.endswith("/embeddings"):
             self._send_embeddings(body)
             return
+        if self.path.endswith("/rerank"):
+            self._send_rerank(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -148,6 +151,22 @@ class _FakeEndpoint(http.server.BaseHTTPRequestHandler):
             "model": body["model"],
             "usage": {"prompt_tokens": 1, "total_tokens": 1},
         }
+        data = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_rerank(self, body):
+        """依文件長度給分（越長越高），結果故意打亂順序。"""
+        results = [
+            {"index": index, "relevance_score": len(text) / 10}
+            for index, text in enumerate(body["documents"])
+        ]
+        self._send_json({"id": "r", "results": list(reversed(results))})
+
+    def _send_json(self, payload):
         data = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -223,3 +242,20 @@ async def test_embed_uses_endpoint_in_batches_and_keeps_order(
     ]
     assert endpoint.received[0]["body"]["input"] == ["a", "bb"]
     assert endpoint.received[0]["auth"] == "Bearer test-key"
+
+
+async def test_rerank_uses_proxy_endpoint_and_keeps_document_order(endpoint):
+    scores = await llm.rerank("my-reranker", "退貨", ["a", "bbb", "cc"])
+
+    assert scores == pytest.approx([0.1, 0.3, 0.2])
+    sent = endpoint.received[0]
+    # HARNESS_BASE_URL 結尾的 /v1 不會重複。
+    assert sent["path"] == "/v1/rerank"
+    assert sent["auth"] == "Bearer test-key"
+    assert sent["body"]["model"] == "my-reranker"
+    assert sent["body"]["query"] == "退貨"
+
+
+async def test_rerank_without_documents_skips_the_call(endpoint):
+    assert await llm.rerank("my-reranker", "退貨", []) == []
+    assert endpoint.received == []

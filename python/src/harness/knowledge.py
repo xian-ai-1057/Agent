@@ -5,9 +5,12 @@
     2. 依段落切成片段，記下來源檔案、所在標題或頁碼。
     3. 搜尋時用關鍵字比對（BM25，不需要任何模型）；有設定 embedding
        模型時再加上語意檢索，兩者的排名合併（hybrid search）。
-    4. 以 search_knowledge 工具提供給 agent，結果附上來源讓 agent 引用。
+    4. 有設定相似度門檻時，丟掉與問題不夠相似的片段。
+    5. 有設定 reranker 時，用它重新評估前幾名候選的相關度並重新排序。
+    6. 以 search_knowledge 工具提供給 agent，結果附上來源讓 agent 引用。
 
-檔案有變動時，下次搜尋會自動重建索引；embedding 依片段內容快取，
+檔案有變動時，下次搜尋會自動重建索引。embedding 存在向量資料庫裡
+（預設是內建的 SQLite 檔案，見 harness.vectorstore），以片段內容識別，
 沒變的片段不會重新計算。
 
 存取範圍用標籤控制：文件可以標上標籤（例如 hr、finance），有標籤的
@@ -37,17 +40,23 @@ import yaml
 from harness import datatypes
 from harness import llm
 from harness import tools as tools_lib
+from harness import vectorstore
 
 TEXT_SUFFIXES = (".md", ".markdown", ".txt")
 PDF_SUFFIX = ".pdf"
 LABELS_FILE = "labels.yaml"
 TOOL_NAME = "search_knowledge"
+VECTOR_FILE = "vectors.sqlite3"
+# 舊版把 embedding 存成 JSON 的檔名，讀到時搬進向量資料庫。
+LEGACY_CACHE_FILE = "embeddings.json"
 
 # BM25 的標準參數。
 _K1 = 1.5
 _B = 0.75
 # Reciprocal Rank Fusion 的平滑常數，常用值。
 _RRF_K = 60
+# 語意檢索至少取這麼多名參與排名合併。
+_VECTOR_POOL = 50
 
 _WORD = re.compile(
     r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
@@ -56,6 +65,7 @@ _WORD = re.compile(
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 
 EmbedFn = Callable[[list[str]], Awaitable[list[list[float]]]]
+RerankFn = Callable[[str, list[str]], Awaitable[list[float]]]
 LabelFilter = Callable[[datatypes.RunContext], list[str] | None]
 
 
@@ -89,11 +99,17 @@ class Hit:
 
     Attributes:
         chunk: 找到的片段。
-        score: 相關度，越大越相關；只用來排序，不同查詢之間不能比較。
+        score: 排序依據，越大越相關。有 reranker 時等於 rerank_score；
+            否則是排名合併的分數，只用來排序，不同查詢之間不能比較。
+        similarity: 與查詢的語意相似度（餘弦，-1 到 1）；沒有使用
+            embedding 或沒有計算時為 None。
+        rerank_score: reranker 給的相關度；沒有使用 reranker 時為 None。
     """
 
     chunk: Chunk
     score: float
+    similarity: float | None = None
+    rerank_score: float | None = None
 
 
 class Knowledge:
@@ -101,7 +117,10 @@ class Knowledge:
 
     Example:
         kb = Knowledge(
-            "knowledge", embedding_model="openai/text-embedding-3-small"
+            "knowledge",
+            embedding_model="openai/text-embedding-3-small",
+            reranker="cohere/rerank-v3.5",
+            min_similarity=0.3,
         )
         agent = harness.Agent(name="faq", tools=[kb.as_tool()])
 
@@ -110,7 +129,14 @@ class Knowledge:
         embedding_model: litellm 的 embedding 模型名稱，None 表示只用
             關鍵字檢索。
         chunk_size: 每個片段的目標字數。
-        cache_dir: 存放 embedding 快取的資料夾，None 表示不存檔。
+        cache_dir: 存放向量資料庫的資料夾，None 表示不存檔。
+        vector_store: 存放 embedding 的向量資料庫。
+        reranker: litellm 的 rerank 模型名稱，None 表示不重新排序。
+        rerank_candidates: 交給 reranker 重新排序的候選數。
+        min_similarity: 語意相似度門檻，低於它的片段不回傳；需要
+            embedding。
+        min_rerank_score: reranker 相關度門檻，低於它的片段不回傳；
+            需要 reranker。
         label_filter: 依執行環境決定可搜尋標籤的函式（例如依
             context.deps 裡的使用者部門）。回傳 None 表示不限制。
         warnings: 建立索引時略過的檔案與原因。
@@ -123,25 +149,54 @@ class Knowledge:
         embedding_model: str | None = None,
         chunk_size: int = 800,
         cache_dir: str | pathlib.Path | None = None,
+        vector_store: vectorstore.VectorStore | None = None,
+        reranker: str | None = None,
+        rerank_candidates: int = 20,
+        min_similarity: float | None = None,
+        min_rerank_score: float | None = None,
         label_filter: LabelFilter | None = None,
         embed_fn: EmbedFn | None = None,
+        rerank_fn: RerankFn | None = None,
     ) -> None:
         if chunk_size < 100:
             raise ValueError("chunk_size 至少要 100")
+        if rerank_candidates < 1:
+            raise ValueError("rerank_candidates 至少要 1")
+        if min_similarity is not None:
+            if not (embedding_model or embed_fn):
+                raise ValueError(
+                    "min_similarity 需要語意檢索，請同時設定 embedding_model"
+                )
+            if not -1 <= min_similarity <= 1:
+                raise ValueError("min_similarity 必須介於 -1 與 1 之間")
+        if min_rerank_score is not None and not (reranker or rerank_fn):
+            raise ValueError(
+                "min_rerank_score 需要 reranker，請同時設定 reranker"
+            )
         self.path = pathlib.Path(path) if path is not None else None
         self.embedding_model = embedding_model
         self.chunk_size = chunk_size
         self.cache_dir = pathlib.Path(cache_dir) if cache_dir else None
+        if vector_store is None:
+            location = self.cache_dir / VECTOR_FILE if self.cache_dir else None
+            vector_store = vectorstore.SqliteVectorStore(location)
+        self.vector_store = vector_store
+        self.reranker = reranker
+        self.rerank_candidates = rerank_candidates
+        self.min_similarity = min_similarity
+        self.min_rerank_score = min_rerank_score
         self.label_filter = label_filter
         self.warnings: list[str] = []
         self._embed_fn = embed_fn
+        self._rerank_fn = rerank_fn
         self._extra: list[Chunk] = []
         self._signature: tuple[Any, ...] | None = None
         self._chunks: list[Chunk] = []
         self._tokens: list[dict[str, int]] = []
         self._doc_freq: dict[str, int] = {}
         self._avg_length = 0.0
-        self._vectors: list[list[float]] = []
+        # 每個片段在向量資料庫裡的鍵；沒有使用 embedding 時是空的。
+        self._keys: list[str] = []
         self._locks: weakref.WeakKeyDictionary[Any, asyncio.Lock] = (
             weakref.WeakKeyDictionary()
         )
@@ -175,7 +230,8 @@ class Knowledge:
                 標籤與這裡有交集時才會被找到。
 
         Returns:
-            依相關度排序的結果。
+            依相關度排序的結果；有設定門檻時只包含達到門檻的片段，
+            可能少於 top_k 筆或是空的。
         """
         await self._ensure_index()
         allowed = None if labels is None else set(labels)
@@ -186,17 +242,55 @@ class Knowledge:
             or not chunk.labels
             or allowed.intersection(chunk.labels)
         ]
-        if not visible or not query.strip():
+        if not visible or not query.strip() or top_k < 1:
             return []
+        reranking = bool(self.reranker or self._rerank_fn)
+        pool = max(top_k, self.rerank_candidates if reranking else top_k)
+
         rankings = [self._keyword_ranking(query, visible)]
-        if self._vectors:
-            rankings.append(await self._vector_ranking(query, visible))
+        similarity: dict[int, float] = {}
+        query_vector: list[float] | None = None
+        if self._keys:
+            [query_vector] = await self._embed([query])
+            similarity = await self._similarities(
+                query_vector, visible, max(_VECTOR_POOL, pool * 2)
+            )
+            rankings.append(
+                sorted(similarity, key=lambda i: similarity[i], reverse=True)
+            )
         fused: dict[int, float] = {}
         for ranking in rankings:
             for rank, index in enumerate(ranking):
                 fused[index] = fused.get(index, 0.0) + 1 / (_RRF_K + rank + 1)
-        best = sorted(fused, key=lambda index: fused[index], reverse=True)
-        return [Hit(self._chunks[i], fused[i]) for i in best[:top_k]]
+        order = sorted(fused, key=lambda index: fused[index], reverse=True)
+
+        selected: list[int] = []
+        for start in range(0, len(order), pool):
+            batch = order[start : start + pool]
+            if self.min_similarity is not None and query_vector is not None:
+                unknown = [index for index in batch if index not in similarity]
+                if unknown:
+                    similarity.update(
+                        await self._similarities(
+                            query_vector, unknown, len(unknown)
+                        )
+                    )
+                batch = [
+                    index
+                    for index in batch
+                    if similarity.get(index, -1.0) >= self.min_similarity
+                ]
+            selected += batch
+            if len(selected) >= pool:
+                break
+
+        hits = [
+            Hit(self._chunks[index], fused[index], similarity.get(index))
+            for index in selected[:pool]
+        ]
+        if reranking and hits:
+            hits = await self._rerank(query, hits)
+        return hits[:top_k]
 
     def as_tool(
         self, labels: list[str] | None = None, top_k: int = 5
@@ -235,13 +329,17 @@ class Knowledge:
         """建立索引並回傳概況，方便確認文件有沒有被讀到。
 
         Returns:
-            檔案數、片段數、是否使用 embedding 與略過的檔案。
+            檔案數、片段數、是否使用 embedding 與 reranker、門檻設定與
+            略過的檔案。
         """
         await self._ensure_index()
         return {
             "sources": len({chunk.source for chunk in self._chunks}),
             "chunks": len(self._chunks),
-            "embedding": bool(self._vectors),
+            "embedding": bool(self._keys),
+            "reranker": bool(self.reranker or self._rerank_fn),
+            "min_similarity": self.min_similarity,
+            "min_rerank_score": self.min_rerank_score,
             "warnings": list(self.warnings),
         }
 
@@ -264,11 +362,12 @@ class Knowledge:
             self.warnings = []
             chunks = [*self._read_folder(), *self._extra]
             self._build_keyword_index(chunks)
-            self._vectors = []
+            keys: list[str] = []
             if self.embedding_model or self._embed_fn:
-                self._vectors = await self._embed_cached(
-                    [chunk.text for chunk in chunks]
-                )
+                model = self.embedding_model or ""
+                keys = [_cache_key(model, chunk.text) for chunk in chunks]
+                await self._store_vectors(keys, chunks)
+            self._keys = keys
             self._chunks = chunks
             self._signature = signature
 
@@ -395,16 +494,38 @@ class Knowledge:
                 scores[index] = score
         return sorted(scores, key=lambda index: scores[index], reverse=True)
 
-    async def _vector_ranking(
-        self, query: str, visible: list[int]
-    ) -> list[int]:
-        """用 embedding 的餘弦相似度排序。"""
-        [query_vector] = await self._embed([query])
-        scores = {
-            index: _cosine(query_vector, self._vectors[index])
-            for index in visible
+    async def _similarities(
+        self, query_vector: list[float], indices: list[int], limit: int
+    ) -> dict[int, float]:
+        """向向量資料庫查詢這些片段與查詢的相似度，只回傳前 limit 名。"""
+        by_key: dict[str, list[int]] = {}
+        for index in indices:
+            by_key.setdefault(self._keys[index], []).append(index)
+        pairs = await self.vector_store.search(query_vector, by_key, limit)
+        return {
+            index: score
+            for key, score in pairs
+            for index in by_key.get(key, [])
         }
-        return sorted(scores, key=lambda index: scores[index], reverse=True)
+
+    async def _rerank(self, query: str, hits: list[Hit]) -> list[Hit]:
+        """用 reranker 重新評估候選，依相關度排序並套用門檻。"""
+        documents = [f"{hit.chunk.citation}\n{hit.chunk.text}" for hit in hits]
+        if self._rerank_fn is not None:
+            scores = await self._rerank_fn(query, documents)
+        else:
+            scores = await llm.rerank(self.reranker or "", query, documents)
+        if len(scores) != len(hits):
+            raise ValueError(
+                f"reranker 回傳了 {len(scores)} 個分數，應該是 {len(hits)} 個"
+            )
+        for hit, score in zip(hits, scores, strict=True):
+            hit.rerank_score = float(score)
+            hit.score = float(score)
+        hits.sort(key=lambda hit: hit.score, reverse=True)
+        if self.min_rerank_score is None:
+            return hits
+        return [hit for hit in hits if hit.score >= self.min_rerank_score]
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """呼叫 embedding 模型（或測試時注入的函式）。"""
@@ -412,38 +533,40 @@ class Knowledge:
             return await self._embed_fn(texts)
         return await llm.embed(self.embedding_model, texts)
 
-    async def _embed_cached(self, texts: list[str]) -> list[list[float]]:
-        """計算片段的 embedding，內容沒變的片段使用快取。"""
-        cache = self._load_cache()
-        keys = [_cache_key(self.embedding_model or "", text) for text in texts]
-        missing = sorted({key for key in keys if key not in cache})
+    async def _store_vectors(
+        self, keys: list[str], chunks: list[Chunk]
+    ) -> None:
+        """把片段的 embedding 存進向量資料庫，已經有的不重新計算。"""
+        by_key = dict(zip(keys, (chunk.text for chunk in chunks), strict=True))
+        await self._import_legacy_cache(by_key)
+        missing = sorted(await self.vector_store.missing(by_key))
         if missing:
-            by_key = dict(zip(keys, texts, strict=True))
             vectors = await self._embed([by_key[key] for key in missing])
-            cache.update(zip(missing, vectors, strict=True))
-            self._save_cache({key: cache[key] for key in set(keys)})
-        return [cache[key] for key in keys]
+            if len(vectors) != len(missing):
+                raise ValueError(
+                    f"embedding 模型回傳了 {len(vectors)} 個向量，"
+                    f"應該是 {len(missing)} 個"
+                )
+            await self.vector_store.add(
+                dict(zip(missing, vectors, strict=True))
+            )
+        await self.vector_store.retain(by_key)
 
-    def _cache_path(self) -> pathlib.Path | None:
+    async def _import_legacy_cache(self, wanted: dict[str, str]) -> None:
+        """把舊版存成 JSON 的 embedding 搬進向量資料庫，再刪除 JSON 檔。"""
         if self.cache_dir is None:
-            return None
-        return self.cache_dir / "embeddings.json"
-
-    def _load_cache(self) -> dict[str, list[float]]:
-        path = self._cache_path()
-        if path is None or not path.exists():
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
-
-    def _save_cache(self, cache: dict[str, list[float]]) -> None:
-        path = self._cache_path()
-        if path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cache), encoding="utf-8")
+        path = self.cache_dir / LEGACY_CACHE_FILE
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if isinstance(data, dict):
+            vectors = {key: data[key] for key in wanted if key in data}
+            await self.vector_store.add(vectors)
+        path.unlink(missing_ok=True)
 
 
 def tokenize(text: str) -> list[str]:
@@ -530,22 +653,36 @@ def split_text(
     return chunks
 
 
-def format_hits(hits: list[Hit]) -> str:
+def format_hits(hits: list[Hit], show_scores: bool = False) -> str:
     """把搜尋結果轉成給模型看的文字。
 
     Args:
         hits: 搜尋結果。
+        show_scores: 是否在出處後面附上相似度與 rerank 分數（給人調整
+            門檻時參考，不給模型看）。
 
     Returns:
         每筆結果附上編號與出處的文字。
     """
     if not hits:
         return "知識庫裡沒有找到相關的內容。"
-    parts = [
-        f"[{number}] 來源：{hit.chunk.citation}\n{hit.chunk.text}"
-        for number, hit in enumerate(hits, start=1)
-    ]
+    parts = []
+    for number, hit in enumerate(hits, start=1):
+        header = f"[{number}] 來源：{hit.chunk.citation}"
+        if show_scores:
+            header += _describe_scores(hit)
+        parts.append(f"{header}\n{hit.chunk.text}")
     return "\n\n---\n\n".join(parts)
+
+
+def _describe_scores(hit: Hit) -> str:
+    """例如「（相似度 0.82、rerank 0.91）」；沒有分數時是空字串。"""
+    scores = []
+    if hit.similarity is not None:
+        scores.append(f"相似度 {hit.similarity:.3f}")
+    if hit.rerank_score is not None:
+        scores.append(f"rerank {hit.rerank_score:.3f}")
+    return f"（{'、'.join(scores)}）" if scores else ""
 
 
 def _hard_split(block: str, size: int) -> list[str]:
@@ -608,12 +745,3 @@ def _combine_labels(
 def _cache_key(model: str, text: str) -> str:
     """embedding 快取的鍵：模型名稱加內容的雜湊。"""
     return hashlib.sha256(f"{model}\n{text}".encode()).hexdigest()
-
-
-def _cosine(left: list[float], right: list[float]) -> float:
-    """兩個向量的餘弦相似度。"""
-    dot = sum(a * b for a, b in zip(left, right, strict=False))
-    norm = math.sqrt(sum(a * a for a in left)) * math.sqrt(
-        sum(b * b for b in right)
-    )
-    return dot / norm if norm else 0.0
