@@ -9,6 +9,8 @@ description = "把既有 Python 專案的功能包成工具，交給聊天 agent
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    # 網頁版（pyharness web）的伺服器；litellm 本身也需要它。
+    "aiohttp>=3.9",
     "litellm>=1.60",
     "pydantic>=2.6",
     "pyyaml>=6.0",

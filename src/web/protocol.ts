@@ -50,8 +50,10 @@ export interface SessionSummary {
   error?: string;
   /** 最近一輪裡回報錯誤的工具呼叫數。 */
   toolErrors: number;
-  /** 最近一輪正常結束的原因（end_turn、max_turns…）。 */
+  /** 最近一輪正常結束的原因（end_turn、max_turns、blocked…）。 */
   stopReason?: string;
+  /** 被防護規則擋下時的說明（Python 版；擋下的內容不會存進紀錄）。 */
+  notice?: string;
   /** 正在等使用者決定的工具呼叫，讓列表可以直接允許或拒絕。 */
   approval?: Approval;
 }
@@ -129,6 +131,8 @@ export interface PermissionSettings {
 export interface ProjectInfo {
   name: string;
   root: string;
+  /** 伺服器是哪個版本，沒有時視為 typescript。 */
+  runtime?: "typescript" | "python";
   defaultAgent: string;
   agents: AgentInfo[];
   toolsets: ToolsetInfo[];
@@ -136,7 +140,15 @@ export interface ProjectInfo {
   model: {
     /** harness.yaml 裡的值，沒寫時為 null。 */
     config: { model: string | null; maxTurns: number | null };
-    env: { model: string | null; baseURL: string | null; apiKeySet: boolean };
+    env: {
+      model: string | null;
+      baseURL: string | null;
+      apiKeySet: boolean;
+      /** 有設定的 *_API_KEY 環境變數名稱（Python 版直接連供應商時用）。 */
+      keyVars?: string[];
+      /** 都沒設定模型時使用的預設模型（Python 版）。 */
+      fallbackModel?: string;
+    };
   };
 }
 
@@ -170,4 +182,6 @@ export type ServerEvent =
   | { type: "run_end"; sessionId: string; stopReason: string }
   | { type: "run_error"; sessionId: string; message: string }
   | { type: "run_stopped"; sessionId: string }
+  /** 對話紀錄被改寫（例如 Python 版壓縮對話），要重新讀取。 */
+  | { type: "session_reload"; sessionId: string }
   | { type: "project" };

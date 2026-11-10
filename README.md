@@ -19,6 +19,7 @@
 | 可以嵌進 | Node.js 服務 | Python 服務（FastAPI、Streamlit…） |
 | 模型 | 任何 OpenAI 相容端點 | litellm（直接連供應商或連端點） |
 | 連接 MCP 伺服器 | 支援 | [支援](python/README.md#連接-mcp-伺服器) |
+| 網頁版 | `harness web` | [`pyharness web`](python/README.md#網頁版) |
 | Subagents 與 handoffs | 尚未支援 | [支援](python/README.md#多個-agent-協作) |
 | 知識庫（RAG） | 尚未支援 | [支援](python/README.md#知識庫rag) |
 | Skills | 尚未支援 | [支援](python/README.md#skills) |
@@ -481,7 +482,8 @@ harness web                 # 開啟 http://127.0.0.1:4321
 harness web --port 8080     # 換埠號
 ```
 
-網頁版和 `harness chat` 用同一個專案、同一份對話紀錄，功能有：
+網頁版和 `harness chat` 用同一個專案、同一份對話紀錄。Python 版的
+`pyharness web` 用同一份前端與同一套 API，兩邊的網頁完全一樣。功能有：
 
 - **對話**：回覆即時串流；工具呼叫收成「已執行 N 個步驟」，點開看
   參數與結果。工具回報的錯誤會標出來，agent 自己修正後繼續。
@@ -500,9 +502,14 @@ harness web --port 8080     # 換埠號
 送來的請求。要讓別台電腦連線時，用 `--host 0.0.0.0` 並自行加上防火牆
 或反向代理的保護。
 
-修改網頁時，先在專案資料夾執行 `harness web`，再在這個 repo 執行
-`npm run dev:web`，Vite 會把 `/api` 轉給 harness web。原始碼在 `web/`，
-`npm run build` 會打包到 `dist/public`。
+修改網頁時，先在專案資料夾執行 `harness web`（或 `pyharness web`），
+再在這個 repo 執行 `npm run dev:web`，Vite 會把 `/api` 轉給它。原始碼
+在 `web/`，前後端之間的資料格式定義在 `src/web/protocol.ts`，Python 版
+的 `python/src/harness/web/` 要回傳一樣的格式。
+
+`npm run build` 會把前端打包到 `dist/public`，並複製一份到
+`python/src/harness/web/static`。Python 版用 pip 從 git 安裝時沒有
+Node.js 可以打包，所以這份打包結果要一起提交。
 
 ## 移轉既有專案
 
@@ -529,5 +536,5 @@ harness web --port 8080     # 換埠號
 - 跨對話的長期記憶
 - 對話過長時的自動壓縮
 - Slack / Telegram 等訊息平台的接口
-- 網頁版目前只有 TypeScript 版有；網頁上的對話在伺服器重新啟動後
-  可以繼續看與接著問，但「工作中」只列出這次啟動後跑過的對話
+- 網頁上的對話在伺服器重新啟動後可以繼續看與接著問，但「工作中」只
+  列出這次啟動後跑過的對話

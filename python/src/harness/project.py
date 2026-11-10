@@ -70,6 +70,8 @@ class Project:
         compaction: 對話壓縮的設定，預設開啟；harness.yaml 寫
             compaction: false 時為 None。
         mcp_connections: 依 mcpServers 建立的 MCP 連線。
+        toolsets: 每個 toolset（含內建的 files）包含哪些工具，以 toolset
+            名稱為鍵。
     """
 
     name: str
@@ -87,6 +89,9 @@ class Project:
     compaction: compaction_lib.Compaction | None = None
     mcp_connections: list[mcp_servers.McpConnection] = dataclasses.field(
         default_factory=list
+    )
+    toolsets: dict[str, list[tools_lib.Tool]] = dataclasses.field(
+        default_factory=dict
     )
 
     def __enter__(self) -> "Project":
@@ -189,6 +194,7 @@ def _assemble(
         hooks=_load_guardrails(config.get("guardrails") or {}),
         compaction=_load_compaction(config.get("compaction")),
         mcp_connections=connections,
+        toolsets=toolsets,
     )
 
 

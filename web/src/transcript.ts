@@ -32,6 +32,7 @@ export interface Step {
 
 export type Block =
   | { kind: "text"; key: string; text: string; streaming: boolean }
+  | { kind: "notice"; key: string; text: string }
   | { kind: "steps"; key: string; steps: Step[] };
 
 export interface Turn {
@@ -60,6 +61,7 @@ export interface FileChange {
 }
 
 const ERROR_PREFIX = "[錯誤] ";
+const COMPACTED = "對話已壓縮：較早的內容濃縮成摘要，agent 之後看到的是摘要。";
 const DENIED_MARK = "使用者沒有同意";
 
 export function buildTurns(
@@ -82,6 +84,18 @@ export function buildTurns(
   };
 
   detail.messages.forEach((message, index) => {
+    // Python 版會在紀錄裡寫入自己的紀錄（壓縮、修剪），role 是 harness。
+    const role: string = message.role;
+    if (role === "harness") {
+      if ((message as { type?: string }).type === "compaction") {
+        current().blocks.push({
+          kind: "notice",
+          key: `c${index}`,
+          text: COMPACTED,
+        });
+      }
+      return;
+    }
     if (message.role === "user") {
       turn = {
         key: `t${index}`,

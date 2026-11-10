@@ -304,3 +304,27 @@ def test_run_sync_works_without_event_loop(fake_model):
 def test_agent_rejects_duplicate_tool_names(add_tool):
     with pytest.raises(ValueError, match="重複"):
         harness.Agent(name="a", tools=[add_tool, add_tool])
+
+
+async def test_run_with_none_continues_from_last_user_message(fake_model):
+    agent = harness.Agent(name="a")
+    session = harness.Session(messages=[{"role": "user", "content": "嗨"}])
+    model = fake_model([conftest.text_response("你好")])
+
+    await harness.run(agent, None, session=session, model_fn=model)
+
+    assert model.requests[0]["messages"] == [{"role": "user", "content": "嗨"}]
+    assert [m["role"] for m in session.messages] == ["user", "assistant"]
+
+
+async def test_run_with_none_after_reply_raises(fake_model):
+    agent = harness.Agent(name="a")
+    session = harness.Session(
+        messages=[
+            {"role": "user", "content": "嗨"},
+            {"role": "assistant", "content": "你好"},
+        ]
+    )
+
+    with pytest.raises(ValueError, match="沒有可以接續"):
+        await harness.run(agent, None, session=session, model_fn=fake_model([]))

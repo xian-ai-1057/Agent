@@ -5,6 +5,7 @@ pyharness chat                在目前專案開始聊天
 pyharness run "<訊息>"        執行一次後結束
 pyharness memory              查看、刪除或清空長期記憶
 pyharness knowledge [查詢]    檢查知識庫的索引，或試著搜尋
+pyharness web                 開啟網頁版
 
 指令名稱是 pyharness，避免和 TypeScript 版的 harness 指令衝突；也可以
 用 `python -m harness` 執行。
@@ -43,7 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "new":
         return _command_new(args)
-    commands = {"memory": _command_memory, "knowledge": _command_knowledge}
+    commands = {
+        "memory": _command_memory,
+        "knowledge": _command_knowledge,
+        "web": _command_web,
+    }
     try:
         # with 確保專案啟動的 MCP 伺服器在結束時關閉。
         with project_lib.load_project(args.project) as loaded:
@@ -89,6 +94,15 @@ def _build_parser() -> argparse.ArgumentParser:
     forget = actions.add_parser("forget", help="刪除一則記憶")
     forget.add_argument("memory_id", help="記憶的識別碼")
     actions.add_parser("clear", help="刪除所有記憶")
+
+    web = commands.add_parser("web", help="開啟網頁版")
+    web.add_argument("-p", "--project", default=".", help="專案資料夾")
+    web.add_argument("--port", type=int, default=4321, help="埠號（預設 4321）")
+    web.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="要聽的位址（預設 127.0.0.1，只有本機能連）",
+    )
 
     knowledge = commands.add_parser("knowledge", help="檢查知識庫")
     knowledge.add_argument("-p", "--project", default=".", help="專案資料夾")
@@ -138,6 +152,28 @@ def _command_memory(
         print("目前沒有任何記憶。")
     for item in items:
         print(f"[{item.id}] {item.content}（{item.created_at}）")
+    return 0
+
+
+def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
+    """啟動網頁版，直到使用者按 Ctrl-C。"""
+    # aiohttp 只有網頁版用得到，延後到這裡才載入。
+    from harness import web
+
+    def ready(url: str) -> None:
+        print(f"{loaded.name} 的網頁版已啟動：{url}")
+        print("按 Ctrl-C 結束。")
+
+    try:
+        asyncio.run(
+            web.serve(loaded, host=args.host, port=args.port, on_ready=ready)
+        )
+    except KeyboardInterrupt:
+        print()
+    except OSError as error:
+        raise RuntimeError(
+            f"無法在 {args.host}:{args.port} 啟動：{error}"
+        ) from error
     return 0
 
 
