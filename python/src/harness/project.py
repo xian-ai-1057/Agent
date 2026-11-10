@@ -7,6 +7,9 @@
     ├── agents/*.md     一個檔案一個 agent：frontmatter 是設定，內文是指示
     └── tools/*.py      用 @tool 包裝的函式，檔名就是 toolset 名稱
 
+agent 的 frontmatter 可以用 subagents 與 handoffs 列出其他 agent 的名稱，
+讓它把工作交出去或把對話轉交出去（見 delegation 模組）。
+
 harness.yaml 裡的 mcpServers 是給 TypeScript 版用的，這裡不會啟動；
 被它當成伺服器執行的 tools/*.py 也不會被當成工具模組載入。
 """
@@ -88,13 +91,16 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
 
     shared = _read_optional(root / "AGENTS.md")
     loaded = {}
+    metas = {}
     for agent_path in sorted((root / "agents").glob("*.md")):
-        agent = _load_agent(
+        agent, meta = _load_agent(
             agent_path, config, shared, toolsets, project_tools, servers
         )
         loaded[agent.name] = agent
+        metas[agent.name] = meta
     if not loaded:
         raise ValueError(f"{root / 'agents'} 裡沒有任何 agent（*.md）")
+    _link_agents(loaded, metas)
 
     default_agent = config.get("defaultAgent") or next(iter(loaded))
     if default_agent not in loaded:
@@ -211,8 +217,8 @@ def _load_agent(
     toolsets: dict[str, list[tools_lib.Tool]],
     project_tools: dict[str, tools_lib.Tool],
     servers: dict[str, Any],
-) -> agents.Agent:
-    """讀取一個 agent 的 Markdown 檔。"""
+) -> tuple[agents.Agent, dict[str, Any]]:
+    """讀取一個 agent 的 Markdown 檔，回傳 agent 與它開頭的設定。"""
     meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
     # 沒寫 tools 欄位時，預設可以使用專案裡所有的工具。
     if "tools" in meta:
@@ -222,7 +228,7 @@ def _load_agent(
     else:
         agent_tools = list(project_tools.values())
     instructions = "\n\n".join(part for part in (body, shared) if part)
-    return agents.Agent(
+    agent = agents.Agent(
         name=meta.get("name") or path.stem,
         instructions=instructions,
         tools=agent_tools,
@@ -231,6 +237,29 @@ def _load_agent(
         max_turns=meta.get("maxTurns") or config.get("maxTurns") or 20,
         description=meta.get("description") or "",
     )
+    return agent, meta
+
+
+def _link_agents(
+    loaded: dict[str, agents.Agent], metas: dict[str, dict[str, Any]]
+) -> None:
+    """把各 agent 設定裡的 subagents / handoffs 名稱換成實際的 agent。
+
+    要等所有 agent 都讀完才能做，因為 agent 之間可以互相引用。
+    """
+    for name, meta in metas.items():
+        for field in ("subagents", "handoffs"):
+            targets = []
+            for target in meta.get(field) or []:
+                if target not in loaded:
+                    raise ValueError(
+                        f"agent {name} 的 {field} 引用不存在的 agent："
+                        f"{target}，可用的有：{sorted(loaded)}"
+                    )
+                if field == "handoffs" and target == name:
+                    raise ValueError(f"agent {name} 不能把對話轉交給自己")
+                targets.append(loaded[target])
+            setattr(loaded[name], field, targets)
 
 
 def _check_server_only(

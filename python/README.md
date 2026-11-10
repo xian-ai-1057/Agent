@@ -14,6 +14,8 @@ Python 版的特點：
   `import harness`。
 - **模型透過 litellm 連接**，Claude、OpenAI、Gemini、Hermes、Ollama 上
   的本地模型都能用。
+- **多個 agent 可以協作。** 把工作交給 subagent，或把整段對話轉交
+  （handoff）給另一個 agent。
 
 ## 安裝
 
@@ -218,7 +220,7 @@ async for event in harness.run_stream(agent, "給我十月的報告"):
 ```
 
 事件種類：`text_delta`、`message`、`tool_call`、`tool_result`、
-`run_end`。
+`handoff`、`run_end`。
 
 ### 嵌進既有的網頁服務
 
@@ -249,6 +251,92 @@ async def handle_chat(user_id: str, session_id: str | None, text: str):
 網頁服務沒辦法在終端機詢問使用者，所以這裡用 `dontAsk`：需要同意的
 工具會被拒絕。要讓網頁使用者可以按「同意」，就提供自己的
 `Permissions(approver=...)`，在裡面等待前端的回應。
+
+## 多個 agent 協作
+
+一個 agent 可以找其他 agent 幫忙。有兩種方式，差別在於對話歸誰：
+
+| | Subagent | Handoff |
+|---|---|---|
+| 做什麼 | 把一件工作交出去，拿回結果 | 把整段對話交出去 |
+| 對方看得到目前的對話嗎 | 看不到，只收到交辦的內容 | 看得到全部 |
+| 誰回答使用者 | 原本的 agent | 接手的 agent |
+| 使用者的下一則訊息 | 仍由原本的 agent 處理 | 由接手的 agent 處理 |
+| 適合 | 查資料、讀長文件這類會佔用大量 context 的工作 | 不同職責的窗口，例如總機轉給帳務 |
+
+在 agent 檔案的開頭列出對方的名稱（`agents/` 底下其他 agent 的 `name`）：
+
+```markdown
+---
+name: billing
+description: 處理帳單與退款
+subagents: [researcher]     # 可以把工作交給 researcher
+handoffs: [main]            # 可以把對話轉交回 main
+---
+你是帳務專員。需要查訂單時交給 researcher。
+```
+
+或在 Python 裡設定：
+
+```python
+researcher = harness.Agent(
+    name="researcher",
+    description="查詢訂單資料",
+    instructions="你是研究員。",
+    tools=[find_order],
+)
+billing = harness.Agent(
+    name="billing",
+    description="處理帳單與退款",
+    instructions="你是帳務專員。需要查訂單時交給 researcher。",
+    subagents=[researcher],
+)
+front = harness.Agent(
+    name="front",
+    instructions="你是總機。帳單與退款的問題轉交給 billing。",
+    handoffs=[billing],
+)
+billing.handoffs.append(front)  # 讓帳務可以把對話交回總機
+
+session = sessions.create("data/sessions")
+result = await harness.run(front, "我要退訂單 123", session=session)
+print(result.agent_name)  # billing
+
+# 下一則訊息仍然傳入 front，會自動由 billing 接續
+result = await harness.run(front, "謝謝", session=session)
+```
+
+共同的規則：
+
+- **`description` 很重要。** 模型靠對方的 `description` 決定要不要找它，
+  沒寫的話模型只看得到名稱。
+- 兩者都是以工具的形式提供給模型，名稱分別是 `ask_<名稱>` 與
+  `transfer_to_<名稱>`，所以權限規則與 hooks 都管得到。例如轉交前先問
+  使用者：`permissions.ask: ["transfer_to_*"]`。
+- 名稱裡不是英數、底線、連字號的字元（例如中文）會換成底線，所以
+  agent 名稱建議用英文。
+
+Subagent 的細節：
+
+- 使用它自己的指示、工具、模型與 `max_turns`；hooks、權限設定與 `deps`
+  沿用上一層的。
+- 它的 token 用量會算進 `RunResult.usage`。
+- 它的對話不會存檔，主 agent 的對話紀錄裡只有交辦內容與它的最後回覆。
+- `run_start` / `run_end` 這兩個 hook 不會為 subagent 觸發（它屬於一次
+  工具呼叫）；它內部的工具呼叫照常觸發 `pre_tool_use` / `post_tool_use`，
+  `context.agent_name` 是 subagent 的名稱。
+- subagent 可以再有自己的 subagent，最多 3 層。
+- 它在輪數上限內沒做完時，主 agent 會收到錯誤說明與它最後的回覆。
+
+Handoff 的細節：
+
+- **每次都傳入同一個起始 agent 即可。** 目前由誰負責是從對話紀錄推算
+  的，所以延續 session 時會自動由接手的 agent 繼續。
+- `RunResult.agent_name` 是結束時負責對話的 agent；串流時會收到
+  `handoff` 事件（`{"from": ..., "to": ...}`）。
+- 要讓對方能把對話交回來，在對方的 `handoffs` 也列出原本的 agent。
+- 一輪裡只有第一次轉交會生效。
+- 命令列的 `-m` 會套用到專案裡所有的 agent。
 
 ## 權限
 
@@ -359,12 +447,14 @@ chat 與 run 共用的選項：
   TypeScript 版會使用。Python 版改從 `tools/*.py` 直接載入工具，被
   `mcpServers` 當成伺服器執行的檔案會自動略過。
 - **不會載入 `tools/*.ts`。**
+- **Subagents 與 handoffs 只有 Python 版支援。** TypeScript 版會忽略
+  agent 檔案裡的 `subagents` 與 `handoffs` 欄位。
 - 對話紀錄的格式相同，同一個專案的對話可以用任一個版本接續。
 
 ## 目前還沒有的功能
 
 - 連接 MCP 工具伺服器
-- Subagents 與 handoffs（agent 之間互相呼叫或轉交）
+- 串流時顯示 subagent 內部的進度（目前只看得到交辦與結果）
 - Skills（需要時才載入的說明文件）
 - 跨對話的長期記憶
 - 對話過長時的自動壓縮

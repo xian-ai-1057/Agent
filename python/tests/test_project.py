@@ -170,6 +170,56 @@ class TestLoadProject:
             harness.load_project(project_dir)
 
 
+class TestAgentLinks:
+    """agent 檔案裡的 subagents 與 handoffs。"""
+
+    def test_load_project_links_subagents_and_handoffs(self, project_dir):
+        _write_agent(project_dir, "researcher", "description: 查資料")
+        _write_agent(project_dir, "billing", "description: 帳務")
+        _write_agent(
+            project_dir,
+            "front",
+            "subagents: [researcher]\nhandoffs: [billing]",
+        )
+
+        loaded = harness.load_project(project_dir).agents
+
+        assert loaded["front"].subagents == [loaded["researcher"]]
+        assert loaded["front"].handoffs == [loaded["billing"]]
+        assert loaded["billing"].handoffs == []
+
+    def test_load_project_allows_agents_to_hand_off_to_each_other(
+        self, project_dir
+    ):
+        _write_agent(project_dir, "front", "handoffs: [billing]")
+        _write_agent(project_dir, "billing", "handoffs: [front]")
+
+        loaded = harness.load_project(project_dir).agents
+
+        assert loaded["front"].handoffs[0].handoffs[0] is loaded["front"]
+
+    @pytest.mark.parametrize("field", ["subagents", "handoffs"])
+    def test_load_project_raises_on_unknown_linked_agent(
+        self, project_dir, field
+    ):
+        _write_agent(project_dir, "front", f"{field}: [ghost]")
+
+        with pytest.raises(ValueError, match=f"{field} 引用不存在的 agent"):
+            harness.load_project(project_dir)
+
+    def test_load_project_raises_on_handoff_to_self(self, project_dir):
+        _write_agent(project_dir, "front", "handoffs: [front]")
+
+        with pytest.raises(ValueError, match="不能把對話轉交給自己"):
+            harness.load_project(project_dir)
+
+    def test_scaffolded_agent_has_no_links(self, project_dir):
+        main = harness.load_project(project_dir).agents["main"]
+
+        assert main.subagents == []
+        assert main.handoffs == []
+
+
 class TestParseFrontmatter:
     """Markdown frontmatter 的解析。"""
 

@@ -157,3 +157,69 @@ def test_chat_exits_cleanly_on_end_of_input(
     monkeypatch.setattr("builtins.input", raise_eof)
 
     assert cli.main(["chat", "-p", str(project_dir)]) == 0
+
+
+@pytest.fixture
+def support_project(project_dir):
+    """有總機與帳務兩個 agent、可以互相轉交的專案。"""
+    agents_dir = project_dir / "agents"
+    (agents_dir / "main.md").write_text(
+        "---\nhandoffs: [billing]\ntools: []\n---\n你是總機\n",
+        encoding="utf-8",
+    )
+    (agents_dir / "billing.md").write_text(
+        "---\ndescription: 處理退款\ntools: []\n---\n你是帳務專員\n",
+        encoding="utf-8",
+    )
+    return project_dir
+
+
+def test_run_shows_handoff(support_project, scripted_model, capsys):
+    scripted_model(
+        [
+            conftest.tool_response(("transfer_to_billing", {})),
+            conftest.text_response("我是帳務"),
+        ]
+    )
+
+    cli.main(["run", "-p", str(support_project), "我要退款"])
+
+    output = capsys.readouterr().out
+    assert "→ 對話轉交給 billing" in output
+    assert "我是帳務" in output
+
+
+def test_continue_resumes_with_agent_that_took_over(
+    support_project, scripted_model
+):
+    scripted_model(
+        [
+            conftest.tool_response(("transfer_to_billing", {})),
+            conftest.text_response("我是帳務"),
+        ]
+    )
+    cli.main(["run", "-p", str(support_project), "我要退款"])
+    model = scripted_model([conftest.text_response("已退款")])
+
+    cli.main(["run", "-p", str(support_project), "-c", "訂單 123"])
+
+    system = model.requests[0]["messages"][0]["content"]
+    assert system.startswith("你是帳務專員")
+
+
+def test_model_flag_applies_to_agent_that_takes_over(
+    support_project, scripted_model
+):
+    model = scripted_model(
+        [
+            conftest.tool_response(("transfer_to_billing", {})),
+            conftest.text_response("我是帳務"),
+        ]
+    )
+
+    cli.main(["run", "-p", str(support_project), "-m", "x/override", "退款"])
+
+    assert [request["model"] for request in model.requests] == [
+        "x/override",
+        "x/override",
+    ]

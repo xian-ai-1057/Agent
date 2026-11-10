@@ -37,6 +37,9 @@ description: 專案的主要助手
 # 工具名稱；整個欄位不寫的話，可以使用 tools/ 底下所有的工具。
 tools:
   - example
+# 多個 agent 協作時（名稱是 agents/ 底下其他 agent 的 name）：
+# subagents: [researcher]   # 把工作交給它，它做完只回傳結果
+# handoffs: [billing]       # 把整段對話轉交給它，由它直接回覆使用者
 ---
 你是 {name} 的助手。用使用者的語言回答，需要資料時就呼叫工具，不要
 自己編造工具才能取得的內容。

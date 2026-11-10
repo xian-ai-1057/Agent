@@ -93,6 +93,7 @@ class Event:
         message:     {"message": Message}
         tool_call:   {"call": ToolCall}
         tool_result: {"result": ToolResult}
+        handoff:     {"from": str, "to": str}（agent 名稱）
         run_end:     {"result": RunResult}
 
     Attributes:
@@ -114,6 +115,8 @@ class RunResult:
         usage: 這次 run 累計的 token 用量。
         turns: 呼叫模型的次數。
         stop_reason: end_turn、max_turns、max_tokens 或模型回報的其他原因。
+        agent_name: 結束時負責對話的 agent（發生 handoff 時會和起始的
+            agent 不同）。
     """
 
     output: str
@@ -121,6 +124,7 @@ class RunResult:
     usage: Usage
     turns: int
     stop_reason: str
+    agent_name: str = ""
 
 
 @dataclasses.dataclass
