@@ -96,7 +96,16 @@ class Event:
         handoff:     {"from": str, "to": str}（agent 名稱）
         compaction:  {"result": compaction.CompactionResult}（對話被壓縮）
         compaction_failed: {"error": str}（自動壓縮失敗，對話照常繼續）
+        subagent:    {"agent": str, "path": list[str], "call_id": str,
+                      "event": Event}（subagent 內部的進度）
         run_end:     {"result": RunResult}
+
+    subagent 事件：subagent 工作時，它自己的每個事件（text_delta、
+    tool_call、tool_result、message、run_end 等）都會包成一個 subagent
+    事件，在它還在執行時就送出。agent 是產生事件的 subagent；path 由外
+    到內列出經過的 agent（subagent 再交給 subagent 時有多個）；call_id
+    是最上層那次 ask_<名稱> 工具呼叫的 id，可以用來把進度放在對應的
+    tool_call 底下。
 
     Attributes:
         type: 事件種類。

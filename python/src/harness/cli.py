@@ -343,8 +343,27 @@ async def _run_turn(
             _print_compaction(event.data["result"])
         elif event.type == "compaction_failed":
             print(f"  ⚠ 自動壓縮失敗：{event.data['error']}")
+        elif event.type == "subagent":
+            _print_subagent_progress(event)
         elif event.type == "run_end":
             _print_stop_notice(event.data["result"])
+
+
+def _print_subagent_progress(event: datatypes.Event) -> None:
+    """印出 subagent 呼叫的工具與錯誤，縮排表示它在哪一層。
+
+    subagent 的文字回覆不逐字印出：最後的回覆會當成工具結果交回上一層，
+    由上一層的 agent 整理後回答。
+    """
+    inner = event.data["event"]
+    indent = "  " * (len(event.data["path"]) + 1)
+    agent = event.data["agent"]
+    if inner.type == "tool_call":
+        call = inner.data["call"]
+        arguments = loop.format_arguments(call)
+        print(f"{indent}↳ {agent} ⚙ {call.name}({arguments})")
+    elif inner.type == "tool_result" and inner.data["result"].is_error:
+        print(f"{indent}↳ {agent} ✗ {inner.data['result'].output}")
 
 
 async def _compact_now(

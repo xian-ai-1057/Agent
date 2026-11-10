@@ -10,6 +10,7 @@ import type {
   FilePreview,
   Message,
   SessionDetail,
+  SubagentStep,
 } from "../../src/web/protocol.ts";
 
 export type StepStatus =
@@ -28,6 +29,10 @@ export interface Step {
   result?: string;
   status: StepStatus;
   approval?: Approval;
+  /** subagent 呼叫的工具：是哪個 subagent。 */
+  agent?: string;
+  /** 交給 subagent 的步驟：subagent 在裡面呼叫的工具。 */
+  children?: Step[];
 }
 
 export type Block =
@@ -118,6 +123,12 @@ export function buildTurns(
       }
       for (const call of message.tool_calls ?? []) {
         const step = toStep(call, approvals.get(call.id), running);
+        const children = detail.subagentSteps?.[call.id];
+        if (children?.length) {
+          step.children = children.map((child) =>
+            toChildStep(child, approvals, running),
+          );
+        }
         steps.set(step.id, step);
         const last = target.blocks.at(-1);
         if (last?.kind === "steps") last.steps.push(step);
@@ -175,16 +186,27 @@ export function collectFiles(turns: Turn[]): FileChange[] {
   return [...byPath.values()].reverse();
 }
 
-/** 一組步驟目前的整體狀態，用在群組標題。 */
+/**
+ * 一組步驟目前的整體狀態，用在群組標題。
+ *
+ * active 是正在進行的步驟；交給 subagent 的步驟還在跑時，取 subagent
+ * 裡面正在進行的那一個，標題才看得到它實際在做什麼。
+ */
 export function summarizeSteps(steps: Step[]): {
   active?: Step;
   errors: number;
 } {
-  const active = steps.find(
-    (step) => step.status === "running" || step.status === "waiting",
-  );
+  const active = findActive(steps);
   const errors = steps.filter((step) => step.status === "error").length;
   return { active, errors };
+}
+
+function findActive(steps: Step[] | undefined): Step | undefined {
+  const active = steps?.find(
+    (step) => step.status === "running" || step.status === "waiting",
+  );
+  if (!active) return undefined;
+  return findActive(active.children) ?? active;
 }
 
 /** 把參數縮成一行給人看。 */
@@ -236,6 +258,30 @@ function toStep(
     rawArgs,
     status,
     approval,
+  };
+}
+
+function toChildStep(
+  child: SubagentStep,
+  approvals: Map<string, Approval>,
+  running: boolean,
+): Step {
+  let status: StepStatus = child.status;
+  const approval = approvals.get(child.callId);
+  const waiting = approval?.tool === child.name;
+  if (child.status === "running") {
+    if (!running) status = "interrupted";
+    else if (waiting) status = "waiting";
+  }
+  return {
+    id: child.id,
+    name: child.name,
+    args: child.arguments,
+    rawArgs: JSON.stringify(child.arguments),
+    result: child.result,
+    status,
+    approval: status === "waiting" ? approval : undefined,
+    agent: child.agent,
   };
 }
 

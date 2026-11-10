@@ -41,6 +41,8 @@ _TITLE_LENGTH = 40
 _PREVIEW_LIMIT = 200_000
 _MODEL_TEST_TIMEOUT = 20
 _SESSION_ID = re.compile(r"^[\w-]+$")
+# subagent 步驟的結果只是給人瀏覽的，太長的部分不保留。
+_SUBAGENT_RESULT_LIMIT = 4000
 
 
 class WebError(Exception):
@@ -83,6 +85,11 @@ class _State:
     mode: str | None = None
     approvals: dict[str, _Pending] = dataclasses.field(default_factory=dict)
     task: asyncio.Task | None = None
+    # subagent 內部呼叫的工具，依上層 ask_<名稱> 呼叫的 id 分組。
+    # subagent 的對話不存檔，這裡只保留到伺服器重新啟動。
+    subagent_steps: dict[str, list[dict[str, Any]]] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 class Workspace:
@@ -178,6 +185,7 @@ class Workspace:
             "partial": state.partial,
             "approvals": [item.approval for item in state.approvals.values()],
             "mode": state.mode,
+            "subagentSteps": state.subagent_steps,
         }
 
     def start_run(
@@ -441,6 +449,8 @@ class Workspace:
         elif event.type == "compaction":
             # 壓縮紀錄已經寫進 session，讓瀏覽器重新讀取。
             self._emit({"type": "session_reload", "sessionId": session_id})
+        elif event.type == "subagent":
+            self._handle_subagent(state, data)
         elif event.type == "run_end":
             result = data["result"]
             state.status = "done"
@@ -455,6 +465,58 @@ class Workspace:
                     "stopReason": result.stop_reason,
                 }
             )
+
+    def _handle_subagent(self, state: _State, data: dict[str, Any]) -> None:
+        """subagent 的進度：記下它呼叫的工具，並更新「正在做什麼」。"""
+        inner = data["event"]
+        call_id = data["call_id"]
+        path = data["path"]
+        steps = state.subagent_steps.setdefault(call_id, [])
+        step = None
+        if inner.type == "tool_call":
+            call = inner.data["call"]
+            step = {
+                "id": f"{call_id}.{len(steps)}",
+                "callId": call.id,
+                "agent": data["agent"],
+                "path": path,
+                "name": call.name,
+                "arguments": call.arguments,
+                "status": "running",
+            }
+            steps.append(step)
+            activity = {"kind": "tool", "tool": call.name}
+        elif inner.type == "tool_result":
+            result = inner.data["result"]
+            step = next(
+                (
+                    item
+                    for item in reversed(steps)
+                    if item["callId"] == result.call_id
+                    and item["path"] == path
+                    and item["status"] == "running"
+                ),
+                None,
+            )
+            if step is not None:
+                step["status"] = "error" if result.is_error else "done"
+                step["result"] = _shorten(result.output)
+            activity = {"kind": "thinking"}
+        elif inner.type == "text_delta":
+            activity = {"kind": "writing"}
+        else:
+            return
+        if step is not None:
+            self._emit(
+                {
+                    "type": "subagent_step",
+                    "sessionId": state.session.id,
+                    "callId": call_id,
+                    "step": step,
+                }
+            )
+        activity["agent"] = " › ".join(path)
+        self._set_activity(state, activity)
 
     def _permissions_for(self, state: _State) -> permissions_lib.Permissions:
         """這段對話使用的權限設定。
@@ -707,6 +769,13 @@ def _clean_patterns(items: Any) -> list[str]:
         return []
     cleaned = [item.strip() for item in items if isinstance(item, str)]
     return list(dict.fromkeys(item for item in cleaned if item))
+
+
+def _shorten(text: str) -> str:
+    """太長的 subagent 工具結果只留開頭。"""
+    if len(text) <= _SUBAGENT_RESULT_LIMIT:
+        return text
+    return text[:_SUBAGENT_RESULT_LIMIT] + "\n…（以下省略）"
 
 
 def _title(text: str) -> str:

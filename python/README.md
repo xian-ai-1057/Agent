@@ -305,7 +305,9 @@ async for event in harness.run_stream(agent, "給我十月的報告"):
 ```
 
 事件種類：`text_delta`、`message`、`tool_call`、`tool_result`、
-`handoff`、`run_end`。
+`handoff`、`subagent`、`run_end`（另有對話壓縮的 `compaction`、
+`compaction_failed`）。`subagent` 是 subagent 內部的進度，見
+[看到 subagent 的進度](#看到-subagent-的進度)。
 
 ### 嵌進既有的網頁服務
 
@@ -418,6 +420,29 @@ Subagent 的細節：
   `context.agent_name` 是 subagent 的名稱。
 - subagent 可以再有自己的 subagent，最多 3 層。
 - 它在輪數上限內沒做完時，主 agent 會收到錯誤說明與它最後的回覆。
+
+### 看到 subagent 的進度
+
+subagent 工作時，它自己的每個事件（呼叫工具、拿到結果、逐字輸出的
+文字等）都會包成 `subagent` 事件，在它還在做的時候就送出，不用等它做完：
+
+```python
+async for event in harness.run_stream(main, "十月賣得如何？"):
+    if event.type == "subagent":
+        inner = event.data["event"]  # subagent 原本的事件
+        if inner.type == "tool_call":
+            print(f"  {event.data['agent']} 呼叫 {inner.data['call'].name}")
+```
+
+| 欄位 | 內容 |
+|---|---|
+| `agent` | 產生這個事件的 subagent |
+| `path` | 由外到內經過的 agent，例如 `["researcher", "helper"]`（subagent 再交給 subagent 時） |
+| `call_id` | 最上層那次 `ask_<名稱>` 工具呼叫的 id，可以用來把進度放在對應的 `tool_call` 底下 |
+| `event` | subagent 原本的事件（`text_delta`、`tool_call`、`tool_result`、`message`、`run_end` 等） |
+
+同一輪同時交給好幾個 subagent 時，用 `call_id` 區分各自的進度。命令列
+與網頁版會把 subagent 呼叫的工具顯示在交辦的步驟底下。
 
 Handoff 的細節：
 
@@ -945,6 +970,9 @@ pyharness web --port 8080   # 換埠號
 Python 版另外會處理：
 
 - **Handoff**：對話轉交後，網頁上顯示的 agent 會換成接手的那個。
+- **Subagent 的進度**：subagent 呼叫的工具即時列在交辦步驟底下，標出
+  是哪個 subagent，「工作中」也會顯示它正在做什麼。subagent 的對話不
+  存檔，所以伺服器重新啟動後只剩交辦內容與結果。
 - **對話壓縮**：壓縮的地方會標出「對話已壓縮」。
 - **訊息防護**：使用者的訊息被擋下時，顯示被擋下的原因。
 - **金鑰**：沒有設定 `HARNESS_BASE_URL`（直接連供應商）時，設定頁會
@@ -972,5 +1000,4 @@ Python 版另外會處理：
 
 ## 目前還沒有的功能
 
-- 串流時顯示 subagent 內部的進度（目前只看得到交辦與結果）
 - Slack / Telegram 等訊息平台的接口

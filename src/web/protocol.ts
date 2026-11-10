@@ -31,6 +31,27 @@ export interface Activity {
   kind: "thinking" | "tool" | "writing" | "waiting";
   /** kind 為 tool 或 waiting 時，相關的工具名稱。 */
   tool?: string;
+  /**
+   * 正在工作的 subagent（Python 版）；有多層時由外到內以 › 連接。
+   * 沒有時表示是直接和使用者對話的 agent。
+   */
+  agent?: string;
+}
+
+/** subagent 內部呼叫的一個工具（Python 版）。 */
+export interface SubagentStep {
+  /** 畫面用的識別碼，在同一次 ask_<名稱> 呼叫裡不重複。 */
+  id: string;
+  /** subagent 自己的工具呼叫 id，用來對應權限確認。 */
+  callId: string;
+  /** 呼叫這個工具的 subagent。 */
+  agent: string;
+  /** 由外到內經過的 agent。 */
+  path: string[];
+  name: string;
+  arguments: Record<string, unknown>;
+  status: "running" | "done" | "error";
+  result?: string;
 }
 
 /** 側欄與「工作中」列表需要的對話摘要。 */
@@ -93,6 +114,11 @@ export interface SessionDetail {
   approvals: Approval[];
   /** 這段對話自己的權限模式；null 表示跟著專案設定。 */
   mode: PermissionMode | null;
+  /**
+   * subagent 內部呼叫的工具，依上層 ask_<名稱> 呼叫的 id 分組（Python 版）。
+   * subagent 的對話不存檔，伺服器重新啟動後就沒有了。
+   */
+  subagentSteps?: Record<string, SubagentStep[]>;
 }
 
 export interface ToolInfo {
@@ -173,6 +199,14 @@ export type ServerEvent =
       message: Message;
     }
   | { type: "approval"; sessionId: string; approval: Approval }
+  /** subagent 呼叫了工具或拿到結果（Python 版）；依 step.id 新增或更新。 */
+  | {
+      type: "subagent_step";
+      sessionId: string;
+      /** 上層 ask_<名稱> 工具呼叫的 id。 */
+      callId: string;
+      step: SubagentStep;
+    }
   | {
       type: "approval_resolved";
       sessionId: string;

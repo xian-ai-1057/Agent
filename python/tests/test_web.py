@@ -391,6 +391,53 @@ async def test_handoff_changes_the_agent_shown_in_summary(tmp_path, fake_model):
     assert detail["summary"]["agent"] == "billing"
 
 
+async def test_subagent_progress_is_streamed_and_kept(tmp_path, fake_model):
+    root = make_project(tmp_path / "subagent")
+    (root / "agents" / "main.md").write_text(
+        AGENT.replace("tools:", "subagents:\n  - researcher\ntools:"),
+        encoding="utf-8",
+    )
+    (root / "agents" / "researcher.md").write_text(
+        "---\nname: researcher\ndescription: 查資料\ntools: [files]\n---\n"
+        "你查資料。\n",
+        encoding="utf-8",
+    )
+    (root / "notes.md").write_text("十月賣了 192,000", encoding="utf-8")
+    loaded = project_lib.load_project(root)
+    model = fake_model(
+        [
+            conftest.tool_response(("ask_researcher", {"task": "查十月"})),
+            conftest.tool_response(("read_file", {"path": "notes.md"})),
+            conftest.text_response("十月賣了 192,000"),
+            conftest.text_response("研究員說十月賣了 192,000"),
+        ]
+    )
+    app = server_lib.create_app(loaded, model_fn=model)
+    async with TestClient(TestServer(app)) as client:
+        h = Harness(client, root, model)
+        await h.listen()
+        _, created = await h.api("POST", "/sessions", {"text": "十月？"})
+        await h.wait_for("run_end")
+        _, detail = await h.api("GET", f"/sessions/{created['id']}")
+        h._reader.cancel()
+    loaded.close()
+
+    steps = [e for e in h.events if e["type"] == "subagent_step"]
+    assert [step["step"]["status"] for step in steps] == ["running", "done"]
+    assert steps[0]["callId"] == "call_0_ask_researcher"
+    assert steps[0]["step"]["agent"] == "researcher"
+    assert steps[0]["step"]["name"] == "read_file"
+    activities = [
+        e["summary"].get("activity") for e in h.events if e["type"] == "session"
+    ]
+    assert {"kind": "tool", "tool": "read_file", "agent": "researcher"} in (
+        activities
+    )
+    [kept] = detail["subagentSteps"]["call_0_ask_researcher"]
+    assert kept["result"] == "十月賣了 192,000"
+    assert kept["arguments"] == {"path": "notes.md"}
+
+
 async def test_rejects_requests_from_other_sites(start):
     h = await start()
 

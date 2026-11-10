@@ -1,6 +1,7 @@
 """主迴圈：呼叫模型 → 執行工具 → 把結果送回，直到模型不再呼叫工具。"""
 
 import asyncio
+import contextvars
 import dataclasses
 import json
 import pathlib
@@ -21,6 +22,60 @@ from harness import tools as tools_lib
 
 _INTERRUPTED = "工具執行被中斷，沒有結果"
 
+# 正在執行的工具呼叫。subagent 用它標記自己的事件屬於哪一次呼叫；
+# 同時執行的工具各自在自己的 Task 裡，不會互相干擾。
+_CURRENT_CALL: contextvars.ContextVar[datatypes.ToolCall | None] = (
+    contextvars.ContextVar("harness_current_call", default=None)
+)
+
+
+@dataclasses.dataclass
+class _Finished:
+    """relay_while 包裝的工作已經完成，value 是它的回傳值。"""
+
+    value: Any
+
+
+class _EventRelay:
+    """把工具執行期間產生的事件（subagent 的進度）轉送給主迴圈。
+
+    主迴圈在等待工具時用 relay_while 持續取出事件往外送，所以 subagent
+    做到哪裡，串流就看得到哪裡，不必等整個工具呼叫結束。
+    """
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[datatypes.Event] | None = None
+
+    def send(self, event: datatypes.Event) -> None:
+        """送出事件；沒有人在接收時（不在工具執行期間）直接丟棄。"""
+        if self._queue is not None:
+            self._queue.put_nowait(event)
+
+    async def relay_while(
+        self, work: Any
+    ) -> AsyncIterator[datatypes.Event | _Finished]:
+        """執行 work，期間收到的事件依序產生，最後產生 _Finished。"""
+        queue: asyncio.Queue[datatypes.Event] = asyncio.Queue()
+        self._queue = queue
+        task = asyncio.ensure_future(work)
+        try:
+            while not task.done():
+                getter = asyncio.ensure_future(queue.get())
+                await asyncio.wait(
+                    {task, getter}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if getter.done():
+                    yield getter.result()
+                else:
+                    getter.cancel()
+            while not queue.empty():
+                yield queue.get_nowait()
+            yield _Finished(task.result())
+        finally:
+            self._queue = None
+            if not task.done():
+                task.cancel()
+
 
 @dataclasses.dataclass
 class _RunOptions:
@@ -35,6 +90,8 @@ class _RunOptions:
     compaction: compaction_lib.Compaction | None = None
     # 0 是使用者直接對話的 agent，每進入一層 subagent 加 1。
     depth: int = 0
+    # 這一層轉送 subagent 進度的通道，每一層 _run_loop 各有一個。
+    relay: _EventRelay = dataclasses.field(default_factory=_EventRelay)
 
     @property
     def user_facing(self) -> bool:
@@ -113,6 +170,7 @@ async def _run_loop(
     options: _RunOptions,
 ) -> AsyncIterator[datatypes.Event]:
     """主迴圈本體，最上層的對話與 subagent 的對話都走這裡。"""
+    options = dataclasses.replace(options, relay=_EventRelay())
     _close_dangling_tool_calls(session)
     if user_input is None:
         _assert_resumable(session)
@@ -192,9 +250,14 @@ async def _run_loop(
 
         for call in response.tool_calls:
             yield datatypes.Event("tool_call", {"call": call})
-        results = await _execute_calls(
-            response.tool_calls, toolbox, options, context
-        )
+        # 等工具的同時，把 subagent 的進度轉送出去。
+        results: list[datatypes.ToolResult] = []
+        work = _execute_calls(response.tool_calls, toolbox, options, context)
+        async for item in options.relay.relay_while(work):
+            if isinstance(item, _Finished):
+                results = item.value
+            else:
+                yield item
         for result in results:
             session.append(_tool_message(result))
             yield datatypes.Event("tool_result", {"result": result})
@@ -507,11 +570,13 @@ def _subagent_runner(
         # subagent 在全新的對話裡工作，紀錄不寫入檔案。
         child_session = sessions.Session(f"{session.id}.{target.name}")
         child_options = dataclasses.replace(options, depth=options.depth + 1)
+        call = _CURRENT_CALL.get()
         result = None
         events = _run_loop(target, task, child_session, child_options)
         async for event in events:
             if event.type == "run_end":
                 result = event.data["result"]
+            options.relay.send(_subagent_event(target, call, event))
         usage.add(result.usage)
         if result.stop_reason != "end_turn":
             raise tools_lib.ToolError(
@@ -521,6 +586,37 @@ def _subagent_runner(
         return result.output
 
     return run_subagent
+
+
+def _subagent_event(
+    target: agents.Agent,
+    call: datatypes.ToolCall | None,
+    event: datatypes.Event,
+) -> datatypes.Event:
+    """把 subagent 的事件包成上一層的 subagent 事件。
+
+    更深一層的 subagent 事件已經包過一次，這裡只在 path 前面加上自己，
+    讓最外層收到的事件是扁平的：path 由外到內列出經過的 agent。
+    """
+    call_id = call.id if call is not None else ""
+    if event.type == "subagent":
+        return datatypes.Event(
+            "subagent",
+            {
+                **event.data,
+                "path": [target.name, *event.data["path"]],
+                "call_id": call_id,
+            },
+        )
+    return datatypes.Event(
+        "subagent",
+        {
+            "agent": target.name,
+            "path": [target.name],
+            "call_id": call_id,
+            "event": event,
+        },
+    )
 
 
 def _handoff_target(
@@ -690,6 +786,7 @@ async def _execute(
     context: datatypes.RunContext,
 ) -> datatypes.ToolResult:
     """執行工具，並把任何失敗轉成模型看得懂的錯誤結果。"""
+    _CURRENT_CALL.set(call)
     try:
         output = await tools_lib.invoke(target, call.arguments, context)
         result = datatypes.ToolResult(call.id, call.name, output)
