@@ -278,6 +278,18 @@ describe("createModel：連到 OpenAI 相容端點", () => {
     expect(received.at(-1)?.body).not.toHaveProperty("tools");
   });
 
+  it("連不上端點時指出是哪個網址", async () => {
+    const model = createModel({ baseURL: "http://127.0.0.1:1/v1" });
+
+    const pending = collect(
+      model({ model: "m", messages: [], tools: [], params: {} }),
+    );
+
+    await expect(pending).rejects.toThrow(
+      /無法連線到模型端點 http:\/\/127\.0\.0\.1:1\/v1/,
+    );
+  });
+
   it("本機端點不需要金鑰", async () => {
     const model = createModel({ baseURL });
 

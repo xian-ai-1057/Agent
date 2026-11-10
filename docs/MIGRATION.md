@@ -29,10 +29,11 @@ my_project/                 ← 既有專案
 
 ### 1. 安裝並建立範本
 
+先依 README 的「安裝」裝好 `harness` 指令，然後：
+
 ```bash
-npm install -g github:xian-ai-1057/Agent     # harness 本身
 cd my_project
-pip install "mcp>=2"                          # Python 端的工具伺服器套件
+pip install "mcp>=2"        # Python 端的工具伺服器套件
 harness new .
 ```
 

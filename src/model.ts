@@ -95,9 +95,11 @@ export function createModel(options: ModelOptions = {}): ModelFn {
       stream_options: { include_usage: true },
       ...(request.tools.length > 0 ? { tools: request.tools } : {}),
     } as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming;
-    const stream = await client.chat.completions.create(body, {
-      signal: request.signal,
-    });
+    const stream = await client.chat.completions
+      .create(body, { signal: request.signal })
+      .catch((error: unknown) => {
+        throw explainConnectionError(error, client?.baseURL);
+      });
     yield* accumulate(stream as AsyncIterable<StreamChunk>);
   };
 }
@@ -154,6 +156,15 @@ export async function* accumulate(
     usage,
     finishReason,
   };
+}
+
+/** 連不上端點時，把 SDK 的籠統訊息換成指出網址的說明。 */
+function explainConnectionError(error: unknown, baseURL?: string): unknown {
+  if (!(error instanceof OpenAI.APIConnectionError)) return error;
+  return new Error(
+    `無法連線到模型端點 ${baseURL}，請確認 HARNESS_BASE_URL 與端點是否已啟動`,
+    { cause: error },
+  );
 }
 
 function createClient(options: ModelOptions): OpenAI {

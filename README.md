@@ -31,17 +31,22 @@
 需要 Node.js 22.18 以上。
 
 ```bash
-npm install -g github:xian-ai-1057/Agent
-```
-
-開發這個框架本身：
-
-```bash
 git clone https://github.com/xian-ai-1057/Agent.git
 cd Agent
-npm install
-npm test
+npm install          # 安裝相依套件並編譯
+npm install -g .     # 讓 harness 指令在任何資料夾都能用
 ```
+
+之後要更新：在這個資料夾執行 `git pull && npm install`。
+
+只想在某個 Node.js 專案裡當函式庫用的話，在該專案執行：
+
+```bash
+npm install github:xian-ai-1057/Agent
+```
+
+開發這個框架本身：`npm test` 執行測試，`npm run lint` 檢查格式，
+`npm run typecheck` 檢查型別。
 
 ## 設定模型
 
