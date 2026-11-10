@@ -19,6 +19,8 @@ Python 版的特點：
 - **企業級 agent 常用的能力**：[知識庫（RAG）](#知識庫rag)、
   [Skills](#skills)、[長期記憶](#長期記憶)、[訊息防護](#訊息防護)。
 - **長時間的對話不會塞爆上下文**：[對話壓縮](#對話壓縮)。
+- **可以連接現成的 MCP 伺服器**，和 TypeScript 版用同一份設定：
+  [連接 MCP 伺服器](#連接-mcp-伺服器)。
 
 ## 安裝
 
@@ -27,6 +29,8 @@ Python 版的特點：
 ```bash
 pip install "git+https://github.com/xian-ai-1057/Agent.git#subdirectory=python"
 ```
+
+要連接 MCP 伺服器的話，另外安裝 MCP 套件：`pip install "mcp>=2"`。
 
 開發這個框架本身：
 
@@ -65,7 +69,7 @@ pyharness chat
 
 ```
 my_bot/
-├── harness.yaml      名稱、模型、預設 agent、權限、記憶、防護
+├── harness.yaml      名稱、模型、預設 agent、權限、MCP 伺服器、記憶、防護
 ├── AGENTS.md         專案共用的背景知識，接在每個 agent 的指示後面
 ├── agents/
 │   └── main.md       一個檔案一個 agent
@@ -102,9 +106,9 @@ tools:
 你是銷售報告助手。需要數字時一定要呼叫工具取得，不要自己估算。
 ```
 
-`tools` 可以寫 toolset 名稱（`tools/` 底下的檔名，或內建的 `files`）
-或單一工具名稱。整個欄位不寫的話，agent 可以使用 `tools/` 底下所有的
-工具。
+`tools` 可以寫 toolset 名稱（`tools/` 底下的檔名、`mcpServers` 的
+伺服器名稱，或內建的 `files`）或單一工具名稱。整個欄位不寫的話，agent
+可以使用專案裡所有的工具。
 
 專案根目錄會自動加入 Python 的搜尋路徑，所以 `tools/` 裡的檔案可以
 直接 import 專案既有的套件。
@@ -185,6 +189,80 @@ def my_orders(context: harness.RunContext) -> list[dict]:
 使用者身分應該從這裡取得，不要做成工具的參數，否則模型可以填別人的
 ID。
 
+## 連接 MCP 伺服器
+
+除了直接 import 的工具，agent 也可以使用現成的
+[MCP](https://modelcontextprotocol.io/) 伺服器提供的工具，例如其他語言寫的
+服務、第三方提供的工具伺服器。設定方式與 TypeScript 版相同，需要先安裝
+MCP 套件：
+
+```bash
+pip install "mcp>=2"
+```
+
+`harness.yaml`：
+
+```yaml
+mcpServers:
+  github:                   # 伺服器名稱，也是這組工具的 toolset 名稱
+    command: npx            # 本機程式，透過 stdio 溝通
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env: {LOG_LEVEL: info}  # 選用，加在目前的環境變數之上
+    timeoutSeconds: 120     # 選用，單次工具呼叫最多等幾秒，預設 300
+  search:
+    url: https://example.com/mcp           # 遠端伺服器（Streamable HTTP）
+    headers: {X-Team: sales}               # 選用，附帶的 HTTP 標頭
+```
+
+agent 用伺服器名稱引用整組工具，也可以只列出其中幾個工具的名稱：
+
+```markdown
+---
+name: main
+tools: [report, github]
+---
+```
+
+- **載入專案時就會啟動並連上所有伺服器**，連線在整個專案使用期間共用。
+  伺服器無法啟動時，錯誤訊息會附上它輸出到 stderr 的最後一段。
+  伺服器平常的 log 不會印到聊天畫面，設定環境變數 `HARNESS_DEBUG=1`
+  才會顯示。
+- **本機伺服器在專案根目錄執行**，並繼承目前所有的環境變數，所以金鑰
+  這類設定用環境變數提供即可，不必寫進 `harness.yaml`。
+- 伺服器標記為破壞性操作（`destructiveHint`）的工具，執行前會先問使用者；
+  其他工具一樣可以用 `permissions.ask` 規則指定。
+- 不同伺服器（或與 `tools/` 裡的工具）有同名的工具時，載入會失敗。
+- **`tools/` 裡有與伺服器同名的 Python 檔時，Python 版直接載入那個檔案，
+  不啟動伺服器。** 這是同一個專案同時給兩個版本使用時的寫法：
+  `examples/report_bot` 的 `report` 伺服器是給 TypeScript 版用的，Python
+  版改用 `tools/report.py`，所以執行它不需要安裝 MCP 套件。被
+  `mcpServers` 當成伺服器執行的 `tools/*.py` 不會被當成工具模組載入。
+
+用完專案要關閉伺服器。命令列會自動處理；在程式裡使用時，呼叫
+`project.close()` 或用 `with`：
+
+```python
+with harness.load_project(".") as project:
+    result = harness.run_sync(project.agents["main"], "幫我查一下")
+```
+
+不使用專案資料夾時，用 `harness.connect_mcp_server` 自己建立連線：
+
+```python
+with harness.connect_mcp_server(
+    "github", command="npx", args=["-y", "@modelcontextprotocol/server-github"]
+) as github:
+    agent = harness.Agent(
+        name="bot",
+        instructions="你是開發助手。",
+        tools=[build_report, *github.tools],
+    )
+    result = harness.run_sync(agent, "列出我最近的 PR")
+```
+
+連線在自己的背景執行緒裡維持，不屬於任何一個事件迴圈，所以可以在
+FastAPI、Streamlit 這類服務裡建立一次，給之後每個請求共用。
+
 ## 在 Python 裡使用
 
 不需要專案資料夾也能用：
@@ -261,7 +339,8 @@ async def handle_chat(user_id: str, session_id: str | None, text: str):
 工具會被拒絕。要讓網頁使用者可以按「同意」，就提供自己的
 `Permissions(approver=...)`，在裡面等待前端的回應。
 
-`hooks` 與 `memory` 不需要時可以省略。記憶屬於使用者，所以每個使用者
+`hooks` 與 `memory` 不需要時可以省略。專案有設定 `mcpServers` 時，
+服務關閉前呼叫 `project.close()` 結束伺服器。記憶屬於使用者，所以每個使用者
 用自己的檔案（見[長期記憶](#長期記憶)）。
 
 ## 多個 agent 協作
@@ -778,9 +857,8 @@ chat 與 run 共用的選項：
 
 ## 和 TypeScript 版的差異
 
-- **不會啟動 `mcpServers`。** `harness.yaml` 裡的 `mcpServers` 只有
-  TypeScript 版會使用。Python 版改從 `tools/*.py` 直接載入工具，被
-  `mcpServers` 當成伺服器執行的檔案會自動略過。
+- **`tools/` 裡有與 `mcpServers` 伺服器同名的 Python 檔時，不啟動那個
+  伺服器**，改為直接載入該檔案（見[連接 MCP 伺服器](#連接-mcp-伺服器)）。
 - **不會載入 `tools/*.ts`。**
 - **Subagents、handoffs、知識庫、skills、長期記憶、訊息防護與對話壓縮
   只有 Python 版支援。** TypeScript 版會忽略 agent 檔案裡的 `subagents`、
@@ -792,7 +870,6 @@ chat 與 run 共用的選項：
 
 ## 目前還沒有的功能
 
-- 連接 MCP 工具伺服器
 - 串流時顯示 subagent 內部的進度（目前只看得到交辦與結果）
 - Slack / Telegram 等訊息平台的接口
 - 知識庫的 Reranker、相似度門檻，以及自帶向量資料庫
