@@ -513,9 +513,11 @@ knowledge:
   minRerankScore: 0.2           # 選用，rerank 分數門檻（需要 reranker）
 ```
 
-`embeddingModel` 與 `reranker` 是 litellm 的模型名稱；有設定
-`HARNESS_BASE_URL` 時會改連那個端點，和聊天模型一樣（reranker 走
-LiteLLM Proxy 的 `/v1/rerank`）。
+`embeddingModel` 與 `reranker` 是 litellm 的模型名稱（上面的例子是直接
+連供應商的寫法）。有設定 `HARNESS_BASE_URL` 時會改連那個端點，和聊天
+模型一樣，名稱要寫端點上的名稱；用 LiteLLM Proxy 時就是它設定檔裡的
+`model_name`（見[模型設定](#模型設定)）。reranker 走 Proxy 的
+`/v1/rerank`。
 
 ### 相似度門檻與 reranker
 
@@ -918,8 +920,39 @@ def no_competitors(text, context):
 | Ollama 本地模型 | `ollama_chat/hermes3` | 不需要 |
 
 **連 OpenAI 相容的端點**（LiteLLM Proxy、自架的 vLLM 等）。設定
-`HARNESS_BASE_URL` 與 `HARNESS_API_KEY`，模型名稱照端點的寫法。這和
-TypeScript 版使用相同的環境變數，兩個版本可以共用同一組設定。
+`HARNESS_BASE_URL` 與 `HARNESS_API_KEY`，模型名稱照端點的寫法，會原樣
+送給端點（`openai/` 之類的開頭也不會被拿掉）。這和 TypeScript 版使用
+相同的環境變數，兩個版本可以共用同一組設定。
+
+用 LiteLLM Proxy 時，模型名稱就是 Proxy 設定檔裡的 `model_name`。聊天、
+embedding 與 reranker 都一樣：
+
+```yaml
+# litellm_config.yaml（Proxy 端）
+model_list:
+  - model_name: claude
+    litellm_params: {model: anthropic/claude-opus-5-5, api_key: os.environ/ANTHROPIC_API_KEY}
+  - model_name: embed
+    litellm_params: {model: openai/text-embedding-3-small, api_key: os.environ/OPENAI_API_KEY}
+  - model_name: rerank
+    litellm_params: {model: cohere/rerank-v3.5, api_key: os.environ/COHERE_API_KEY}
+```
+
+```bash
+export HARNESS_BASE_URL=http://localhost:4000   # 結尾有沒有 /v1 都可以
+export HARNESS_API_KEY=sk-...                   # Proxy 的 master key 或 virtual key
+export HARNESS_MODEL=claude
+```
+
+```yaml
+# harness.yaml
+knowledge:
+  embeddingModel: embed
+  reranker: rerank
+```
+
+litellm 文件裡連 Proxy 的寫法 `litellm_proxy/claude` 也可以，送出前會
+拿掉 `litellm_proxy/`。
 
 決定用哪個模型的順序：命令列的 `-m` → agent 檔案的 `model` →
 `harness.yaml` 的 `model` → 環境變數 `HARNESS_MODEL` →
