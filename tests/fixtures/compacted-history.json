@@ -1,0 +1,34 @@
+[
+  {
+    "role": "user",
+    "content": "以下是系統自動產生的檢查點，濃縮了較早的對話以節省上下文。把其中的內容當成已知的背景，直接延續後面的對話繼續工作，不要重述，也不要提到這個檢查點。\n\n<compacted-summary>\n## 使用者的需求與意圖\n- 舊問題\n</compacted-summary>"
+  },
+  {
+    "role": "user",
+    "content": "讀 a.md"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "arguments": "{\"path\": \"a.md\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "name": "read_file",
+    "content": "修剪後"
+  },
+  {
+    "role": "assistant",
+    "content": "讀完了"
+  }
+]

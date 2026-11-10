@@ -14,6 +14,8 @@
 """
 
 from harness.agents import Agent
+from harness.compaction import Compaction
+from harness.compaction import CompactionResult
 from harness.datatypes import Event
 from harness.datatypes import ModelResponse
 from harness.datatypes import RunContext
@@ -25,6 +27,7 @@ from harness.hooks import Hooks
 from harness.hooks import allow
 from harness.hooks import deny
 from harness.knowledge import Knowledge
+from harness.loop import compact
 from harness.loop import run
 from harness.loop import run_stream
 from harness.loop import run_sync
@@ -40,6 +43,8 @@ from harness.tools import tool
 
 __all__ = [
     "Agent",
+    "Compaction",
+    "CompactionResult",
     "Event",
     "Hooks",
     "Knowledge",
@@ -57,6 +62,7 @@ __all__ = [
     "ToolResult",
     "Usage",
     "allow",
+    "compact",
     "deny",
     "load_project",
     "run",

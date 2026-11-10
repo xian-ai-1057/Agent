@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable
 
 from harness import agents
+from harness import compaction as compaction_lib
 from harness import datatypes
 from harness import knowledge as knowledge_lib
 from harness import loop
@@ -27,6 +28,7 @@ from harness import sessions
 from harness import tools as tools_lib
 
 _EXIT_COMMANDS = ("/exit", "/quit")
+_COMPACT_COMMAND = "/compact"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,10 +185,12 @@ def _command_agent(args: argparse.Namespace) -> int:
 
         def turn(user_input: str) -> bool:
             """執行一輪對話，回傳是否正常跑完（沒有被 Ctrl-C 中斷）。"""
+            if user_input == _COMPACT_COMMAND:
+                job = _compact_now(agent, session, loaded)
+            else:
+                job = _run_turn(agent, user_input, session, permissions, loaded)
             try:
-                runner.run(
-                    _run_turn(agent, user_input, session, permissions, loaded)
-                )
+                runner.run(job)
             except KeyboardInterrupt:
                 print("\n  ⚠ 已中斷這一輪。")
                 return False
@@ -200,7 +204,10 @@ def _command_agent(args: argparse.Namespace) -> int:
         if args.command == "run":
             return 0 if turn(args.prompt) else 1
         print(f"{loaded.name} / {agent.name}（session {session.id}）")
-        print("輸入訊息開始對話，/exit 離開，Ctrl-C 中斷目前這一輪。")
+        print(
+            "輸入訊息開始對話，/compact 壓縮對話，/exit 離開，"
+            "Ctrl-C 中斷目前這一輪。"
+        )
         _chat_loop(turn)
     return 0
 
@@ -266,6 +273,7 @@ async def _run_turn(
         workdir=loaded.root,
         hooks=loaded.hooks,
         memory=loaded.memory,
+        compaction=loaded.compaction,
     ):
         if event.type == "text_delta":
             print(event.data["text"], end="", flush=True)
@@ -281,8 +289,46 @@ async def _run_turn(
             print(f"  ✗ {event.data['result'].output}")
         elif event.type == "handoff":
             print(f"  → 對話轉交給 {event.data['to']}")
+        elif event.type == "compaction":
+            _print_compaction(event.data["result"])
+        elif event.type == "compaction_failed":
+            print(f"  ⚠ 自動壓縮失敗：{event.data['error']}")
         elif event.type == "run_end":
             _print_stop_notice(event.data["result"])
+
+
+async def _compact_now(
+    agent: agents.Agent, session: sessions.Session, loaded: project_lib.Project
+) -> None:
+    """處理聊天中的 /compact。"""
+    try:
+        result = await loop.compact(
+            agent,
+            session,
+            settings=loaded.compaction,
+            memory=loaded.memory,
+        )
+    except compaction_lib.CompactionError as error:
+        print(f"  ✗ 壓縮失敗：{error}")
+        return
+    if result is None:
+        print("  對話還很短，沒有可以壓縮的內容。")
+        return
+    _print_compaction(result)
+
+
+def _print_compaction(result: compaction_lib.CompactionResult) -> None:
+    """顯示壓縮了多少內容。"""
+    parts = []
+    if result.summarized:
+        parts.append(f"摘要了 {result.summarized} 則較早的訊息")
+    if result.pruned:
+        parts.append(f"修剪了 {result.pruned} 個超大的工具結果")
+    detail = "、".join(parts) or "沒有變動"
+    print(
+        f"  ⟳ 對話已壓縮：{detail}"
+        f"（約 {result.tokens_before:,} → {result.tokens_after:,} tokens）"
+    )
 
 
 def _print_stop_notice(result: datatypes.RunResult) -> None:

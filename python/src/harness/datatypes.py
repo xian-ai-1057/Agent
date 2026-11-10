@@ -94,6 +94,8 @@ class Event:
         tool_call:   {"call": ToolCall}
         tool_result: {"result": ToolResult}
         handoff:     {"from": str, "to": str}（agent 名稱）
+        compaction:  {"result": compaction.CompactionResult}（對話被壓縮）
+        compaction_failed: {"error": str}（自動壓縮失敗，對話照常繼續）
         run_end:     {"result": RunResult}
 
     Attributes:
@@ -111,10 +113,12 @@ class RunResult:
 
     Attributes:
         output: agent 最後的文字回覆。
-        messages: 這次 run 結束後的完整對話紀錄。
+        messages: 這次 run 結束後的完整對話紀錄（含壓縮紀錄；模型實際
+            看到的歷史用 compaction.model_history 取得）。
         usage: 這次 run 累計的 token 用量。
         turns: 呼叫模型的次數。
-        stop_reason: end_turn、max_turns、max_tokens 或模型回報的其他原因。
+        stop_reason: end_turn、max_turns、max_tokens、blocked 或模型回報的
+            其他原因。
         agent_name: 結束時負責對話的 agent（發生 handoff 時會和起始的
             agent 不同）。
     """

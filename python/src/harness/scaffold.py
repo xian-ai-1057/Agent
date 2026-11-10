@@ -31,6 +31,13 @@ permissions:
 #   path: knowledge
 #   embeddingModel: openai/text-embedding-3-small
 
+# 對話壓縮（預設開啟）：對話接近模型上限時，把較舊的歷史濃縮成檢查點。
+# 用 litellm 查不到上限的模型（例如自架端點）要寫 contextWindow。
+# compaction:
+#   contextWindow: 128000
+#   thresholdRatio: 0.8    # 超過上限的 80% 時開始壓縮
+#   retainRatio: 0.15      # 原文保留最近約 15% 的對話
+
 # 訊息防護：在訊息交給模型前、回覆送出前檢查
 # guardrails:
 #   maskPii: true          # 遮蔽 Email、手機、身分證字號、信用卡號

@@ -17,6 +17,7 @@ import {
 import { join } from "node:path";
 import { type Agent, DEFAULT_MAX_TURNS } from "../agent.ts";
 import { fileTools, resolvePath } from "../builtin/files.ts";
+import { lastMessage } from "../compaction.ts";
 import { runStream } from "../loop.ts";
 import { complete, defaultModel, type ModelFn } from "../model.ts";
 import {
@@ -202,7 +203,7 @@ export class Workspace {
   retry(id: string): SessionSummary {
     const state = this.require(id);
     this.assertIdle(state);
-    const last = state.session.messages.at(-1);
+    const last = lastMessage(state.session.messages);
     if (last?.role !== "user" && last?.role !== "tool") {
       throw new WebError(400, "這段對話沒有需要重試的內容");
     }

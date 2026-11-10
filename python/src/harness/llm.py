@@ -20,6 +20,15 @@ from harness import datatypes
 
 FALLBACK_MODEL = "anthropic/claude-opus-5-5"
 EMBED_BATCH_SIZE = 64
+# 沒被 litellm 轉成 ContextWindowExceededError 時，用來辨識的錯誤訊息。
+_OVERFLOW_PATTERNS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "prompt is too long",
+    "input is too long",
+    "exceeds the context",
+)
 
 # 模型函式：依序產生文字片段（str），最後產生一個 ModelResponse。
 ModelFn = Callable[
@@ -115,6 +124,24 @@ def _field(row: Any, name: str) -> Any:
     if isinstance(row, dict):
         return row[name]
     return getattr(row, name)
+
+
+def is_context_overflow(error: BaseException) -> bool:
+    """判斷模型錯誤是不是「請求超過上下文上限」。
+
+    litellm 會把多數供應商的這類錯誤轉成 ContextWindowExceededError；
+    自架端點等沒被轉換的情況，再用錯誤訊息裡的常見寫法判斷。
+
+    Args:
+        error: 呼叫模型時發生的例外。
+
+    Returns:
+        是超過上下文上限的錯誤時為 True。
+    """
+    if type(error).__name__ == "ContextWindowExceededError":
+        return True
+    text = str(error).lower()
+    return any(pattern in text for pattern in _OVERFLOW_PATTERNS)
 
 
 def _endpoint_options() -> dict[str, Any]:
