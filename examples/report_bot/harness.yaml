@@ -1,0 +1,8 @@
+name: report_bot
+default_agent: main
+
+# 不寫 model 時使用環境變數 HARNESS_MODEL。
+# model: anthropic/claude-opus-5-5
+
+permissions:
+  mode: ask
