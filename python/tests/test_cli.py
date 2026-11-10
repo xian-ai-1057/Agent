@@ -226,6 +226,38 @@ def test_model_flag_applies_to_agent_that_takes_over(
     ]
 
 
+def test_run_shows_subagent_progress(project_dir, scripted_model, capsys):
+    agents_dir = project_dir / "agents"
+    (agents_dir / "main.md").write_text(
+        "---\nsubagents: [researcher]\ntools: []\n---\n你是主持人\n",
+        encoding="utf-8",
+    )
+    (agents_dir / "researcher.md").write_text(
+        "---\ndescription: 查資料\ntools: [files]\n---\n你是研究員\n",
+        encoding="utf-8",
+    )
+    scripted_model(
+        [
+            conftest.tool_response(
+                ("ask_researcher", {"task": "看看有什麼檔案"})
+            ),
+            conftest.tool_response(("list_dir", {"path": "不存在"})),
+            conftest.text_response("找不到那個資料夾"),
+            conftest.text_response("研究員說找不到"),
+        ]
+    )
+
+    cli.main(["run", "-p", str(project_dir), "有什麼檔案？"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert '  ⚙ ask_researcher({"task": "看看有什麼檔案"})' in lines
+    assert '    ↳ researcher ⚙ list_dir({"path": "不存在"})' in lines
+    assert any(line.startswith("    ↳ researcher ✗ ") for line in lines)
+    assert "研究員說找不到" in lines
+    # subagent 的文字回覆只當成工具結果交回，不另外印出。
+    assert "找不到那個資料夾" not in lines
+
+
 def _enable(project_dir, text):
     config = project_dir / "harness.yaml"
     config.write_text(

@@ -1,5 +1,7 @@
 """subagents 與 handoffs 的測試。"""
 
+import asyncio
+
 import pytest
 
 import harness
@@ -222,6 +224,177 @@ class TestSubagents:
 
         with pytest.raises(ValueError, match="工具名稱重複：ask_researcher"):
             await harness.run(main, "嗨", model_fn=fake_model([]))
+
+
+class TestSubagentStreaming:
+    """串流時看得到 subagent 內部的進度。"""
+
+    def _agents(self, *tools, helper=None):
+        researcher = harness.Agent(
+            name="researcher",
+            instructions="你是研究員",
+            tools=list(tools),
+            subagents=[helper] if helper else [],
+        )
+        main = harness.Agent(
+            name="main", instructions="你是主持人", subagents=[researcher]
+        )
+        return main
+
+    async def _events(self, agent, model):
+        return [
+            event
+            async for event in harness.run_stream(
+                agent, "十月？", model_fn=model
+            )
+        ]
+
+    @staticmethod
+    def _describe(event):
+        if event.type != "subagent":
+            return event.type
+        path = "/".join(event.data["path"])
+        return f"{path}:{event.data['event'].type}"
+
+    async def test_subagent_events_arrive_between_call_and_result(
+        self, fake_model, lookup_tool
+    ):
+        main = self._agents(lookup_tool)
+        model = fake_model(TestSubagents()._script())
+
+        events = await self._events(main, model)
+
+        kinds = [self._describe(event) for event in events]
+        assert kinds == [
+            "message",
+            "tool_call",
+            "researcher:message",
+            "researcher:tool_call",
+            "researcher:tool_result",
+            "researcher:text_delta",
+            "researcher:message",
+            "researcher:run_end",
+            "tool_result",
+            "text_delta",
+            "message",
+            "run_end",
+        ]
+        progress = [event for event in events if event.type == "subagent"]
+        assert {event.data["call_id"] for event in progress} == {
+            "call_0_ask_researcher"
+        }
+        assert progress[1].data["agent"] == "researcher"
+        assert progress[1].data["event"].data["call"].name == "lookup"
+        assert progress[3].data["event"].data["text"] == "十月賣了 192,000"
+
+    async def test_progress_is_streamed_while_subagent_is_still_working(
+        self, fake_model
+    ):
+        # 工具要等外面收到 subagent 的 tool_call 才會結束；如果進度要等
+        # 工具做完才送出，這裡會卡住。
+        seen = asyncio.Event()
+
+        @harness.tool
+        async def slow_lookup(keyword: str) -> str:
+            """查詢資料。"""
+            await seen.wait()
+            return "資料"
+
+        main = self._agents(slow_lookup)
+        model = fake_model(
+            [
+                conftest.tool_response(("ask_researcher", {"task": "查"})),
+                conftest.tool_response(("slow_lookup", {"keyword": "十月"})),
+                conftest.text_response("查到了"),
+                conftest.text_response("完成"),
+            ]
+        )
+
+        async def consume():
+            async for event in harness.run_stream(main, "查", model_fn=model):
+                if (
+                    event.type == "subagent"
+                    and event.data["event"].type == "tool_call"
+                ):
+                    seen.set()
+                if event.type == "run_end":
+                    return event.data["result"]
+
+        result = await asyncio.wait_for(consume(), timeout=5)
+
+        assert result.output == "完成"
+
+    async def test_nested_subagent_events_carry_full_path(
+        self, fake_model, lookup_tool
+    ):
+        helper = harness.Agent(
+            name="helper", instructions="你是助手", tools=[lookup_tool]
+        )
+        main = self._agents(helper=helper)
+        model = fake_model(
+            [
+                conftest.tool_response(("ask_researcher", {"task": "查"})),
+                conftest.tool_response(("ask_helper", {"task": "幫忙查"})),
+                conftest.tool_response(("lookup", {"keyword": "十月"})),
+                conftest.text_response("helper 查到了"),
+                conftest.text_response("researcher 整理好了"),
+                conftest.text_response("完成"),
+            ]
+        )
+
+        events = await self._events(main, model)
+
+        nested = [
+            event
+            for event in events
+            if event.type == "subagent" and event.data["agent"] == "helper"
+        ]
+        assert nested
+        assert {tuple(event.data["path"]) for event in nested} == {
+            ("researcher", "helper")
+        }
+        assert {event.data["call_id"] for event in nested} == {
+            "call_0_ask_researcher"
+        }
+        calls = [
+            event.data["event"].data["call"].name
+            for event in nested
+            if event.data["event"].type == "tool_call"
+        ]
+        assert calls == ["lookup"]
+
+    async def test_parallel_subagents_are_told_apart_by_call_id(
+        self, fake_model
+    ):
+        first = harness.Agent(name="first", instructions="一")
+        second = harness.Agent(name="second", instructions="二")
+        main = harness.Agent(
+            name="main", instructions="主", subagents=[first, second]
+        )
+        model = fake_model(
+            [
+                conftest.tool_response(
+                    ("ask_first", {"task": "甲"}),
+                    ("ask_second", {"task": "乙"}),
+                ),
+                conftest.text_response("一號完成"),
+                conftest.text_response("二號完成"),
+                conftest.text_response("都好了"),
+            ]
+        )
+
+        events = await self._events(main, model)
+
+        ends = {
+            event.data["call_id"]: event.data["agent"]
+            for event in events
+            if event.type == "subagent"
+            and event.data["event"].type == "run_end"
+        }
+        assert ends == {
+            "call_0_ask_first": "first",
+            "call_1_ask_second": "second",
+        }
 
 
 class TestHandoffs:

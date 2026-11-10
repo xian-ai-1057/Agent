@@ -134,7 +134,14 @@ function handle(event: ServerEvent): void {
     }));
   }
   const detail = state.details[id];
-  if (!detail) return;
+  if (!detail) {
+    // 剛建立的對話可能還在讀取內容，讀到的內容又早於這個步驟；subagent
+    // 的步驟不會在 run_end 前重新讀取，所以正在看的對話要再讀一次。
+    if (event.type === "subagent_step" && location.pathname === `/s/${id}`) {
+      void loadSession(id);
+    }
+    return;
+  }
   const next = apply(detail, event);
   setState((s) => ({ ...s, details: { ...s.details, [id]: next } }));
   if (
@@ -175,6 +182,19 @@ function apply(detail: SessionDetail, event: ServerEvent): SessionDetail {
       };
     case "approval":
       return { ...detail, approvals: [...detail.approvals, event.approval] };
+    case "subagent_step": {
+      const all = detail.subagentSteps ?? {};
+      const steps = all[event.callId] ?? [];
+      const index = steps.findIndex((step) => step.id === event.step.id);
+      const next =
+        index === -1
+          ? [...steps, event.step]
+          : steps.map((step, i) => (i === index ? event.step : step));
+      return {
+        ...detail,
+        subagentSteps: { ...all, [event.callId]: next },
+      };
+    }
     case "approval_resolved":
       return {
         ...detail,

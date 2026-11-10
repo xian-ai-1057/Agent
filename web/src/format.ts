@@ -21,10 +21,12 @@ export const STOP_NOTICES: Record<string, string> = {
 /** 正在做什麼，例如「執行 read_file」。 */
 export function activityLabel(activity: Activity | undefined): string {
   if (!activity) return "";
-  if (activity.kind === "waiting") return `等你確認 ${activity.tool ?? ""}`;
-  if (activity.kind === "tool") return `執行 ${activity.tool ?? "工具"}`;
-  if (activity.kind === "writing") return "撰寫回覆";
-  return "思考中";
+  const who = activity.agent ? `${activity.agent}：` : "";
+  if (activity.kind === "waiting")
+    return `${who}等你確認 ${activity.tool ?? ""}`;
+  if (activity.kind === "tool") return `${who}執行 ${activity.tool ?? "工具"}`;
+  if (activity.kind === "writing") return `${who}撰寫回覆`;
+  return `${who}思考中`;
 }
 
 export function isBusy(summary: SessionSummary | undefined): boolean {
