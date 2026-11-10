@@ -22,6 +22,7 @@
 
 export { type Agent, type AgentOptions, defineAgent } from "./agent.ts";
 export { fileTools } from "./builtin/files.ts";
+export { isRecord, lastMessage, modelHistory } from "./compaction.ts";
 export {
   allow,
   type Decision,

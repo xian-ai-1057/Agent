@@ -13,8 +13,8 @@ agent 的 frontmatter 可以用 subagents 與 handoffs 列出其他 agent 的名
 讓它把工作交出去或把對話轉交出去（見 delegation 模組）；用 skills 列出
 可用的 skill；用 knowledge 掛上知識庫。
 
-skills、knowledge、memory、guardrails 只有 Python 版支援，TypeScript 版
-會忽略這些設定。
+skills、knowledge、memory、guardrails、compaction 只有 Python 版支援，
+TypeScript 版會忽略這些設定。
 
 harness.yaml 裡的 mcpServers 是給 TypeScript 版用的，這裡不會啟動；
 被它當成伺服器執行的 tools/*.py 也不會被當成工具模組載入。
@@ -30,6 +30,7 @@ import yaml
 
 from harness import agents
 from harness import builtin
+from harness import compaction as compaction_lib
 from harness import guardrails
 from harness import hooks as hooks_lib
 from harness import knowledge as knowledge_lib
@@ -62,6 +63,8 @@ class Project:
         memory: 長期記憶，harness.yaml 沒有開啟 memory 時為 None。
         hooks: 依 guardrails 設定建立的 hooks，執行時傳給 run；也可以
             再加上自己的處理函式。
+        compaction: 對話壓縮的設定，預設開啟；harness.yaml 寫
+            compaction: false 時為 None。
     """
 
     name: str
@@ -76,6 +79,7 @@ class Project:
     knowledge: knowledge_lib.Knowledge | None = None
     memory: memory_lib.MemoryStore | None = None
     hooks: hooks_lib.Hooks = dataclasses.field(default_factory=hooks_lib.Hooks)
+    compaction: compaction_lib.Compaction | None = None
 
     @property
     def sessions_dir(self) -> pathlib.Path:
@@ -148,6 +152,7 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
         if config.get("memory")
         else None,
         hooks=_load_guardrails(config.get("guardrails") or {}),
+        compaction=_load_compaction(config.get("compaction")),
     )
 
 
@@ -405,6 +410,39 @@ def _load_knowledge(
         embedding_model=settings.get("embeddingModel"),
         chunk_size=settings.get("chunkSize") or 800,
         cache_dir=root / KNOWLEDGE_CACHE_DIR,
+    )
+
+
+_COMPACTION_FIELDS = {
+    "contextWindow": "context_window",
+    "thresholdRatio": "threshold_ratio",
+    "retainRatio": "retain_ratio",
+    "summaryModel": "summary_model",
+    "summaryMaxTokens": "summary_max_tokens",
+    "pruneChars": "prune_chars",
+    "pruneHead": "prune_head",
+    "pruneTail": "prune_tail",
+    "auto": "auto",
+    "maxOverflowRetries": "max_overflow_retries",
+}
+
+
+def _load_compaction(config: Any) -> compaction_lib.Compaction | None:
+    """依 harness.yaml 的 compaction 區塊建立設定；沒寫時使用預設值。"""
+    if config is False:
+        return None
+    if config is None or config is True:
+        return compaction_lib.Compaction()
+    if not isinstance(config, dict):
+        raise ValueError("compaction 必須是 true、false 或設定區塊")
+    unknown = sorted(set(config) - set(_COMPACTION_FIELDS))
+    if unknown:
+        raise ValueError(
+            f"compaction 有不認得的設定：{unknown}，"
+            f"可用的有：{sorted(_COMPACTION_FIELDS)}"
+        )
+    return compaction_lib.Compaction(
+        **{_COMPACTION_FIELDS[key]: value for key, value in config.items()}
     )
 
 

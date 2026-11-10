@@ -24,11 +24,13 @@
 | Skills | 尚未支援 | [支援](python/README.md#skills) |
 | 長期記憶 | 尚未支援 | [支援](python/README.md#長期記憶) |
 | 訊息防護（個資遮蔽、提示注入） | 尚未支援 | [支援](python/README.md#訊息防護) |
+| 對話壓縮 | 讀得懂 Python 版的壓縮紀錄，本身不壓縮 | [支援](python/README.md#對話壓縮) |
 
 怎麼選：
 
 - **專案是 Python、想用最少的步驟接上**，要把 agent 嵌進既有的 Python
-  網頁服務，或需要多個 agent 協作、知識庫、skills、長期記憶、訊息防護：
+  網頁服務，或需要多個 agent 協作、知識庫、skills、長期記憶、訊息防護、
+  對話壓縮：
   用 [Python 版](python/README.md)。
 - **專案是 TypeScript / Node.js**，或要連接現成的 MCP 伺服器：用
   TypeScript 版。

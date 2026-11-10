@@ -312,3 +312,59 @@ def test_guardrails_in_harness_yaml_block_injection(
     assert code == 0
     assert "已被擋下" in output
     assert model.requests == []
+
+
+class TestCompactCommand:
+    """聊天中的 /compact 與自動壓縮的顯示。"""
+
+    def test_compact_on_short_conversation(self, project_dir, capsys):
+        code = cli.main(["run", "-p", str(project_dir), "/compact"])
+
+        assert code == 0
+        assert "沒有可以壓縮的內容" in capsys.readouterr().out
+
+    def test_compact_summarizes_resumed_session(
+        self, project_dir, scripted_model, capsys
+    ):
+        scripted_model(
+            [
+                conftest.text_response("第一次的回答" * 100),
+                conftest.text_response("好"),
+            ]
+        )
+        cli.main(["run", "-p", str(project_dir), "第一個問題" * 100])
+        cli.main(["run", "-p", str(project_dir), "-c", "第二個問題"])
+        model = scripted_model([conftest.text_response("## 摘要\n- 兩個問題")])
+        capsys.readouterr()
+
+        code = cli.main(["run", "-p", str(project_dir), "-c", "/compact"])
+
+        output = capsys.readouterr().out
+        assert code == 0
+        assert "⟳ 對話已壓縮：摘要了 3 則較早的訊息" in output
+        assert len(model.requests) == 1
+
+    def test_compact_failure_is_reported(
+        self, project_dir, scripted_model, capsys
+    ):
+        scripted_model([conftest.text_response("答")])
+        cli.main(["run", "-p", str(project_dir), "問"])
+        scripted_model([conftest.text_response("")])
+        cli.main(["run", "-p", str(project_dir), "-c", "/compact"])
+
+        assert "壓縮失敗：摘要模型沒有回傳任何文字" in capsys.readouterr().out
+
+    def test_auto_compaction_is_shown_during_run(
+        self, project_dir, scripted_model, capsys
+    ):
+        _enable(project_dir, "compaction:\n  contextWindow: 300\n")
+        scripted_model([conftest.text_response("回答" * 200)])
+        cli.main(["run", "-p", str(project_dir), "問題"])
+        scripted_model(
+            [conftest.text_response("## 摘要"), conftest.text_response("好")]
+        )
+        capsys.readouterr()
+
+        cli.main(["run", "-p", str(project_dir), "-c", "再問"])
+
+        assert "⟳ 對話已壓縮" in capsys.readouterr().out

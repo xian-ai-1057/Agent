@@ -1,6 +1,7 @@
 /** 主迴圈：呼叫模型 → 執行工具 → 把結果送回，直到模型不再呼叫工具。 */
 
 import type { Agent } from "./agent.ts";
+import { lastMessage, modelHistory } from "./compaction.ts";
 import { Hooks } from "./hooks.ts";
 import { complete, defaultModel, type ModelFn } from "./model.ts";
 import {
@@ -148,10 +149,15 @@ export function formatArguments(call: ToolCall, limit = 200): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-/** 在對話紀錄前面加上 system prompt。 */
+/**
+ * 在模型看得到的歷史前面加上 system prompt。
+ *
+ * 歷史由對話紀錄推算：Python 版壓縮過的部分以摘要取代（見 compaction.ts）。
+ */
 function buildRequest(agent: Agent, messages: Message[]): Message[] {
-  if (!agent.instructions) return [...messages];
-  return [{ role: "system", content: agent.instructions }, ...messages];
+  const history = modelHistory(messages);
+  if (!agent.instructions) return history;
+  return [{ role: "system", content: agent.instructions }, ...history];
 }
 
 function toStopReason(finishReason: string): string {
@@ -172,7 +178,7 @@ function toToolMessage(result: ToolResult): Message {
 
 /** 不加新訊息接著跑時，最後一則必須是使用者訊息或工具結果。 */
 function assertResumable(session: Session): void {
-  const last = session.messages.at(-1);
+  const last = lastMessage(session.messages);
   if (last?.role !== "user" && last?.role !== "tool") {
     throw new Error(
       "對話紀錄的最後一則不是使用者訊息或工具結果，沒有可以接續的地方",
