@@ -173,6 +173,11 @@ tools: [reports]
 
 整個專案共用的背景知識（名詞定義、單位、格式慣例）寫在 `AGENTS.md`。
 
+原本的專案如果有好幾個各司其職的流程（例如先分類問題、再交給不同的
+處理程式），可以拆成多個 agent，用 subagents 或 handoffs 串起來。目前
+只有 Python 版支援，寫法見
+[Python 版 README](../python/README.md#多個-agent-協作)。
+
 ### 5. 測試
 
 ```bash

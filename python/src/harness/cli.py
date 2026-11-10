@@ -149,10 +149,11 @@ def _pick_agent(
         raise ValueError(
             f"沒有 {name} 這個 agent，可用的有：{list(loaded.agents)}"
         )
-    agent = loaded.agents[name]
     if model:
-        agent = dataclasses.replace(agent, model=model)
-    return agent
+        # 對話可能轉交給別的 agent，所以整個專案的 agent 都改用這個模型。
+        for item in loaded.agents.values():
+            item.model = model
+    return loaded.agents[name]
 
 
 def _open_session(
@@ -197,6 +198,8 @@ async def _run_turn(
             print(f"  ⚙ {call.name}({loop.format_arguments(call)})")
         elif event.type == "tool_result" and event.data["result"].is_error:
             print(f"  ✗ {event.data['result'].output}")
+        elif event.type == "handoff":
+            print(f"  → 對話轉交給 {event.data['to']}")
         elif event.type == "run_end":
             _print_stop_notice(event.data["result"])
 
