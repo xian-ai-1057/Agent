@@ -65,8 +65,8 @@
 需要 Node.js 22.18 以上。
 
 ```bash
-git clone https://github.com/xian-ai-1057/Agent.git
-cd Agent
+git clone https://github.com/xian-ai-1057/AgentHarness.git
+cd AgentHarness
 npm install          # 安裝相依套件並編譯
 npm install -g .     # 讓 harness 指令在任何資料夾都能用
 ```
@@ -76,7 +76,7 @@ npm install -g .     # 讓 harness 指令在任何資料夾都能用
 只想在某個 Node.js 專案裡當函式庫用的話，在該專案執行：
 
 ```bash
-npm install github:xian-ai-1057/Agent
+npm install github:xian-ai-1057/AgentHarness
 ```
 
 開發這個框架本身：`npm test` 執行測試，`npm run lint` 檢查格式，
@@ -530,11 +530,15 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 - **`deps` 不會傳到 Python 工具伺服器。** 伺服器是獨立的行程，使用者
   身分這類資訊目前只能靠環境變數傳遞，所以一個伺服器只適合服務一位
   使用者。需要依使用者區分資料時，同樣請用 Python 版。
-- Subagents 與 handoffs（agent 之間互相呼叫或轉交）：目前只有 Python 版
-  支援，TypeScript 版會忽略 agent 檔案裡的這兩個欄位
-- Skills（需要時才載入的說明文件）
-- 跨對話的長期記憶
-- 對話過長時的自動壓縮
-- Slack / Telegram 等訊息平台的接口
+- **以下功能目前只有 Python 版支援**，TypeScript 版會忽略相關設定，
+  同一個專案仍然可以執行（只是沒有這些功能）：
+  - Subagents 與 handoffs（agent 之間互相呼叫或轉交）
+  - 知識庫（RAG）
+  - Skills（需要時才載入的說明文件）
+  - 跨對話的長期記憶
+  - 訊息防護（個資遮蔽、提示注入偵測）
+  - 對話過長時的自動壓縮（Python 版壓縮過的對話，TypeScript 版可以
+    接著用）
+- Slack / Telegram 等訊息平台的接口（兩個版本都還沒有）
 - 網頁上的對話在伺服器重新啟動後可以繼續看與接著問，但「工作中」只
-  列出這次啟動後跑過的對話
+  列出這次啟動後跑過的對話（兩個版本的網頁版都一樣）
