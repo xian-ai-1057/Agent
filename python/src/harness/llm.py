@@ -4,7 +4,8 @@
     直接連供應商：模型名稱用 litellm 的格式（anthropic/claude-opus-5-5），
         金鑰用該供應商的環境變數（ANTHROPIC_API_KEY…）。
     連 OpenAI 相容端點：設定 HARNESS_BASE_URL（與 HARNESS_API_KEY），
-        模型名稱照端點的寫法。這與 TypeScript 版使用相同的環境變數。
+        模型名稱照端點的寫法（LiteLLM Proxy 就是它設定檔裡的
+        model_name），會原樣送出。這與 TypeScript 版使用相同的環境變數。
 
 主迴圈只認得 ModelFn 這個介面，所以測試可以換成假的模型函式，完全
 不需要連網。
@@ -19,6 +20,8 @@ from typing import Any
 from harness import datatypes
 
 FALLBACK_MODEL = "anthropic/claude-opus-5-5"
+# litellm 文件裡連 LiteLLM Proxy 的寫法；送給端點前拿掉。
+PROXY_PREFIX = "litellm_proxy/"
 EMBED_BATCH_SIZE = 64
 # 沒被 litellm 轉成 ContextWindowExceededError 時，用來辨識的錯誤訊息。
 _OVERFLOW_PATTERNS = (
@@ -70,7 +73,7 @@ async def complete(
     litellm.suppress_debug_info = True
 
     kwargs: dict[str, Any] = {
-        "model": model,
+        "model": _endpoint_model(model),
         "messages": messages,
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -112,7 +115,7 @@ async def embed(model: str, texts: list[str]) -> list[list[float]]:
     for start in range(0, len(texts), EMBED_BATCH_SIZE):
         batch = texts[start : start + EMBED_BATCH_SIZE]
         response = await litellm.aembedding(
-            model=model, input=batch, **_endpoint_options()
+            model=_endpoint_model(model), input=batch, **_endpoint_options()
         )
         rows = sorted(response.data, key=lambda row: _field(row, "index"))
         vectors += [list(_field(row, "embedding")) for row in rows]
@@ -138,6 +141,8 @@ async def rerank(model: str, query: str, documents: list[str]) -> list[float]:
     litellm.suppress_debug_info = True
     if not documents:
         return []
+    if os.environ.get("HARNESS_BASE_URL"):
+        model = model.removeprefix(PROXY_PREFIX)
     response = await litellm.arerank(
         model=model,
         query=query,
@@ -149,6 +154,28 @@ async def rerank(model: str, query: str, documents: list[str]) -> list[float]:
     for row in response.results or []:
         scores[_field(row, "index")] = float(_field(row, "relevance_score"))
     return scores
+
+
+def _endpoint_model(model: str) -> str:
+    """連 OpenAI 相容端點時，讓模型名稱原樣送到端點。
+
+    端點模式下 litellm 會把開頭的 openai/ 當成供應商拿掉（寫
+    openai/text-embedding-3-small，端點收到的是 text-embedding-3-small），
+    其他開頭則保留，兩種寫法的結果不一致。這裡固定在前面多加一層
+    openai/，litellm 只拿掉這一層，端點收到的就是使用者寫的名稱。
+
+    litellm_proxy/ 開頭是 litellm 文件裡連 LiteLLM Proxy 的寫法，Proxy
+    的模型名稱不會這樣開頭，所以先拿掉。
+
+    Args:
+        model: 設定裡寫的模型名稱。
+
+    Returns:
+        交給 litellm 的模型名稱；沒有設定 HARNESS_BASE_URL 時原樣回傳。
+    """
+    if not os.environ.get("HARNESS_BASE_URL"):
+        return model
+    return f"openai/{model.removeprefix(PROXY_PREFIX)}"
 
 
 def _rerank_endpoint_options() -> dict[str, Any]:

@@ -259,3 +259,51 @@ async def test_rerank_uses_proxy_endpoint_and_keeps_document_order(endpoint):
 async def test_rerank_without_documents_skips_the_call(endpoint):
     assert await llm.rerank("my-reranker", "退貨", []) == []
     assert endpoint.received == []
+
+
+@pytest.mark.parametrize(
+    ("written", "sent"),
+    [
+        ("claude", "claude"),
+        # 以前 openai/ 開頭會被 litellm 拿掉，其他開頭卻保留。
+        ("openai/gpt-5", "openai/gpt-5"),
+        ("anthropic/claude-opus-5-5", "anthropic/claude-opus-5-5"),
+        ("litellm_proxy/claude", "claude"),
+    ],
+)
+async def test_endpoint_receives_chat_model_name_as_written(
+    endpoint, written, sent
+):
+    async for _ in llm.complete(written, _MESSAGES, [], {}):
+        pass
+
+    assert endpoint.received[0]["body"]["model"] == sent
+
+
+@pytest.mark.parametrize(
+    ("written", "sent"),
+    [
+        ("embed", "embed"),
+        ("openai/text-embedding-3-small", "openai/text-embedding-3-small"),
+        ("litellm_proxy/embed", "embed"),
+    ],
+)
+async def test_endpoint_receives_embedding_model_name_as_written(
+    endpoint, written, sent
+):
+    await llm.embed(written, ["a"])
+
+    assert endpoint.received[0]["body"]["model"] == sent
+
+
+async def test_endpoint_receives_rerank_model_without_proxy_prefix(endpoint):
+    await llm.rerank("litellm_proxy/rerank", "退貨", ["a"])
+
+    assert endpoint.received[0]["body"]["model"] == "rerank"
+
+
+def test_model_names_are_untouched_without_endpoint(monkeypatch):
+    monkeypatch.delenv("HARNESS_BASE_URL", raising=False)
+
+    assert llm._endpoint_model("openai/gpt-5") == "openai/gpt-5"
+    assert llm._endpoint_model("litellm_proxy/x") == "litellm_proxy/x"
