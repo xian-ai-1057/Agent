@@ -15,6 +15,7 @@ import {
   ChevronIcon,
   CrossIcon,
   FileIcon,
+  RetryIcon,
   ShieldIcon,
   WarnIcon,
 } from "./Icons.tsx";
@@ -53,6 +54,14 @@ function BlockView({ block }: { block: Block }) {
     return (
       <div className="anim-in">
         <Markdown text={block.text} streaming={block.streaming} />
+      </div>
+    );
+  }
+  if (block.kind === "notice") {
+    return (
+      <div className="notice anim-in">
+        <RetryIcon />
+        {block.text}
       </div>
     );
   }

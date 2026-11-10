@@ -53,7 +53,7 @@ class _Toolbox:
 
 async def run_stream(
     agent: agents.Agent,
-    user_input: str,
+    user_input: str | None,
     *,
     session: sessions.Session | None = None,
     hooks: hooks_lib.Hooks | None = None,
@@ -69,7 +69,8 @@ async def run_stream(
     Args:
         agent: 起始的 agent。對話先前已轉交（handoff）給別的 agent 時，
             會自動由接手的那個 agent 繼續，所以每次都傳同一個即可。
-        user_input: 使用者這一輪的訊息。
+        user_input: 使用者這一輪的訊息。傳 None 表示不加新訊息，直接從
+            對話紀錄的最後一則接著跑（例如上一輪連不上模型，修好後重試）。
         session: 對話紀錄，傳入同一個 session 就能延續對話；不傳則是
             一次性的對話。
         hooks: 要套用的 hooks。
@@ -84,6 +85,10 @@ async def run_stream(
 
     Yields:
         Event，最後一個一定是 run_end。
+
+    Raises:
+        ValueError: user_input 為 None，但對話紀錄的最後一則不是使用者
+            訊息或工具結果，沒有可以接續的地方。
     """
     options = _RunOptions(
         hooks=hooks or hooks_lib.Hooks(),
@@ -103,12 +108,14 @@ async def run_stream(
 
 async def _run_loop(
     entry: agents.Agent,
-    user_input: str,
+    user_input: str | None,
     session: sessions.Session,
     options: _RunOptions,
 ) -> AsyncIterator[datatypes.Event]:
     """主迴圈本體，最上層的對話與 subagent 的對話都走這裡。"""
     _close_dangling_tool_calls(session)
+    if user_input is None:
+        _assert_resumable(session)
     agent = delegation.active_agent(entry, session.messages)
     usage = datatypes.Usage()
     context = _make_context(agent, session, options)
@@ -116,7 +123,9 @@ async def _run_loop(
     # run_start / run_end 只對使用者直接對話的那一層觸發；subagent 的
     # 執行屬於一次工具呼叫，由 pre_tool_use / post_tool_use 涵蓋。
     if options.user_facing:
-        await options.hooks.emit("run_start", user_input, context)
+        await options.hooks.emit("run_start", user_input or "", context)
+    # 接著跑（user_input 為 None）時，訊息在上一輪就已經檢查並存進紀錄。
+    if options.user_facing and user_input is not None:
         user_input, blocked = await options.hooks.filter_text(
             "pre_user_message", user_input, context
         )
@@ -127,7 +136,8 @@ async def _run_loop(
             ):
                 yield event
             return
-    session.append({"role": "user", "content": user_input})
+    if user_input is not None:
+        session.append({"role": "user", "content": user_input})
 
     output = ""
     stop_reason = "max_turns"
@@ -396,7 +406,7 @@ def _loaded_skill(results: list[datatypes.ToolResult]) -> bool:
 
 
 async def run(
-    agent: agents.Agent, user_input: str, **kwargs: Any
+    agent: agents.Agent, user_input: str | None, **kwargs: Any
 ) -> datatypes.RunResult:
     """執行 agent 直到結束，回傳最後結果。
 
@@ -416,7 +426,7 @@ async def run(
 
 
 def run_sync(
-    agent: agents.Agent, user_input: str, **kwargs: Any
+    agent: agents.Agent, user_input: str | None, **kwargs: Any
 ) -> datatypes.RunResult:
     """run 的同步版本，給沒有使用 asyncio 的程式呼叫。
 
@@ -568,6 +578,16 @@ def _tool_message(result: datatypes.ToolResult) -> datatypes.Message:
         "name": result.name,
         "content": content,
     }
+
+
+def _assert_resumable(session: sessions.Session) -> None:
+    """不加新訊息接著跑時，最後一則必須是使用者訊息或工具結果。"""
+    history = [m for m in session.messages if not compaction_lib.is_record(m)]
+    last = history[-1] if history else {}
+    if last.get("role") not in ("user", "tool"):
+        raise ValueError(
+            "對話紀錄的最後一則不是使用者訊息或工具結果，沒有可以接續的地方"
+        )
 
 
 def _close_dangling_tool_calls(session: sessions.Session) -> None:

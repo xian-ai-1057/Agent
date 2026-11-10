@@ -140,7 +140,8 @@ function handle(event: ServerEvent): void {
   if (
     event.type === "run_end" ||
     event.type === "run_error" ||
-    event.type === "run_stopped"
+    event.type === "run_stopped" ||
+    event.type === "session_reload"
   ) {
     void loadSession(id);
   }

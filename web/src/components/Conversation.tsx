@@ -114,6 +114,15 @@ export function Conversation({ id }: { id: string }) {
   const modeLabel = detail.mode
     ? MODE_LABELS[detail.mode]
     : MODE_LABELS[projectMode];
+  // 回覆被擋下時，換上的說明已經是 agent 的回覆；只有使用者的訊息被
+  // 擋下（沒有存進紀錄）時才另外顯示。
+  const lastReply = detail.messages.findLast((m) => m.role === "assistant");
+  const blockedNotice =
+    summary.stopReason === "blocked" &&
+    summary.notice &&
+    summary.notice !== lastReply?.content
+      ? summary.notice
+      : undefined;
   const showThinking =
     summary.status === "running" &&
     summary.activity?.kind === "thinking" &&
@@ -166,9 +175,16 @@ export function Conversation({ id }: { id: string }) {
             {summary.status === "stopped" && (
               <div className="notice anim-in">你停止了這一輪。</div>
             )}
+            {blockedNotice && (
+              <div className="notice anim-in">
+                <ShieldIcon />
+                這則訊息被防護規則擋下，沒有送給模型：{blockedNotice}
+              </div>
+            )}
             {summary.status === "done" &&
               summary.stopReason &&
-              summary.stopReason !== "end_turn" && (
+              summary.stopReason !== "end_turn" &&
+              summary.stopReason !== "blocked" && (
                 <div className="notice anim-in">
                   {STOP_NOTICES[summary.stopReason] ??
                     `模型停止：${summary.stopReason}`}

@@ -197,6 +197,20 @@ function ModelSection({ project, draft, edit }: EditProps) {
       : env.model
         ? "env"
         : "default";
+  const python = project.runtime === "python";
+  // Python 版沒設定端點時直接連供應商，金鑰是各供應商自己的環境變數。
+  const direct = python && !env.baseURL;
+  const keyVars = env.keyVars ?? [];
+  const keySet = direct ? keyVars.length > 0 : env.apiKeySet;
+  const keyOk = keySet || Boolean(env.baseURL);
+  let keyText = env.apiKeySet
+    ? "已設定 · 從 HARNESS_API_KEY 讀取，這裡不會顯示內容"
+    : "沒有設定 HARNESS_API_KEY（本機端點通常不需要）";
+  if (direct) {
+    keyText = keySet
+      ? `直接連供應商，使用各供應商的金鑰。已設定：${keyVars.join("、")}`
+      : "直接連供應商時，請設定該供應商的金鑰，例如 ANTHROPIC_API_KEY";
+  }
 
   const runTest = async () => {
     setTest("testing");
@@ -212,7 +226,9 @@ function ModelSection({ project, draft, edit }: EditProps) {
       <div>
         <h2 id="h-model">模型</h2>
         <p className="lead">
-          連接任何 OpenAI 相容的端點，例如 LiteLLM Proxy、OpenRouter、Ollama。
+          {python
+            ? "透過 litellm 連接模型：可以直接連供應商，也可以設定 HARNESS_BASE_URL 連 OpenAI 相容端點。"
+            : "連接任何 OpenAI 相容的端點，例如 LiteLLM Proxy、OpenRouter、Ollama。"}
           換模型只要改這裡。
         </p>
       </div>
@@ -223,7 +239,7 @@ function ModelSection({ project, draft, edit }: EditProps) {
           id="model-name"
           className="field mono"
           value={draft.model}
-          placeholder={env.model ?? "端點認得的模型名稱"}
+          placeholder={env.model ?? env.fallbackModel ?? "端點認得的模型名稱"}
           onChange={(event) =>
             edit((d) => ({ ...d, model: event.target.value }))
           }
@@ -244,7 +260,9 @@ function ModelSection({ project, draft, edit }: EditProps) {
         </div>
         <div className="help">
           {source === "default"
-            ? "還沒有設定模型：在這裡填寫，或設定環境變數 HARNESS_MODEL。"
+            ? env.fallbackModel
+              ? `還沒有設定模型，目前使用預設的 ${env.fallbackModel}。`
+              : "還沒有設定模型：在這裡填寫，或設定環境變數 HARNESS_MODEL。"
             : `${project.defaultAgent} 目前使用：${
                 source === "config" ? draft.model.trim() : (agent?.model ?? "")
               }（${SOURCE_LABELS[source]}）`}
@@ -257,11 +275,17 @@ function ModelSection({ project, draft, edit }: EditProps) {
           id="base-url"
           className="field mono"
           readOnly
-          value={env.baseURL ?? "未設定（使用 OpenAI 官方端點）"}
+          value={
+            env.baseURL ??
+            (python
+              ? "未設定（直接連模型供應商）"
+              : "未設定（使用 OpenAI 官方端點）")
+          }
         />
         <div className="help">
           來自環境變數 <code>HARNESS_BASE_URL</code>
-          ，要改的話請設定後重新啟動 harness web。
+          ，要改的話請設定後重新啟動 {python ? "pyharness web" : "harness web"}
+          。
         </div>
       </div>
 
@@ -269,15 +293,11 @@ function ModelSection({ project, draft, edit }: EditProps) {
         <div>
           <div style={{ fontWeight: 600 }}>金鑰</div>
           <div className="help" style={{ marginTop: 4 }}>
-            {env.apiKeySet
-              ? "已設定 · 從 HARNESS_API_KEY 讀取，這裡不會顯示內容"
-              : "沒有設定 HARNESS_API_KEY（本機端點通常不需要）"}
+            {keyText}
           </div>
         </div>
-        <span
-          className={`badge ${env.apiKeySet || env.baseURL ? "badge-muted" : "badge-danger"}`}
-        >
-          {env.apiKeySet ? "已設定" : "未設定"}
+        <span className={`badge ${keyOk ? "badge-muted" : "badge-danger"}`}>
+          {keySet ? "已設定" : "未設定"}
         </span>
       </div>
 

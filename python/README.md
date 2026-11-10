@@ -843,6 +843,7 @@ pyharness run -c /compact    壓縮最新的對話（聊天時直接輸入 /comp
 pyharness memory             查看長期記憶（forget <識別碼> / clear）
 pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
                              （-l hr,sales 模擬受限的 agent）
+pyharness web                開啟網頁版（--port、--host，見下一節）
 
 chat 與 run 共用的選項：
   -p, --project <資料夾>     專案位置（預設為目前資料夾）
@@ -854,6 +855,35 @@ chat 與 run 共用的選項：
 ```
 
 聊天時按 Ctrl-C 會中斷目前這一輪，不會結束整個聊天。
+
+## 網頁版
+
+在專案資料夾執行：
+
+```bash
+pyharness web               # 開啟 http://127.0.0.1:4321
+pyharness web --port 8080   # 換埠號
+```
+
+和 TypeScript 版的 `harness web` 是同一份網頁，功能說明見
+[根目錄 README 的網頁版](../README.md#網頁版)：串流對話、工具步驟、
+權限確認與寫檔差異、同時跑好幾段對話、出錯重試，以及寫回
+`harness.yaml` 的設定頁。
+
+Python 版另外會處理：
+
+- **Handoff**：對話轉交後，網頁上顯示的 agent 會換成接手的那個。
+- **對話壓縮**：壓縮的地方會標出「對話已壓縮」。
+- **訊息防護**：使用者的訊息被擋下時，顯示被擋下的原因。
+- **金鑰**：沒有設定 `HARNESS_BASE_URL`（直接連供應商）時，設定頁會
+  列出已設定的 `*_API_KEY` 環境變數名稱（不會顯示內容）。
+
+設定頁修改 `harness.yaml` 時只改 `model`、`maxTurns` 與 `permissions`
+那幾行，其他內容和註解都保持不動。檔案用了錨點（`&`、`*`）等特殊
+寫法、無法安全修改時，會請你直接編輯檔案。
+
+伺服器可以執行專案的工具，所以預設只接受本機連線，並拒絕其他網站
+送來的請求。
 
 ## 和 TypeScript 版的差異
 

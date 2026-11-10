@@ -21,7 +21,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && vite build --config web/vite.config.ts",
+    "build": "tsc -p tsconfig.build.json && vite build --config web/vite.config.ts && node web/sync-python.mjs",
     "prepare": "npm run build",
     "dev:web": "vite --config web/vite.config.ts",
     "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json",
