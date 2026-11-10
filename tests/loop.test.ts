@@ -272,6 +272,32 @@ describe("run：session", () => {
     expect(sent[2]?.content).toContain("中斷");
     expect(sent[3]).toEqual({ role: "user", content: "還在嗎" });
   });
+
+  it("userInput 為 null 時不加新訊息，接著最後一則使用者訊息跑", async () => {
+    const session = new Session({
+      messages: [{ role: "user", content: "嗨" }],
+    });
+    const { model, requests } = fakeModel([textResponse("你好")]);
+
+    await run(defineAgent({ name: "a" }), null, { model, session });
+
+    expect(requests[0]?.messages).toEqual([{ role: "user", content: "嗨" }]);
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("userInput 為 null 但最後一則是 assistant 時丟出錯誤", async () => {
+    const session = new Session({
+      messages: [
+        { role: "user", content: "嗨" },
+        { role: "assistant", content: "你好" },
+      ],
+    });
+    const { model } = fakeModel([]);
+
+    await expect(
+      run(defineAgent({ name: "a" }), null, { model, session }),
+    ).rejects.toThrow("沒有可以接續");
+  });
 });
 
 describe("runStream", () => {

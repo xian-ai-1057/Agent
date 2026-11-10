@@ -40,6 +40,8 @@ export interface Project {
   agents: Record<string, Agent>;
   /** 專案自己的工具（不含內建工具），以名稱為鍵。 */
   tools: Record<string, Tool>;
+  /** 每個 toolset（含內建的 files）包含哪些工具，以 toolset 名稱為鍵。 */
+  toolsets: Record<string, Tool[]>;
   permissions: Permissions;
   /** 沒指定時使用的 agent 名稱。 */
   defaultAgent: string;
@@ -97,6 +99,7 @@ export async function loadProject(path = "."): Promise<Project> {
       root,
       agents,
       tools,
+      toolsets,
       permissions: definePermissions(
         (config.permissions ?? {}) as Partial<Permissions>,
       ),
