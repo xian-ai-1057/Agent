@@ -214,6 +214,10 @@ mcpServers:
     headers: {X-Team: sales}               # 選用，附帶的 HTTP 標頭
 ```
 
+從 Claude Code、Cursor 等工具複製過來的設定可以直接用，裡面的 `type`
+（`stdio`、`http`）會被接受；舊的 `sse` 傳輸不支援，請改用伺服器的
+Streamable HTTP 端點（通常是 `/mcp`）。
+
 agent 用伺服器名稱引用整組工具，也可以只列出其中幾個工具的名稱：
 
 ```markdown
