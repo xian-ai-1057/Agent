@@ -50,6 +50,10 @@ export interface SessionSummary {
   error?: string;
   /** 最近一輪裡回報錯誤的工具呼叫數。 */
   toolErrors: number;
+  /** 最近一輪正常結束的原因（end_turn、max_turns…）。 */
+  stopReason?: string;
+  /** 正在等使用者決定的工具呼叫，讓列表可以直接允許或拒絕。 */
+  approval?: Approval;
 }
 
 /** 寫檔類工具執行前，給使用者看的內容。 */

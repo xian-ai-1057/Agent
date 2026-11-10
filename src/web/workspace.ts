@@ -90,6 +90,7 @@ interface SessionState {
   updatedAt: number;
   error?: string;
   toolErrors: number;
+  stopReason?: string;
   partial: string;
   mode: PermissionMode | null;
   approvals: Map<string, PendingApproval>;
@@ -313,6 +314,7 @@ export class Workspace {
       endedAt: undefined,
       error: undefined,
       toolErrors: 0,
+      stopReason: undefined,
       partial: "",
     });
     this.emit({ type: "run_start", sessionId, text });
@@ -350,6 +352,7 @@ export class Workspace {
           this.setActivity(state, { kind: "thinking" });
         } else if (event.type === "run_end") {
           state.status = "done";
+          state.stopReason = event.result.stopReason;
           this.emit({
             type: "run_end",
             sessionId,
@@ -580,6 +583,8 @@ export class Workspace {
       updatedAt: state.updatedAt,
       error: state.error,
       toolErrors: state.toolErrors,
+      stopReason: state.stopReason,
+      approval: state.approvals.values().next().value?.approval,
     };
   }
 

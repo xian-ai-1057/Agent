@@ -21,9 +21,10 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && vite build --config web/vite.config.ts",
     "prepare": "npm run build",
-    "typecheck": "tsc --noEmit",
+    "dev:web": "vite --config web/vite.config.ts",
+    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json",
     "test": "vitest run",
     "lint": "biome check .",
     "format": "biome check --write ."
