@@ -31,6 +31,8 @@ from harness.loop import compact
 from harness.loop import run
 from harness.loop import run_stream
 from harness.loop import run_sync
+from harness.mcp_servers import McpConnection
+from harness.mcp_servers import connect as connect_mcp_server
 from harness.memory import MemoryStore
 from harness.permissions import Permissions
 from harness.project import Project
@@ -48,6 +50,7 @@ __all__ = [
     "Event",
     "Hooks",
     "Knowledge",
+    "McpConnection",
     "MemoryStore",
     "ModelResponse",
     "Permissions",
@@ -63,6 +66,7 @@ __all__ = [
     "Usage",
     "allow",
     "compact",
+    "connect_mcp_server",
     "deny",
     "load_project",
     "run",

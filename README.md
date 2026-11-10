@@ -18,7 +18,7 @@
 | TypeScript 專案的工具 | 直接載入 `tools/*.ts` | 不支援 |
 | 可以嵌進 | Node.js 服務 | Python 服務（FastAPI、Streamlit…） |
 | 模型 | 任何 OpenAI 相容端點 | litellm（直接連供應商或連端點） |
-| 連接 MCP 伺服器 | 支援 | 尚未支援 |
+| 連接 MCP 伺服器 | 支援 | [支援](python/README.md#連接-mcp-伺服器) |
 | Subagents 與 handoffs | 尚未支援 | [支援](python/README.md#多個-agent-協作) |
 | 知識庫（RAG） | 尚未支援 | [支援](python/README.md#知識庫rag) |
 | Skills | 尚未支援 | [支援](python/README.md#skills) |
@@ -32,8 +32,10 @@
   網頁服務，或需要多個 agent 協作、知識庫、skills、長期記憶、訊息防護、
   對話壓縮：
   用 [Python 版](python/README.md)。
-- **專案是 TypeScript / Node.js**，或要連接現成的 MCP 伺服器：用
-  TypeScript 版。
+- **專案是 TypeScript / Node.js**：用 TypeScript 版。
+
+兩個版本都能連接現成的 MCP 伺服器，設定方式相同（`harness.yaml` 的
+`mcpServers`）。
 
 `examples/report_bot` 同時提供兩種工具寫法，所以兩個版本都能直接執行它。
 

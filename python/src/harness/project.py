@@ -16,8 +16,11 @@ agent 的 frontmatter 可以用 subagents 與 handoffs 列出其他 agent 的名
 skills、knowledge、memory、guardrails、compaction 只有 Python 版支援，
 TypeScript 版會忽略這些設定。
 
-harness.yaml 裡的 mcpServers 是給 TypeScript 版用的，這裡不會啟動；
-被它當成伺服器執行的 tools/*.py 也不會被當成工具模組載入。
+harness.yaml 的 mcpServers 會在載入時啟動並連線，伺服器名稱就是 toolset
+名稱；用完專案要呼叫 Project.close()（或用 with）。被 mcpServers 當成伺服器
+執行的 tools/*.py 不會被當成工具模組載入。若 tools/ 裡有與伺服器同名的
+Python 檔（同一個專案同時給兩個版本用時的寫法），Python 版直接載入那個
+檔案，不啟動伺服器。
 """
 
 import dataclasses
@@ -34,6 +37,7 @@ from harness import compaction as compaction_lib
 from harness import guardrails
 from harness import hooks as hooks_lib
 from harness import knowledge as knowledge_lib
+from harness import mcp_servers
 from harness import memory as memory_lib
 from harness import permissions as permissions_lib
 from harness import skills as skills_lib
@@ -65,6 +69,7 @@ class Project:
             再加上自己的處理函式。
         compaction: 對話壓縮的設定，預設開啟；harness.yaml 寫
             compaction: false 時為 None。
+        mcp_connections: 依 mcpServers 建立的 MCP 連線。
     """
 
     name: str
@@ -80,6 +85,19 @@ class Project:
     memory: memory_lib.MemoryStore | None = None
     hooks: hooks_lib.Hooks = dataclasses.field(default_factory=hooks_lib.Hooks)
     compaction: compaction_lib.Compaction | None = None
+    mcp_connections: list[mcp_servers.McpConnection] = dataclasses.field(
+        default_factory=list
+    )
+
+    def __enter__(self) -> "Project":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """關閉專案啟動的 MCP 伺服器。可以重複呼叫。"""
+        _close_all(self.mcp_connections)
 
     @property
     def sessions_dir(self) -> pathlib.Path:
@@ -94,11 +112,13 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
         path: 專案根目錄（裡面要有 harness.yaml）。
 
     Returns:
-        載入完成的 Project。
+        載入完成的 Project。有設定 mcpServers 時，用完要呼叫 close()。
 
     Raises:
         FileNotFoundError: 找不到 harness.yaml。
         ValueError: 設定內容有誤（沒有 agent、引用不存在的工具…）。
+        RuntimeError: MCP 伺服器無法啟動。
+        ImportError: 設定了 mcpServers 但沒有安裝 mcp 套件。
     """
     root = pathlib.Path(path).resolve()
     config_path = root / CONFIG_FILE
@@ -112,6 +132,23 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
     servers = config.get("mcpServers") or {}
     toolsets = dict(builtin.TOOLSETS)
     toolsets.update(_load_toolsets(root, name, _server_scripts(root, servers)))
+    connections: list[mcp_servers.McpConnection] = []
+    try:
+        toolsets.update(_connect_servers(root, servers, toolsets, connections))
+        return _assemble(root, name, config, toolsets, connections)
+    except BaseException:
+        _close_all(connections)
+        raise
+
+
+def _assemble(
+    root: pathlib.Path,
+    name: str,
+    config: dict[str, Any],
+    toolsets: dict[str, list[tools_lib.Tool]],
+    connections: list[mcp_servers.McpConnection],
+) -> Project:
+    """工具都準備好之後，讀取 skills、知識庫與 agent，組成 Project。"""
     project_tools = {
         item.name: item
         for set_name, items in toolsets.items()
@@ -121,9 +158,7 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
 
     project_skills = _load_skills(root, toolsets, project_tools)
     knowledge = _load_knowledge(root, config.get("knowledge"))
-    resources = _Resources(
-        toolsets, project_tools, servers, project_skills, knowledge
-    )
+    resources = _Resources(toolsets, project_tools, project_skills, knowledge)
 
     shared = _read_optional(root / "AGENTS.md")
     loaded = {}
@@ -153,6 +188,7 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
         else None,
         hooks=_load_guardrails(config.get("guardrails") or {}),
         compaction=_load_compaction(config.get("compaction")),
+        mcp_connections=connections,
     )
 
 
@@ -162,7 +198,6 @@ class _Resources:
 
     toolsets: dict[str, list[tools_lib.Tool]]
     project_tools: dict[str, tools_lib.Tool]
-    servers: dict[str, Any]
     skills: dict[str, skills_lib.Skill]
     knowledge: knowledge_lib.Knowledge | None
 
@@ -191,7 +226,8 @@ def resolve_tools(
 ) -> list[tools_lib.Tool]:
     """把 agent 設定裡的名稱換成實際的工具。
 
-    名稱可以是 toolset（tools/ 底下的檔名，或內建的 files）或單一工具。
+    名稱可以是 toolset（tools/ 底下的檔名、MCP 伺服器名稱，或內建的
+    files）或單一工具。
 
     Args:
         names: agent 設定的 tools 欄位。
@@ -236,6 +272,47 @@ def _server_scripts(
     return scripts
 
 
+def _connect_servers(
+    root: pathlib.Path,
+    servers: dict[str, Any],
+    toolsets: dict[str, list[tools_lib.Tool]],
+    connections: list[mcp_servers.McpConnection],
+) -> dict[str, list[tools_lib.Tool]]:
+    """啟動 mcpServers 設定的伺服器，回傳各伺服器的工具。
+
+    建立的連線會加進 connections，讓呼叫端在之後出錯時也能全部關閉。
+    tools/ 裡已有同名 toolset 的伺服器不啟動，直接用那個 Python 檔。
+    """
+    if not isinstance(servers, dict):
+        raise ValueError("mcpServers 必須是「名稱: 設定」的對應")
+    existing = {
+        item.name: set_name
+        for set_name, items in toolsets.items()
+        for item in items
+    }
+    found: dict[str, list[tools_lib.Tool]] = {}
+    for server_name, server_config in servers.items():
+        if server_name in toolsets:
+            continue
+        connection = mcp_servers.from_config(server_name, server_config, root)
+        connections.append(connection)
+        for item in connection.tools:
+            if item.name in existing:
+                raise ValueError(
+                    f"MCP 伺服器 {server_name} 的工具 {item.name} 與 "
+                    f"{existing[item.name]} 裡的工具同名"
+                )
+            existing[item.name] = server_name
+        found[server_name] = connection.tools
+    return found
+
+
+def _close_all(connections: list[mcp_servers.McpConnection]) -> None:
+    """關閉所有 MCP 連線。"""
+    for connection in connections:
+        connection.close()
+
+
 def _load_toolsets(
     root: pathlib.Path, project_name: str, skip: set[pathlib.Path]
 ) -> dict[str, list[tools_lib.Tool]]:
@@ -274,12 +351,6 @@ def _load_agent(
     agent_skills = _resolve_skills(name, meta, resources.skills)
     if "tools" in meta:
         names = meta["tools"] or []
-        _check_server_only(
-            names,
-            resources.toolsets,
-            resources.project_tools,
-            resources.servers,
-        )
         agent_tools = resolve_tools(
             names, resources.toolsets, resources.project_tools
         )
@@ -476,22 +547,6 @@ def _link_agents(
                     raise ValueError(f"agent {name} 不能把對話轉交給自己")
                 targets.append(loaded[target])
             setattr(loaded[name], field, targets)
-
-
-def _check_server_only(
-    names: list[str],
-    toolsets: dict[str, list[tools_lib.Tool]],
-    project_tools: dict[str, tools_lib.Tool],
-    servers: dict[str, Any],
-) -> None:
-    """agent 引用只存在於 mcpServers 的 toolset 時，說明原因。"""
-    for name in names:
-        if name in servers and name not in {*toolsets, *project_tools}:
-            raise ValueError(
-                f"toolset {name} 是 mcpServers 裡的伺服器，只有 TypeScript 版"
-                f"會啟動；Python 版請在 tools/{name}.py 用 @harness.tool "
-                "直接包裝函式"
-            )
 
 
 def _load_permissions(config: dict[str, Any]) -> permissions_lib.Permissions:

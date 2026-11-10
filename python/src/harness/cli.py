@@ -45,8 +45,10 @@ def main(argv: list[str] | None = None) -> int:
         return _command_new(args)
     commands = {"memory": _command_memory, "knowledge": _command_knowledge}
     try:
-        return commands.get(args.command, _command_agent)(args)
-    except (FileNotFoundError, ValueError) as error:
+        # with 確保專案啟動的 MCP 伺服器在結束時關閉。
+        with project_lib.load_project(args.project) as loaded:
+            return commands.get(args.command, _command_agent)(args, loaded)
+    except (FileNotFoundError, ValueError, ImportError, RuntimeError) as error:
         print(f"錯誤：{error}", file=sys.stderr)
         return 1
 
@@ -109,9 +111,10 @@ def _command_new(args: argparse.Namespace) -> int:
     return 0
 
 
-def _command_memory(args: argparse.Namespace) -> int:
+def _command_memory(
+    args: argparse.Namespace, loaded: project_lib.Project
+) -> int:
     """查看、刪除或清空長期記憶。"""
-    loaded = project_lib.load_project(args.project)
     if loaded.memory is None:
         print(
             "這個專案沒有開啟長期記憶。要使用的話，在 harness.yaml 加上 "
@@ -138,9 +141,10 @@ def _command_memory(args: argparse.Namespace) -> int:
     return 0
 
 
-def _command_knowledge(args: argparse.Namespace) -> int:
+def _command_knowledge(
+    args: argparse.Namespace, loaded: project_lib.Project
+) -> int:
     """顯示知識庫的索引概況，有查詢時再列出搜尋結果。"""
-    loaded = project_lib.load_project(args.project)
     if loaded.knowledge is None:
         print("這個專案沒有知識庫。建立 knowledge/ 資料夾並放入文件即可。")
         return 1
@@ -169,9 +173,10 @@ async def _show_knowledge(
     return 0
 
 
-def _command_agent(args: argparse.Namespace) -> int:
+def _command_agent(
+    args: argparse.Namespace, loaded: project_lib.Project
+) -> int:
     """chat 與 run 共用的流程。"""
-    loaded = project_lib.load_project(args.project)
     agent = _pick_agent(loaded, args.agent, args.model)
     session = _open_session(loaded, args.resume, args.resume_latest)
     permissions = dataclasses.replace(loaded.permissions)

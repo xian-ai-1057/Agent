@@ -22,6 +22,15 @@ permissions:
   # 執行前要先詢問的工具名稱樣式，例如 ["send_*", "delete_*"]
   ask: []
 
+# 連接 MCP 伺服器，伺服器名稱就是 agent 設定裡引用的 toolset 名稱。
+# 需要 MCP 套件：pip install "mcp>=2"
+# mcpServers:
+#   github:        # 本機程式（stdio），會繼承目前所有的環境變數
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-github"]
+#   search:        # 遠端伺服器（Streamable HTTP）
+#     url: https://example.com/mcp
+
 # 長期記憶：agent 可以跨對話記住使用者的偏好（用 pyharness memory 管理）
 # memory: true
 
@@ -55,8 +64,9 @@ _MAIN_AGENT = """\
 ---
 name: main
 description: 專案的主要助手
-# tools 可以寫 toolset 名稱（tools/ 底下的檔名、內建的 files）或單一
-# 工具名稱；整個欄位不寫的話，可以使用 tools/ 底下所有的工具。
+# tools 可以寫 toolset 名稱（tools/ 底下的檔名、mcpServers 的伺服器名稱、
+# 內建的 files）或單一工具名稱；整個欄位不寫的話，可以使用專案裡所有的
+# 工具。
 tools:
   - example
 # 多個 agent 協作時（名稱是 agents/ 底下其他 agent 的 name）：

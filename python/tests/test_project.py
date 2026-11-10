@@ -1,10 +1,15 @@
 """project 與 scaffold 模組的測試。"""
 
+import asyncio
+import sys
+
 import pytest
 
 import harness
+from harness import mcp_servers
 from harness import project
 from harness import scaffold
+from tests import test_mcp_servers
 
 
 @pytest.fixture
@@ -13,6 +18,19 @@ def project_dir(tmp_path):
     root = tmp_path / "demo_project"
     scaffold.create_project(root)
     return root
+
+
+def _write_mcp_config(root, name, script):
+    (root / "harness.yaml").write_text(
+        f"mcpServers:\n  {name}:\n    command: {sys.executable}\n"
+        f"    args: [{script}]\n",
+        encoding="utf-8",
+    )
+
+
+def _write_server(root, relative="server.py", prefix=""):
+    path = root / relative
+    path.write_text(prefix + test_mcp_servers.SERVER, encoding="utf-8")
 
 
 def _write_agent(root, name, frontmatter, body="你是助手"):
@@ -89,29 +107,104 @@ class TestLoadProject:
         assert loaded.agents["main"].model_params == {"max_tokens": 100}
         assert loaded.agents["special"].max_turns == 9
 
-    def test_load_project_skips_files_run_as_mcp_servers(self, project_dir):
-        (project_dir / "tools" / "server.py").write_text(
-            "raise RuntimeError('這個檔案不應該被載入')\n", encoding="utf-8"
+    def test_load_project_connects_mcp_servers(self, project_dir):
+        pytest.importorskip("mcp")
+        _write_server(project_dir)
+        _write_mcp_config(project_dir, "backend", "server.py")
+        _write_agent(project_dir, "remote", "tools: [backend, word_count]")
+        _write_agent(project_dir, "picky", "tools: [add]")
+
+        with harness.load_project(project_dir) as loaded:
+            remote = [item.name for item in loaded.agents["remote"].tools]
+            picky = [item.name for item in loaded.agents["picky"].tools]
+            assert [c.name for c in loaded.mcp_connections] == ["backend"]
+            assert asyncio.run(loaded.tools["add"].func(a=1, b=2)) == "3"
+
+        assert remote == [
+            "add",
+            "summary",
+            "slow",
+            "delete_everything",
+            "word_count",
+        ]
+        assert picky == ["add"]
+        with pytest.raises(harness.ToolError, match="已經斷線"):
+            asyncio.run(loaded.tools["add"].func(a=1, b=2))
+
+    def test_load_project_does_not_import_server_scripts_as_tools(
+        self, project_dir
+    ):
+        pytest.importorskip("mcp")
+        # 這個檔案在被 import 時會出錯，但當成伺服器執行（__main__）時正常。
+        _write_server(
+            project_dir,
+            "tools/server.py",
+            prefix="if __name__ != '__main__':\n"
+            "    raise RuntimeError('不應該被當成工具模組載入')\n",
         )
+        _write_mcp_config(project_dir, "backend", "tools/server.py")
+
+        with harness.load_project(project_dir) as loaded:
+            assert "add" in loaded.tools
+            assert "word_count" in loaded.tools
+
+    def test_load_project_prefers_same_named_python_toolset(self, project_dir):
+        # 給兩個版本共用的專案：TypeScript 版啟動伺服器，Python 版直接
+        # 載入同名的 tools/example.py，不啟動伺服器（也不需要 mcp 套件）。
+        _write_mcp_config(project_dir, "example", "missing_server.py")
+
+        with harness.load_project(project_dir) as loaded:
+            assert loaded.mcp_connections == []
+            assert list(loaded.tools) == ["word_count"]
+
+    def test_load_project_rejects_duplicate_tool_names(self, project_dir):
+        pytest.importorskip("mcp")
+        _write_server(project_dir)
+        (project_dir / "tools" / "math.py").write_text(
+            "import harness\n\n\n@harness.tool\n"
+            "def add(a: int) -> int:\n    return a + 1\n",
+            encoding="utf-8",
+        )
+        _write_mcp_config(project_dir, "backend", "server.py")
+
+        with pytest.raises(ValueError, match="工具 add 與 math 裡的工具同名"):
+            harness.load_project(project_dir)
+
+    def test_load_project_closes_servers_when_loading_fails(
+        self, project_dir, monkeypatch
+    ):
+        pytest.importorskip("mcp")
+        _write_server(project_dir)
+        _write_mcp_config(project_dir, "backend", "server.py")
+        _write_agent(project_dir, "broken", "tools: [no_such_tool]")
+        opened = []
+        original = mcp_servers.from_config
+
+        def record(*args, **kwargs):
+            opened.append(original(*args, **kwargs))
+            return opened[-1]
+
+        monkeypatch.setattr(mcp_servers, "from_config", record)
+
+        with pytest.raises(ValueError, match="no_such_tool"):
+            harness.load_project(project_dir)
+        with pytest.raises(harness.ToolError, match="已經斷線"):
+            asyncio.run(opened[0].tools[0].func(a=1, b=2))
+
+    def test_load_project_reports_server_that_fails_to_start(self, project_dir):
+        pytest.importorskip("mcp")
+        _write_mcp_config(project_dir, "backend", "missing_server.py")
+
+        with pytest.raises(RuntimeError, match="無法啟動 MCP 伺服器 backend"):
+            harness.load_project(project_dir)
+
+    def test_load_project_rejects_unknown_mcp_settings(self, project_dir):
         (project_dir / "harness.yaml").write_text(
-            "mcpServers:\n  backend:\n    command: python3\n"
-            "    args: [tools/server.py]\n",
+            "mcpServers:\n  backend:\n    comand: python3\n",
             encoding="utf-8",
         )
 
-        loaded = harness.load_project(project_dir)
-
-        assert list(loaded.tools) == ["word_count"]
-
-    def test_load_project_explains_server_only_toolset(self, project_dir):
-        (project_dir / "harness.yaml").write_text(
-            "mcpServers:\n  backend:\n    command: python3\n"
-            "    args: [server.py]\n",
-            encoding="utf-8",
-        )
-        _write_agent(project_dir, "remote", "tools: [backend]")
-
-        with pytest.raises(ValueError, match="只有 TypeScript 版"):
+        with pytest.raises(ValueError, match="不認得的設定"):
             harness.load_project(project_dir)
 
     def test_load_project_reads_permissions(self, project_dir):

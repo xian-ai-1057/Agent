@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-harness"
-version = "0.5.0"
+version = "0.6.0"
 description = "把既有 Python 專案的功能包成工具，交給聊天 agent 使用的輕量框架"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,10 @@ dependencies = [
 [project.optional-dependencies]
 # 讓知識庫可以讀取 PDF。
 pdf = ["pypdf>=4"]
+# 連接 MCP 伺服器（harness.yaml 的 mcpServers）。
+mcp = ["mcp>=2"]
 dev = [
+    "mcp>=2",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
