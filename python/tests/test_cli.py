@@ -299,6 +299,29 @@ class TestKnowledgeCommand:
         assert "1 個檔案、1 個片段，檢索方式：關鍵字" in output
         assert "[1] 來源：faq.md" in output
 
+    def test_knowledge_shows_reranker_thresholds_and_scores(
+        self, project_dir, capsys, monkeypatch
+    ):
+        async def fake_rerank(model, query, documents):
+            return [0.75] * len(documents)
+
+        monkeypatch.setattr(llm, "rerank", fake_rerank)
+        folder = project_dir / "knowledge"
+        folder.mkdir()
+        (folder / "faq.md").write_text("退貨要在七天內", encoding="utf-8")
+        _enable(
+            project_dir,
+            "knowledge:\n  reranker: my-reranker\n  minRerankScore: 0.5\n",
+        )
+
+        code = cli.main(["knowledge", "-p", str(project_dir), "退貨"])
+
+        output = capsys.readouterr().out
+        assert code == 0
+        assert "檢索方式：關鍵字，再用 reranker 重新排序" in output
+        assert "門檻：rerank ≥ 0.5" in output
+        assert "[1] 來源：faq.md（rerank 0.750）" in output
+
 
 def test_guardrails_in_harness_yaml_block_injection(
     project_dir, scripted_model, capsys

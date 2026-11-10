@@ -39,6 +39,9 @@ permissions:
 # knowledge:
 #   path: knowledge
 #   embeddingModel: openai/text-embedding-3-small
+#   minSimilarity: 0.3            # 相似度低於這個值的片段不回傳
+#   reranker: cohere/rerank-v3.5  # 用 rerank 模型重新排序前幾名
+#   minRerankScore: 0.2           # rerank 分數低於這個值的片段不回傳
 
 # 對話壓縮（預設開啟）：對話接近模型上限時，把較舊的歷史濃縮成檢查點。
 # 用 litellm 查不到上限的模型（例如自架端點）要寫 contextWindow。

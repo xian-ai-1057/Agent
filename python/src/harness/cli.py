@@ -196,16 +196,25 @@ async def _show_knowledge(
     """印出知識庫的概況與搜尋結果。"""
     stats = await kb.stats()
     mode = "關鍵字 + 語意（embedding）" if stats["embedding"] else "關鍵字"
+    if stats["reranker"]:
+        mode += "，再用 reranker 重新排序"
     print(
         f"{stats['sources']} 個檔案、{stats['chunks']} 個片段，檢索方式：{mode}"
     )
+    thresholds = []
+    if stats["min_similarity"] is not None:
+        thresholds.append(f"相似度 ≥ {stats['min_similarity']}")
+    if stats["min_rerank_score"] is not None:
+        thresholds.append(f"rerank ≥ {stats['min_rerank_score']}")
+    if thresholds:
+        print(f"門檻：{'、'.join(thresholds)}")
     for warning in stats["warnings"]:
         print(f"  ⚠ {warning}")
     if not query:
         return 0
     hits = await kb.search(query, labels=labels)
     print()
-    print(knowledge_lib.format_hits(hits))
+    print(knowledge_lib.format_hits(hits, show_scores=True))
     return 0
 
 

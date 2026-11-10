@@ -1,12 +1,15 @@
 """知識庫的測試，embedding 一律用假函式，不連網。"""
 
+import json
 import os
 
 import pytest
 
 import harness
 from harness import knowledge
+from harness import llm
 from harness import scaffold
+from harness import vectorstore
 from tests import conftest
 
 LEAVE = """\
@@ -188,6 +191,198 @@ class TestSearch:
         assert embedder.calls[1] == ["新文件"]
 
 
+class TestVectorStore:
+    """embedding 存進向量資料庫。"""
+
+    async def test_vectors_are_stored_in_sqlite_under_cache_dir(
+        self, kb_dir, tmp_path
+    ):
+        cache = tmp_path / "cache"
+        kb = harness.Knowledge(
+            kb_dir, embed_fn=FakeEmbedder(["特休"]), cache_dir=cache
+        )
+        await kb.stats()
+
+        reopened = vectorstore.SqliteVectorStore(cache / knowledge.VECTOR_FILE)
+        assert len(reopened) == 3
+
+    async def test_removed_files_are_pruned_from_store(self, kb_dir):
+        store = vectorstore.SqliteVectorStore()
+        kb = harness.Knowledge(
+            kb_dir, embed_fn=FakeEmbedder(["特休"]), vector_store=store
+        )
+        await kb.stats()
+
+        (kb_dir / "product.md").unlink()
+        await kb.stats()
+
+        assert len(store) == 2
+
+    async def test_legacy_json_cache_is_imported_and_removed(
+        self, kb_dir, tmp_path
+    ):
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        text = "MaiPhone X 電池容量 5000 mAh，支援 65W 快充。"
+        legacy = {knowledge._cache_key("", f"# 產品規格\n\n{text}"): [9, 9]}
+        (cache / knowledge.LEGACY_CACHE_FILE).write_text(
+            json.dumps(legacy), encoding="utf-8"
+        )
+        embedder = FakeEmbedder(["特休"])
+        kb = harness.Knowledge(kb_dir, embed_fn=embedder, cache_dir=cache)
+
+        await kb.stats()
+
+        assert len(embedder.calls[0]) == 2
+        assert not (cache / knowledge.LEGACY_CACHE_FILE).exists()
+
+    async def test_wrong_number_of_vectors_is_an_error(self, kb_dir):
+        async def broken(texts):
+            return [[1.0]]
+
+        kb = harness.Knowledge(kb_dir, embed_fn=broken)
+
+        with pytest.raises(ValueError, match="回傳了 1 個向量"):
+            await kb.stats()
+
+
+class TestSimilarityThreshold:
+    """相似度門檻。"""
+
+    def _kb(self, kb_dir, threshold):
+        return harness.Knowledge(
+            kb_dir,
+            embed_fn=FakeEmbedder(["特休", "病假", "電池"]),
+            min_similarity=threshold,
+        )
+
+    async def test_dissimilar_keyword_matches_are_dropped(self, kb_dir):
+        # 「假」也出現在特休那段的標題裡，關鍵字會找到它，但語意不相似。
+        without = await self._kb(kb_dir, None).search("病假")
+        hits = await self._kb(kb_dir, 0.5).search("病假")
+
+        assert len(without) == 3
+        assert _sources(hits) == ["hr/leave.md › 請假規定 › 病假"]
+        assert hits[0].similarity == pytest.approx(1.0)
+
+    async def test_nothing_similar_enough_returns_nothing(self, kb_dir):
+        hits = await self._kb(kb_dir, 0.99).search("保固")
+
+        assert hits == []
+
+    async def test_keyword_only_candidates_get_similarity_checked(
+        self, kb_dir, monkeypatch
+    ):
+        # 語意檢索只取前兩名，「特休」那段只靠關鍵字進入候選，
+        # 門檻判斷前要另外查它的相似度。
+        monkeypatch.setattr(knowledge, "_VECTOR_POOL", 0)
+        kb = harness.Knowledge(
+            kb_dir,
+            embed_fn=FakeEmbedder(["特休", "電池"]),
+            min_similarity=0.005,
+        )
+
+        hits = await kb.search("電池 規定", top_k=3)
+
+        by_source = {hit.chunk.citation: hit.similarity for hit in hits}
+        assert by_source["hr/leave.md › 請假規定 › 特休"] == pytest.approx(
+            0.0099, abs=1e-3
+        )
+
+    def test_threshold_needs_embedding(self, kb_dir):
+        with pytest.raises(ValueError, match="embedding_model"):
+            harness.Knowledge(kb_dir, min_similarity=0.5)
+
+    def test_threshold_must_be_a_cosine(self, kb_dir):
+        with pytest.raises(ValueError, match="-1 與 1"):
+            harness.Knowledge(
+                kb_dir, embed_fn=FakeEmbedder([]), min_similarity=2
+            )
+
+
+class TestReranker:
+    """用 reranker 重新排序。"""
+
+    @staticmethod
+    def _reranker(favourite):
+        calls = []
+
+        async def rerank(query, documents):
+            calls.append((query, list(documents)))
+            return [0.9 if favourite in doc else 0.1 for doc in documents]
+
+        rerank.calls = calls
+        return rerank
+
+    async def test_reranker_reorders_candidates(self, kb_dir):
+        rerank = self._reranker("工資折半")
+        kb = harness.Knowledge(kb_dir, rerank_fn=rerank)
+
+        hits = await kb.search("特休 假", top_k=1)
+
+        assert _sources(hits) == ["hr/leave.md › 請假規定 › 病假"]
+        assert hits[0].rerank_score == pytest.approx(0.9)
+        assert hits[0].score == pytest.approx(0.9)
+        query, documents = rerank.calls[0]
+        assert query == "特休 假"
+        assert documents[0].startswith("hr/leave.md › 請假規定 › 特休\n")
+
+    async def test_reranker_sees_at_most_rerank_candidates(self, kb_dir):
+        rerank = self._reranker("工資折半")
+        kb = harness.Knowledge(kb_dir, rerank_fn=rerank, rerank_candidates=2)
+
+        await kb.search("假 電池", top_k=1)
+
+        assert len(rerank.calls[0][1]) == 2
+
+    async def test_min_rerank_score_drops_low_scores(self, kb_dir):
+        kb = harness.Knowledge(
+            kb_dir, rerank_fn=self._reranker("工資折半"), min_rerank_score=0.5
+        )
+
+        hits = await kb.search("假 電池", top_k=5)
+
+        assert _sources(hits) == ["hr/leave.md › 請假規定 › 病假"]
+
+    async def test_reranker_must_score_every_document(self, kb_dir):
+        async def broken(query, documents):
+            return [1.0]
+
+        kb = harness.Knowledge(kb_dir, rerank_fn=broken)
+
+        with pytest.raises(ValueError, match="回傳了 1 個分數"):
+            await kb.search("假 電池")
+
+    async def test_reranker_model_goes_through_llm(self, kb_dir, monkeypatch):
+        received = []
+
+        async def fake_rerank(model, query, documents):
+            received.append(model)
+            return [0.5] * len(documents)
+
+        monkeypatch.setattr(llm, "rerank", fake_rerank)
+        kb = harness.Knowledge(kb_dir, reranker="cohere/rerank-v3.5")
+
+        hits = await kb.search("電池")
+
+        assert received == ["cohere/rerank-v3.5"]
+        assert hits[0].rerank_score == 0.5
+        assert (await kb.stats())["reranker"] is True
+
+    def test_min_rerank_score_needs_reranker(self, kb_dir):
+        with pytest.raises(ValueError, match="reranker"):
+            harness.Knowledge(kb_dir, min_rerank_score=0.5)
+
+    def test_scores_are_shown_for_people_not_for_models(self):
+        chunk = knowledge.Chunk("faq.md", "", "內容")
+        hit = knowledge.Hit(chunk, 0.9, similarity=0.8, rerank_score=0.9)
+
+        assert "相似度" not in knowledge.format_hits([hit])
+        assert knowledge.format_hits([hit], show_scores=True).startswith(
+            "[1] 來源：faq.md（相似度 0.800、rerank 0.900）\n"
+        )
+
+
 class TestSearchTool:
     """search_knowledge 工具。"""
 
@@ -311,3 +506,35 @@ class TestKnowledgeInProject:
 
         assert kb.embedding_model == "openai/emb"
         assert kb.chunk_size == 300
+
+    def test_reranker_and_thresholds_from_harness_yaml(self, project_dir):
+        config = project_dir / "harness.yaml"
+        config.write_text(
+            config.read_text(encoding="utf-8") + "knowledge:\n"
+            "  embeddingModel: openai/emb\n"
+            "  minSimilarity: 0.3\n"
+            "  reranker: cohere/rerank-v3.5\n"
+            "  rerankCandidates: 30\n"
+            "  minRerankScore: 0.2\n",
+            encoding="utf-8",
+        )
+
+        kb = harness.load_project(project_dir).knowledge
+
+        assert kb.min_similarity == 0.3
+        assert kb.reranker == "cohere/rerank-v3.5"
+        assert kb.rerank_candidates == 30
+        assert kb.min_rerank_score == 0.2
+        assert kb.vector_store.path == (
+            project_dir / ".harness/knowledge" / knowledge.VECTOR_FILE
+        )
+
+    def test_unknown_knowledge_setting_is_an_error(self, project_dir):
+        config = project_dir / "harness.yaml"
+        config.write_text(
+            config.read_text(encoding="utf-8") + "knowledge:\n  topk: 3\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="不認得的設定"):
+            harness.load_project(project_dir)
