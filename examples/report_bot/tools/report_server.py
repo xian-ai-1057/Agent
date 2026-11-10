@@ -1,9 +1,10 @@
-"""把既有的報告功能公開成工具（MCP 伺服器）。
+"""把既有的報告功能公開成工具（MCP 伺服器，TypeScript 版 harness 使用）。
 
 這一層只做三件事：import 既有函式、決定要讓 agent 看到哪些參數、
 寫清楚說明（模型靠 docstring 決定什麼時候呼叫哪個工具）。
 
 harness 啟動時會依 harness.yaml 的 mcpServers 設定自動執行這個檔案。
+Python 版 harness 不需要伺服器，使用的是同一個資料夾裡的 report.py。
 """
 
 import pathlib

@@ -7,7 +7,12 @@ coverage/
 # 各專案的對話紀錄
 .harness/
 
-# 範例專案裡的 Python
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .venv/
