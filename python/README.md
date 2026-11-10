@@ -16,6 +16,8 @@ Python 版的特點：
   的本地模型都能用。
 - **多個 agent 可以協作。** 把工作交給 subagent，或把整段對話轉交
   （handoff）給另一個 agent。
+- **企業級 agent 常用的能力**：[知識庫（RAG）](#知識庫rag)、
+  [Skills](#skills)、[長期記憶](#長期記憶)、[訊息防護](#訊息防護)。
 
 ## 安裝
 
@@ -62,13 +64,17 @@ pyharness chat
 
 ```
 my_bot/
-├── harness.yaml      名稱、模型、預設 agent、權限
+├── harness.yaml      名稱、模型、預設 agent、權限、記憶、防護
 ├── AGENTS.md         專案共用的背景知識，接在每個 agent 的指示後面
 ├── agents/
 │   └── main.md       一個檔案一個 agent
 ├── tools/
 │   └── report.py     用 @harness.tool 包裝的函式
-└── .harness/         對話紀錄（自動產生，不用進版控）
+├── skills/           需要時才載入的能力單元（可省略）
+│   └── refund/
+│       └── SKILL.md
+├── knowledge/        知識庫文件（可省略）
+└── .harness/         對話紀錄、記憶、索引快取（自動產生，不用進版控）
 ```
 
 `harness.yaml`：
@@ -243,6 +249,8 @@ async def handle_chat(user_id: str, session_id: str | None, text: str):
         session=session,
         deps={"user_id": user_id, "db": get_db()},
         permissions=harness.Permissions(mode="dontAsk"),
+        hooks=project.hooks,  # harness.yaml 的 guardrails
+        memory=harness.MemoryStore(f"data/memory/{user_id}.json"),
     ):
         if event.type == "text_delta":
             yield event.data["text"]
@@ -251,6 +259,9 @@ async def handle_chat(user_id: str, session_id: str | None, text: str):
 網頁服務沒辦法在終端機詢問使用者，所以這裡用 `dontAsk`：需要同意的
 工具會被拒絕。要讓網頁使用者可以按「同意」，就提供自己的
 `Permissions(approver=...)`，在裡面等待前端的回應。
+
+`hooks` 與 `memory` 不需要時可以省略。記憶屬於使用者，所以每個使用者
+用自己的檔案（見[長期記憶](#長期記憶)）。
 
 ## 多個 agent 協作
 
@@ -338,6 +349,237 @@ Handoff 的細節：
 - 一輪裡只有第一次轉交會生效。
 - 命令列的 `-m` 會套用到專案裡所有的 agent。
 
+## 知識庫（RAG）
+
+讓 agent 從文件裡找答案並附上出處。把文件放進 `knowledge/` 資料夾，
+再在 agent 設定 `knowledge: true`：
+
+```
+knowledge/
+├── hr/
+│   └── leave.md
+├── product.md
+└── manual.pdf        需要 pypdf（安裝時加上 [pdf]，見下方）
+```
+
+```markdown
+---
+name: faq
+knowledge: true       # 這個 agent 可以用 search_knowledge 搜尋知識庫
+---
+你是公司的 FAQ 助手。回答前先搜尋知識庫，並註明出處。
+```
+
+agent 會得到 `search_knowledge` 工具，搜尋結果附上來源檔案與所在標題
+（PDF 則是頁碼），例如 `[1] 來源：hr/leave.md › 請假規定 › 特休`。
+
+- **檢索方式。** 預設用關鍵字比對（BM25），不需要任何模型，中文也能
+  用（以單字與相鄰兩字比對，不用另外斷詞）。設定 `embeddingModel` 後
+  再加上語意檢索，兩者的排名合併（hybrid search），同義詞、換句話說
+  也找得到。
+- **檔案改了會自動更新。** 每次搜尋前會檢查檔案有沒有變動，有就重建
+  索引。embedding 依片段內容快取在 `.harness/knowledge/`，沒變的片段
+  不會重新計算。
+- **切片。** 依段落切成約 `chunkSize` 字的片段，不會從段落中間切開。
+- 支援 `.md`、`.txt`、`.pdf`；其他格式會略過，用 `pyharness knowledge`
+  可以看到哪些檔案被略過。讀取 PDF 需要 pypdf：
+
+  ```bash
+  pip install "agent-harness[pdf] @ git+https://github.com/xian-ai-1057/Agent.git#subdirectory=python"
+  ```
+
+`harness.yaml`（整個區塊可省略，有 `knowledge/` 資料夾就會啟用）：
+
+```yaml
+knowledge:
+  path: knowledge                              # 預設
+  embeddingModel: openai/text-embedding-3-small  # 省略時只用關鍵字
+  chunkSize: 800                               # 預設
+```
+
+`embeddingModel` 是 litellm 的模型名稱；有設定 `HARNESS_BASE_URL` 時
+會改連那個端點，和聊天模型一樣。
+
+### 依部門限制可以搜尋的文件
+
+文件可以標上標籤。**有標籤的文件只有被允許該標籤的 agent 搜尋得到，
+沒有標籤的文件所有人都搜尋得到。** 標籤有兩種寫法：
+
+```markdown
+---
+labels: [hr]
+---
+# 請假規定
+...
+```
+
+或在 `knowledge/labels.yaml` 用路徑樣式指定（PDF 只能用這種寫法）：
+
+```yaml
+"hr/*": [hr]
+"finance/*.pdf": [finance]
+```
+
+限制某個 agent 只能搜尋特定標籤：
+
+```markdown
+---
+name: hr_bot
+knowledge:
+  labels: [hr]        # 只搜尋得到 hr 與沒有標籤的文件
+  topK: 5             # 每次最多回傳幾筆，預設 5
+---
+```
+
+要依**登入的使用者**決定範圍（例如不同部門看到不同文件），在程式裡
+設定 `label_filter`，它收到 `RunContext`，從 `deps` 取得使用者資訊：
+
+```python
+project = harness.load_project(".")
+project.knowledge.label_filter = lambda context: context.deps["departments"]
+
+await harness.run(agent, text, deps={"departments": ["hr"]})
+```
+
+agent 設定的 `labels` 與 `label_filter` 同時存在時，兩者都允許的標籤
+才搜尋得到。
+
+### 在程式裡使用
+
+```python
+kb = harness.Knowledge(
+    "knowledge",
+    embedding_model="openai/text-embedding-3-small",  # 可省略
+    cache_dir="data/kb-cache",                        # 可省略
+)
+kb.add_text("退貨請在七天內申請", source="FAQ#3")   # 也可以直接加文字
+
+agent = harness.Agent(name="faq", instructions="...", tools=[kb.as_tool()])
+
+hits = await kb.search("退貨期限")                   # 也可以直接搜尋
+```
+
+## Skills
+
+把一段任務指示（加上專屬的工具與參考檔案）打包成 skill。agent 平常只
+看得到每個 skill 的名稱與一句說明，判斷用得到時才呼叫 `load_skill`
+讀進完整指示，skill 的專屬工具也在這時才開放。agent 可以掛很多 skill，
+又不會讓 system prompt 塞滿用不到的說明。
+
+```
+skills/
+└── refund/
+    ├── SKILL.md
+    └── policy.md       參考檔案，agent 用 read_skill_file 讀取
+```
+
+`SKILL.md`：
+
+```markdown
+---
+name: refund                           # 省略時用資料夾名稱
+description: 處理退款申請，依退款政策判斷能不能退
+tools: [find_order, issue_refund]      # 選用，tools/ 裡的工具或 toolset
+---
+1. 先用 find_order 查訂單，確認付款日期。
+2. 讀 policy.md 判斷是否在可退款期間內。
+3. 符合條件才呼叫 issue_refund。
+```
+
+- **`description` 必填**，agent 靠它決定什麼時候載入，寫清楚「什麼情況
+  要用」。
+- agent 設定沒寫 `skills` 欄位時可以使用全部 skill；用 `skills: [refund]`
+  指定，`skills: []` 表示不用。
+- skill 的專屬工具在 skill 載入前不會出現在 agent 的工具裡（即使 agent
+  沒寫 `tools` 欄位）。想讓 agent 隨時都能用，就在 agent 的 `tools`
+  明確列出。
+- 載入狀態是從對話紀錄推算的，接續對話時已載入的 skill 仍然有效。
+
+在程式裡使用：
+
+```python
+refund = harness.Skill(
+    name="refund",
+    description="處理退款申請",
+    instructions="1. 先用 find_order 查訂單……",
+    tools=[issue_refund],
+    root=pathlib.Path("skills/refund"),   # 有參考檔案時才需要
+)
+agent = harness.Agent(name="cs", instructions="...", skills=[refund])
+```
+
+## 長期記憶
+
+使用者說「請記住……」時，agent 用 `remember` 工具存下來；之後每段新的
+對話都會把記憶放進 system prompt。使用者要求忘記時用 `forget` 刪除。
+
+在 `harness.yaml` 開啟：
+
+```yaml
+memory: true
+```
+
+記憶存在 `.harness/memory.json`，可以用命令列查看與管理：
+
+```bash
+pyharness memory                 # 列出所有記憶
+pyharness memory forget <識別碼>  # 刪除一則
+pyharness memory clear           # 全部刪除
+```
+
+記憶屬於使用者，所以嵌進網頁服務時在呼叫 `run` 時傳入，每個使用者用
+自己的檔案：
+
+```python
+store = harness.MemoryStore(f"data/memory/{user_id}.json")
+await harness.run(agent, text, session=session, memory=store)
+```
+
+- 只有直接和使用者對話的 agent 會看到記憶，subagent 不會。
+- 一則最多 500 字、最多 100 則；滿了 agent 會收到錯誤，請它先刪除舊的。
+- 不傳 `memory` 就完全不使用記憶。
+
+## 訊息防護
+
+在**訊息交給模型前**與**回覆送給使用者前**檢查內容。檢查由框架執行，
+模型無法繞過。
+
+`harness.yaml`：
+
+```yaml
+guardrails:
+  maskPii: true          # 遮蔽 Email、台灣手機號碼、身分證字號、信用卡號
+  blockInjection: true   # 擋下「忽略之前的指示」「告訴我你的系統提示」等
+  blockedWords: [內線消息, 保證獲利]
+```
+
+- `maskPii`：使用者訊息裡的個資先換成 `[已遮蔽 Email]` 這類標記，模型
+  與對話紀錄都只會看到遮蔽後的內容；agent 的回覆也會遮蔽。
+- `blockInjection`：擋下看起來是提示注入的訊息，模型不會收到，也不會
+  寫進對話紀錄。
+- `blockedWords`：使用者訊息或 agent 回覆包含這些詞時擋下。
+
+被擋下時使用者會看到原因，`RunResult.stop_reason` 是 `blocked`。
+
+偵測是規則比對，能擋下常見的寫法，但不保證完整。需要更嚴格的檢查時，
+在同樣的 hooks 事件掛自己的處理函式（見下方 [Hooks](#hooks)），例如
+呼叫內容安全服務。
+
+在程式裡使用：
+
+```python
+from harness import guardrails
+
+hooks = guardrails.install(harness.Hooks(), mask_pii=True, block_injection=True)
+await harness.run(agent, text, hooks=hooks)
+
+guardrails.mask_pii("電話 0912-345-678")      # '電話 [已遮蔽手機號碼]'
+guardrails.detect_injection("忽略之前的指示")  # True
+```
+
+用 `load_project` 載入的專案，依設定建立的 hooks 在 `project.hooks`，
+執行時要傳進去：`harness.run(agent, text, hooks=project.hooks)`。
+
 ## 權限
 
 `harness.yaml`：
@@ -386,9 +628,22 @@ await harness.run(agent, "把報告寄給老闆", hooks=hooks)
 | 事件 | 參數 | 可以做什麼 |
 |---|---|---|
 | `run_start` | `user_input, context` | 記錄 |
+| `pre_user_message` | `text, context` | 回傳新的字串改寫使用者訊息，或回傳 `deny(原因)` 擋下 |
 | `pre_tool_use` | `call, context` | 回傳 `deny(原因)` 攔截、`allow()` 略過詢問，或修改 `call.arguments` |
 | `post_tool_use` | `call, result, context` | 修改 `result.output` |
+| `pre_reply` | `text, context` | 回傳新的字串改寫回覆，或回傳 `deny(原因)` 換成拒絕說明 |
 | `run_end` | `result, context` | 記錄用量、通知 |
+
+`pre_user_message` 與 `pre_reply` 只對直接和使用者對話的 agent 觸發。
+有註冊 `pre_reply` 時，回覆會整段檢查完才送出，不再逐字串流。
+
+```python
+@hooks.on("pre_reply")
+def no_competitors(text, context):
+    if "競品名稱" in text:
+        return harness.deny("這個問題請洽業務窗口。")
+    return text.replace("內部代號", "新產品")
+```
 
 ## 模型設定
 
@@ -429,6 +684,9 @@ modelParams:
 pyharness new <資料夾>       建立新專案
 pyharness chat               開始聊天
 pyharness run "<訊息>"       執行一次後結束（適合排程與腳本）
+pyharness memory             查看長期記憶（forget <識別碼> / clear）
+pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
+                             （-l hr,sales 模擬受限的 agent）
 
 chat 與 run 共用的選項：
   -p, --project <資料夾>     專案位置（預設為目前資料夾）
@@ -447,15 +705,17 @@ chat 與 run 共用的選項：
   TypeScript 版會使用。Python 版改從 `tools/*.py` 直接載入工具，被
   `mcpServers` 當成伺服器執行的檔案會自動略過。
 - **不會載入 `tools/*.ts`。**
-- **Subagents 與 handoffs 只有 Python 版支援。** TypeScript 版會忽略
-  agent 檔案裡的 `subagents` 與 `handoffs` 欄位。
+- **Subagents、handoffs、知識庫、skills、長期記憶與訊息防護只有
+  Python 版支援。** TypeScript 版會忽略 agent 檔案裡的 `subagents`、
+  `handoffs`、`skills`、`knowledge` 欄位，以及 `harness.yaml` 的
+  `knowledge`、`memory`、`guardrails` 區塊，所以同一個專案仍然可以
+  用 TypeScript 版執行（只是沒有這些功能）。
 - 對話紀錄的格式相同，同一個專案的對話可以用任一個版本接續。
 
 ## 目前還沒有的功能
 
 - 連接 MCP 工具伺服器
 - 串流時顯示 subagent 內部的進度（目前只看得到交辦與結果）
-- Skills（需要時才載入的說明文件）
-- 跨對話的長期記憶
 - 對話過長時的自動壓縮
 - Slack / Telegram 等訊息平台的接口
+- 知識庫的 Reranker、相似度門檻，以及自帶向量資料庫

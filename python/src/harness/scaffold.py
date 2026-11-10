@@ -21,6 +21,21 @@ permissions:
   deny: []
   # 執行前要先詢問的工具名稱樣式，例如 ["send_*", "delete_*"]
   ask: []
+
+# 長期記憶：agent 可以跨對話記住使用者的偏好（用 pyharness memory 管理）
+# memory: true
+
+# 知識庫：把文件放進 knowledge/ 資料夾，再在 agent 設定 knowledge: true。
+# 不設定 embeddingModel 時只用關鍵字檢索，不需要任何模型。
+# knowledge:
+#   path: knowledge
+#   embeddingModel: openai/text-embedding-3-small
+
+# 訊息防護：在訊息交給模型前、回覆送出前檢查
+# guardrails:
+#   maskPii: true          # 遮蔽 Email、手機、身分證字號、信用卡號
+#   blockInjection: true   # 擋下「忽略之前的指示」這類提示注入
+#   blockedWords: []
 """
 
 _AGENTS_MD = """\
@@ -40,6 +55,10 @@ tools:
 # 多個 agent 協作時（名稱是 agents/ 底下其他 agent 的 name）：
 # subagents: [researcher]   # 把工作交給它，它做完只回傳結果
 # handoffs: [billing]       # 把整段對話轉交給它，由它直接回覆使用者
+# skills 是 skills/ 底下的資料夾名稱；整個欄位不寫的話可以使用全部 skill。
+# skills: [refund]
+# 搜尋知識庫（knowledge/ 資料夾）；用 {labels: [hr]} 限定可搜尋的範圍。
+# knowledge: true
 ---
 你是 {name} 的助手。用使用者的語言回答，需要資料時就呼叫工具，不要
 自己編造工具才能取得的內容。

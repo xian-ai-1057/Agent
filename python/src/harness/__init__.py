@@ -24,13 +24,16 @@ from harness.datatypes import Usage
 from harness.hooks import Hooks
 from harness.hooks import allow
 from harness.hooks import deny
+from harness.knowledge import Knowledge
 from harness.loop import run
 from harness.loop import run_stream
 from harness.loop import run_sync
+from harness.memory import MemoryStore
 from harness.permissions import Permissions
 from harness.project import Project
 from harness.project import load_project
 from harness.sessions import Session
+from harness.skills import Skill
 from harness.tools import Tool
 from harness.tools import ToolError
 from harness.tools import tool
@@ -39,12 +42,15 @@ __all__ = [
     "Agent",
     "Event",
     "Hooks",
+    "Knowledge",
+    "MemoryStore",
     "ModelResponse",
     "Permissions",
     "Project",
     "RunContext",
     "RunResult",
     "Session",
+    "Skill",
     "Tool",
     "ToolCall",
     "ToolError",

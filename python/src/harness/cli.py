@@ -3,6 +3,8 @@
 pyharness new <資料夾>        建立新專案
 pyharness chat                在目前專案開始聊天
 pyharness run "<訊息>"        執行一次後結束
+pyharness memory              查看、刪除或清空長期記憶
+pyharness knowledge [查詢]    檢查知識庫的索引，或試著搜尋
 
 指令名稱是 pyharness，避免和 TypeScript 版的 harness 指令衝突；也可以
 用 `python -m harness` 執行。
@@ -16,6 +18,7 @@ from collections.abc import Callable
 
 from harness import agents
 from harness import datatypes
+from harness import knowledge as knowledge_lib
 from harness import loop
 from harness import permissions as permissions_lib
 from harness import project as project_lib
@@ -38,8 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "new":
         return _command_new(args)
+    commands = {"memory": _command_memory, "knowledge": _command_knowledge}
     try:
-        return _command_agent(args)
+        return commands.get(args.command, _command_agent)(args)
     except (FileNotFoundError, ValueError) as error:
         print(f"錯誤：{error}", file=sys.stderr)
         return 1
@@ -73,6 +77,21 @@ def _build_parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--bypass", action="store_true", help="所有工具都不詢問直接執行"
         )
+
+    memory = commands.add_parser("memory", help="管理長期記憶")
+    memory.add_argument("-p", "--project", default=".", help="專案資料夾")
+    actions = memory.add_subparsers(dest="action")
+    actions.add_parser("list", help="列出所有記憶（預設）")
+    forget = actions.add_parser("forget", help="刪除一則記憶")
+    forget.add_argument("memory_id", help="記憶的識別碼")
+    actions.add_parser("clear", help="刪除所有記憶")
+
+    knowledge = commands.add_parser("knowledge", help="檢查知識庫")
+    knowledge.add_argument("-p", "--project", default=".", help="專案資料夾")
+    knowledge.add_argument("query", nargs="?", help="要試著搜尋的內容")
+    knowledge.add_argument(
+        "-l", "--labels", help="只搜尋這些標籤（逗號分隔），模擬受限的 agent"
+    )
     return parser
 
 
@@ -85,6 +104,66 @@ def _command_new(args: argparse.Namespace) -> int:
     for path in created:
         print(f"建立 {path}")
     print(f"\n完成。接著執行：cd {args.path} && pyharness chat")
+    return 0
+
+
+def _command_memory(args: argparse.Namespace) -> int:
+    """查看、刪除或清空長期記憶。"""
+    loaded = project_lib.load_project(args.project)
+    if loaded.memory is None:
+        print(
+            "這個專案沒有開啟長期記憶。要使用的話，在 harness.yaml 加上 "
+            "memory: true"
+        )
+        return 1
+    store = loaded.memory
+    if args.action == "forget":
+        try:
+            item = store.remove(args.memory_id)
+        except KeyError:
+            print(f"找不到識別碼為 {args.memory_id} 的記憶", file=sys.stderr)
+            return 1
+        print(f"已刪除：{item.content}")
+        return 0
+    if args.action == "clear":
+        print(f"已刪除 {store.clear()} 則記憶。")
+        return 0
+    items = store.items()
+    if not items:
+        print("目前沒有任何記憶。")
+    for item in items:
+        print(f"[{item.id}] {item.content}（{item.created_at}）")
+    return 0
+
+
+def _command_knowledge(args: argparse.Namespace) -> int:
+    """顯示知識庫的索引概況，有查詢時再列出搜尋結果。"""
+    loaded = project_lib.load_project(args.project)
+    if loaded.knowledge is None:
+        print("這個專案沒有知識庫。建立 knowledge/ 資料夾並放入文件即可。")
+        return 1
+    labels = None
+    if args.labels is not None:
+        labels = [item.strip() for item in args.labels.split(",") if item]
+    return asyncio.run(_show_knowledge(loaded.knowledge, args.query, labels))
+
+
+async def _show_knowledge(
+    kb: knowledge_lib.Knowledge, query: str | None, labels: list[str] | None
+) -> int:
+    """印出知識庫的概況與搜尋結果。"""
+    stats = await kb.stats()
+    mode = "關鍵字 + 語意（embedding）" if stats["embedding"] else "關鍵字"
+    print(
+        f"{stats['sources']} 個檔案、{stats['chunks']} 個片段，檢索方式：{mode}"
+    )
+    for warning in stats["warnings"]:
+        print(f"  ⚠ {warning}")
+    if not query:
+        return 0
+    hits = await kb.search(query, labels=labels)
+    print()
+    print(knowledge_lib.format_hits(hits))
     return 0
 
 
@@ -185,6 +264,8 @@ async def _run_turn(
         session=session,
         permissions=permissions,
         workdir=loaded.root,
+        hooks=loaded.hooks,
+        memory=loaded.memory,
     ):
         if event.type == "text_delta":
             print(event.data["text"], end="", flush=True)
@@ -206,7 +287,8 @@ async def _run_turn(
 
 def _print_stop_notice(result: datatypes.RunResult) -> None:
     """不是正常結束時，告訴使用者原因。"""
-    if result.stop_reason == "end_turn":
+    # 被防護擋下時，原因已經當成回覆印出來了。
+    if result.stop_reason in ("end_turn", "blocked"):
         return
     notices = {
         "max_turns": "已達到單次對話的工具呼叫輪數上限，可以再傳訊息讓它繼續。",

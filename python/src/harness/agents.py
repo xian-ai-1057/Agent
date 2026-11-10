@@ -3,6 +3,7 @@
 import dataclasses
 from typing import Any
 
+from harness import skills as skills_lib
 from harness import tools as tools_lib
 
 
@@ -22,6 +23,7 @@ class Agent:
             對象時，其他 agent 的模型靠這段說明決定要不要找它。
         subagents: 可以把工作交給哪些 agent（對方看不到目前的對話）。
         handoffs: 可以把整段對話轉交給哪些 agent。
+        skills: 需要時才載入的能力單元（見 skills 模組）。
     """
 
     name: str
@@ -33,12 +35,16 @@ class Agent:
     description: str = ""
     subagents: list["Agent"] = dataclasses.field(default_factory=list)
     handoffs: list["Agent"] = dataclasses.field(default_factory=list)
+    skills: list[skills_lib.Skill] = dataclasses.field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """檢查工具名稱沒有重複。"""
-        names = [item.name for item in self.tools]
-        duplicates = sorted({n for n in names if names.count(n) > 1})
-        if duplicates:
-            raise ValueError(
-                f"agent {self.name} 有重複的工具名稱：{duplicates}"
-            )
+        """檢查工具與 skill 的名稱沒有重複。"""
+        for kind, names in (
+            ("工具", [item.name for item in self.tools]),
+            ("skill", [item.name for item in self.skills]),
+        ):
+            duplicates = sorted({n for n in names if names.count(n) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"agent {self.name} 有重複的{kind}名稱：{duplicates}"
+                )
