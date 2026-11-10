@@ -1,14 +1,13 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+node_modules/
 dist/
-build/
-.venv/
+*.tsbuildinfo
+coverage/
 .env
 
-# 各專案的 session 紀錄
+# 各專案的對話紀錄
 .harness/
+
+# 範例專案裡的 Python
+__pycache__/
+*.py[cod]
+.venv/

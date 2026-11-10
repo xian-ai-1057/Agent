@@ -4,7 +4,8 @@
 使用它的功能。
 
 完整的例子在 [`examples/report_bot`](../examples/report_bot)：
-`legacy/` 是「原本就存在」的程式碼，`tools/report.py` 是新加的那一層。
+`legacy/` 是「原本就存在」的 Python 程式碼，`tools/report_server.py` 是
+新加的那一層。
 
 ## 移轉後的樣子
 
@@ -18,24 +19,26 @@ my_project/                 ← 既有專案
 ├── harness.yaml            ← 新增
 ├── AGENTS.md               ← 新增
 ├── agents/main.md          ← 新增
-└── tools/reports.py        ← 新增：把既有函式包成工具
+└── tools/server.py         ← 新增：把既有函式公開成工具
 ```
 
-專案根目錄會自動加入 Python 的搜尋路徑，所以 `tools/` 裡的檔案可以
-直接 `import my_project`。
+`tools/server.py` 是一個小小的 Python 程式（MCP 伺服器）。`harness chat`
+啟動時會自動執行它，結束時自動關閉，你不需要另外啟動。
 
 ## 步驟
 
 ### 1. 安裝並建立範本
 
 ```bash
+npm install -g github:xian-ai-1057/Agent     # harness 本身
 cd my_project
-pip install git+https://github.com/xian-ai-1057/Agent.git
+pip install "mcp>=2"                          # Python 端的工具伺服器套件
 harness new .
 ```
 
-`harness new .` 只會建立不存在的檔案，不會覆寫任何既有檔案。建立後
-可以刪掉 `tools/example.py`。
+`harness new .` 只會建立不存在的檔案，不會覆寫任何既有檔案。
+
+模型的連線設定見 README 的「設定模型」。
 
 ### 2. 列出專案「能做的事」
 
@@ -50,15 +53,26 @@ harness new .
 從使用者的問題出發，而不是從既有函式出發。一個工具應該對應一件使用者
 在意的事，內部可以串接好幾個既有函式。
 
-### 3. 把功能包成工具
+### 3. 把功能公開成工具
+
+編輯 `tools/server.py`：
 
 ```python
-# tools/reports.py
-import harness
-from my_project import reports
+import pathlib
+import sys
+
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+# 讓這個檔案可以 import 專案根目錄底下既有的套件。
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+
+from my_project import reports  # noqa: E402
+
+mcp = MCPServer("my_project")
 
 
-@harness.tool
+@mcp.tool()
 def get_sales_summary(month: str) -> dict[str, int]:
     """取得某個月份各產品的銷售總額。
 
@@ -67,15 +81,27 @@ def get_sales_summary(month: str) -> dict[str, int]:
     """
     records = reports.load_sales(month)
     if not records:
-        raise ValueError(f"{month} 沒有銷售資料，請先用 list_months 確認")
+        raise ToolError(f"{month} 沒有銷售資料，請先用 list_months 確認")
     return reports.summarize(records)
+
+
+if __name__ == "__main__":
+    mcp.run()
 ```
 
-既有函式的簽名和 docstring 已經夠清楚時，可以不寫包裝函式，直接包：
+專案已經用 `pip install -e .` 安裝過的話，不需要 `sys.path` 那一行。
 
-```python
-build_report = harness.tool(reports.build_report)
+`harness.yaml` 裡對應的設定（`harness new` 已經幫你寫好）：
+
+```yaml
+mcpServers:
+  tools:
+    command: python3
+    args: [tools/server.py]
 ```
+
+專案使用虛擬環境時，先啟用虛擬環境再執行 `harness chat`，或把
+`command` 改成虛擬環境裡的 Python，例如 `.venv/bin/python`。
 
 ### 4. 寫 agent 的指示
 
@@ -86,7 +112,7 @@ build_report = harness.tool(reports.build_report)
 ```markdown
 ---
 name: main
-tools: [reports]
+tools: [tools]
 ---
 你是銷售報告助手。
 
@@ -102,68 +128,67 @@ tools: [reports]
 harness chat
 ```
 
-工具本身是普通的 Python 函式，可以直接用 pytest 測試。要測試「agent
-加工具」的整體行為而不花錢呼叫模型，可以用假的模型函式，寫法見
-[`tests/test_example_report_bot.py`](../tests/test_example_report_bot.py)。
+工具本身是普通的 Python 函式，可以直接用 pytest 測試。
+
+伺服器啟動失敗時，harness 會顯示它的錯誤訊息（通常是 import 錯誤或
+少裝套件）。要看伺服器執行期間的完整 log：
+
+```bash
+HARNESS_DEBUG=1 harness chat
+```
 
 ## 設計工具的原則
 
 **說明要具體。** 模型只看得到工具名稱、docstring 和參數說明。格式
 （`YYYY-MM`）、單位、範例值都寫進去。
 
-**錯誤訊息要告訴模型下一步。** `raise ValueError("2026-13 沒有資料，
-請先用 list_months 確認")` 比 `raise ValueError("invalid")` 有用得多，
-模型會照著做。
+**錯誤要用 `ToolError`，而且告訴模型下一步。**
+`raise ToolError("2026-13 沒有資料，請先用 list_months 確認")` 模型會
+照著做。用一般的 `ValueError` 的話，模型只會看到「執行失敗」，看不到
+你寫的訊息。
 
 **回傳模型需要的資料就好。** 回傳內容會佔用模型的 context。查詢類工具
 回傳整理過的摘要或前幾筆，不要回傳整張資料表。
 
-**有副作用的工具要標記。** 會寄信、寫檔、改資料庫、花錢的工具加上
-`needs_approval=True`。
+**有副作用的工具要先問使用者。** 會寄信、改資料庫、花錢的工具，在
+`harness.yaml` 的 `permissions.ask` 加上名稱樣式，或在 Python 端標記
+`destructiveHint=True`（寫法見 README）。
 
-**使用者身分不要讓模型填。** 目前的使用者、權限、資料庫連線，從
-`RunContext.deps` 取得，不要做成工具的參數，否則模型可以填別人的 ID。
+**執行很久的工具要調整逾時。** 單次工具呼叫預設最多等 300 秒，產生
+大型報告需要更久的話，在伺服器設定加上 `timeoutSeconds`：
 
-## 嵌進既有的網頁服務
-
-既有專案已經有網頁介面（FastAPI、Streamlit、Flask）時，不需要用 CLI，
-直接在請求處理函式裡呼叫：
-
-```python
-import harness
-from harness import sessions
-
-project = harness.load_project(".")
-agent = project.agents["main"]
-
-
-async def handle_chat(user_id: str, session_id: str | None, text: str):
-    if session_id:
-        session = sessions.load(project.sessions_dir, session_id)
-    else:
-        session = sessions.create(project.sessions_dir)
-    async for event in harness.run_stream(
-        agent,
-        text,
-        session=session,
-        deps={"user_id": user_id, "db": get_db()},
-        permissions=harness.Permissions(mode="dont_ask"),
-    ):
-        if event.type == "text_delta":
-            yield event.data["text"]
+```yaml
+mcpServers:
+  tools:
+    command: python3
+    args: [tools/server.py]
+    timeoutSeconds: 1800
 ```
 
-網頁服務沒辦法在終端機詢問使用者，所以這裡用 `dont_ask`：需要同意的
-工具會被拒絕。要讓網頁使用者可以按「同意」，就提供自己的
-`Permissions(approver=...)`，在裡面等待前端的回應。
+## 非 Python 的專案
+
+- **TypeScript / JavaScript 專案**：不需要伺服器，直接在 `tools/*.ts`
+  匯出工具，寫法見 README 的「用 TypeScript 寫工具」。
+- **其他語言**：任何語言只要有 MCP SDK（Go、Java、C#、Rust 等都有），
+  做法和 Python 相同，把 `command` 換成啟動那個程式的指令。
+- **已經是 HTTP 服務的專案**：伺服器支援 MCP 的 Streamable HTTP 時，
+  設定改用 `url`：
+
+```yaml
+mcpServers:
+  backend:
+    url: https://my-service.example.com/mcp
+    headers:
+      Authorization: Bearer ...
+```
 
 ## 檢查清單
 
-- [ ] `harness.yaml`、`agents/main.md` 已建立
+- [ ] `harness.yaml`、`agents/main.md`、`tools/server.py` 已建立
 - [ ] 每個使用者會用到的功能都有對應的工具
 - [ ] 每個工具都有具體的 docstring 與參數說明
-- [ ] 有副作用的工具都標了 `needs_approval=True`
-- [ ] 使用者身分從 `RunContext.deps` 取得，不是工具參數
+- [ ] 預期中的錯誤都用 `ToolError`，訊息有說明下一步
+- [ ] 有副作用的工具已列入 `permissions.ask`
 - [ ] 原本寫死的 prompt 已搬到 `agents/*.md`
 - [ ] `.harness/` 已加入 `.gitignore`
 - [ ] `harness chat` 實際問過幾個常見問題

@@ -1,8 +1,15 @@
 name: report_bot
-default_agent: main
+defaultAgent: main
 
 # 不寫 model 時使用環境變數 HARNESS_MODEL。
 # model: anthropic/claude-opus-5-5
+
+# 把既有的 Python 功能公開成工具的伺服器，harness 啟動時會自動執行。
+# 伺服器名稱（report）就是 agent 設定裡引用的 toolset 名稱。
+mcpServers:
+  report:
+    command: python3
+    args: [tools/report_server.py]
 
 permissions:
   mode: ask
