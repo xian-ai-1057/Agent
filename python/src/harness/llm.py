@@ -119,6 +119,56 @@ async def embed(model: str, texts: list[str]) -> list[list[float]]:
     return vectors
 
 
+async def rerank(model: str, query: str, documents: list[str]) -> list[float]:
+    """用 reranker 模型評估每段文件與查詢的相關度。
+
+    有設定 HARNESS_BASE_URL 時改連那個端點的 /v1/rerank（LiteLLM Proxy
+    提供這個端點）。
+
+    Args:
+        model: litellm 的 rerank 模型名稱（例如 cohere/rerank-v3.5）。
+        query: 查詢。
+        documents: 要評估的文件。
+
+    Returns:
+        每段文件的相關度，順序與 documents 相同，越大越相關。
+    """
+    import litellm
+
+    litellm.suppress_debug_info = True
+    if not documents:
+        return []
+    response = await litellm.arerank(
+        model=model,
+        query=query,
+        documents=documents,
+        return_documents=False,
+        **_rerank_endpoint_options(),
+    )
+    scores = [0.0] * len(documents)
+    for row in response.results or []:
+        scores[_field(row, "index")] = float(_field(row, "relevance_score"))
+    return scores
+
+
+def _rerank_endpoint_options() -> dict[str, Any]:
+    """rerank 走 LiteLLM Proxy 的 /v1/rerank。
+
+    litellm 會自己在網址後面加上 /v1/rerank，所以 HARNESS_BASE_URL 結尾
+    的 /v1（OpenAI 相容端點常見的寫法）要先拿掉。
+    """
+    options = _endpoint_options()
+    if not options:
+        return {}
+    base_url = options["api_base"].rstrip("/")
+    base_url = base_url.removesuffix("/v1")
+    return {
+        **options,
+        "api_base": base_url,
+        "custom_llm_provider": "litellm_proxy",
+    }
+
+
 def _field(row: Any, name: str) -> Any:
     """litellm 的 embedding 結果可能是 dict 或物件，兩種都支援。"""
     if isinstance(row, dict):
