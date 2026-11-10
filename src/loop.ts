@@ -43,10 +43,14 @@ const INTERRUPTED = "工具執行被中斷，沒有結果";
 /**
  * 執行 agent 並逐步產生事件，適合接到聊天介面。
  * 最後一個事件一定是 run_end。
+ *
+ * @param userInput 使用者的新訊息。傳 null 表示不加新訊息，直接從對話
+ *   紀錄的最後一則接著跑（例如上一輪連不上模型，修好後重試）。
+ * @throws userInput 為 null 但對話紀錄沒有可以接續的訊息時。
  */
 export async function* runStream(
   agent: Agent,
-  userInput: string,
+  userInput: string | null,
   options: RunOptions = {},
 ): AsyncGenerator<Event> {
   const session = options.session ?? new Session();
@@ -64,8 +68,9 @@ export async function* runStream(
   const schemas = agent.tools.map(toToolSchema);
 
   closeDanglingToolCalls(session);
-  await hooks.emit("runStart", userInput, context);
-  session.append({ role: "user", content: userInput });
+  if (userInput === null) assertResumable(session);
+  await hooks.emit("runStart", userInput ?? "", context);
+  if (userInput !== null) session.append({ role: "user", content: userInput });
 
   const usage: Usage = { inputTokens: 0, outputTokens: 0 };
   let output = "";
@@ -126,7 +131,7 @@ export async function* runStream(
 /** 執行 agent 直到結束，回傳最後結果。 */
 export async function run(
   agent: Agent,
-  userInput: string,
+  userInput: string | null,
   options: RunOptions = {},
 ): Promise<RunResult> {
   let result: RunResult | undefined;
@@ -163,6 +168,16 @@ function toToolMessage(result: ToolResult): Message {
     name: result.name,
     content: result.isError ? `[錯誤] ${result.output}` : result.output,
   };
+}
+
+/** 不加新訊息接著跑時，最後一則必須是使用者訊息或工具結果。 */
+function assertResumable(session: Session): void {
+  const last = session.messages.at(-1);
+  if (last?.role !== "user" && last?.role !== "tool") {
+    throw new Error(
+      "對話紀錄的最後一則不是使用者訊息或工具結果，沒有可以接續的地方",
+    );
+  }
 }
 
 /**

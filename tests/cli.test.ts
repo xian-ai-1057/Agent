@@ -236,6 +236,36 @@ describe("harness chat", () => {
   });
 });
 
+describe("harness web", () => {
+  it("啟動網頁版伺服器，結束時關閉", async () => {
+    const root = await newProject();
+    let out = "";
+    let projectName = "";
+
+    const code = await main(["web", "-p", root, "--port", "0"], {
+      write: (text) => {
+        out += text;
+      },
+      model: fakeModel([]).model,
+      waitForExit: async () => {
+        const url = /http:\/\/\S+/.exec(out)?.[0];
+        const response = await fetch(`${url}/api/project`);
+        projectName = ((await response.json()) as { name: string }).name;
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(projectName).toBe("demo");
+  });
+
+  it("--port 不是整數時顯示錯誤", async () => {
+    const { code, err } = await cli(["web", "--port", "abc"]);
+
+    expect(code).toBe(1);
+    expect(err).toContain("--port");
+  });
+});
+
 describe("參數錯誤", () => {
   it("沒有指令時顯示用法", async () => {
     const { code, err } = await cli([]);

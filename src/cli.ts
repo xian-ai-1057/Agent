@@ -4,6 +4,7 @@
  *   harness new <資料夾>      建立新專案
  *   harness chat              在目前專案開始聊天
  *   harness run "<訊息>"      執行一次後結束
+ *   harness web               開啟網頁版
  */
 
 import { createInterface, type Interface } from "node:readline";
@@ -17,6 +18,7 @@ import { loadProject, type Project } from "./project.ts";
 import { createProject, type ScaffoldLanguage } from "./scaffold.ts";
 import { createSession, latestSession, loadSession } from "./session.ts";
 import type { RunResult } from "./types.ts";
+import { startWebServer } from "./web/server.ts";
 
 /** CLI 與外界的接點，測試時可以替換。 */
 export interface CliEnvironment {
@@ -30,12 +32,15 @@ export interface CliEnvironment {
   interactive?: boolean;
   /** 覆寫模型函式。 */
   model?: ModelFn;
+  /** 網頁版啟動後呼叫，回傳的 Promise 結束時關閉伺服器；預設等到 Ctrl-C。 */
+  waitForExit?: () => Promise<void>;
 }
 
 const USAGE = `用法：
   harness new <資料夾> [--lang python|ts]   建立新專案
   harness chat [選項]                       開始聊天
   harness run [選項] "<訊息>"               執行一次後結束
+  harness web [選項]                        開啟網頁版
 
 chat 與 run 的選項：
   -p, --project <資料夾>   專案位置（預設為目前資料夾）
@@ -44,6 +49,11 @@ chat 與 run 的選項：
   -c, --continue           接續最新的對話
   -r, --resume <ID>        接續指定的對話
       --bypass             所有工具都不詢問直接執行
+
+web 的選項：
+  -p, --project <資料夾>   專案位置（預設為目前資料夾）
+      --port <埠號>        預設 4321
+      --host <位址>        預設 127.0.0.1（只有本機能連）
 `;
 
 const EXIT_COMMANDS = ["/exit", "/quit"];
@@ -60,6 +70,8 @@ interface Options {
   resume?: string;
   bypass?: boolean;
   lang?: string;
+  port?: string;
+  host?: string;
   help?: boolean;
 }
 
@@ -69,6 +81,7 @@ interface Io {
   input: Readable;
   interactive: boolean;
   model?: ModelFn;
+  waitForExit: () => Promise<void>;
 }
 
 /**
@@ -87,6 +100,7 @@ export async function main(
     input: environment.input ?? process.stdin,
     interactive: environment.interactive ?? Boolean(process.stdin.isTTY),
     model: environment.model,
+    waitForExit: environment.waitForExit ?? waitForInterrupt,
   };
   let options: Options;
   let positionals: string[];
@@ -102,6 +116,8 @@ export async function main(
         resume: { type: "string", short: "r" },
         bypass: { type: "boolean" },
         lang: { type: "string" },
+        port: { type: "string" },
+        host: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     }));
@@ -121,6 +137,7 @@ export async function main(
     if (command === "chat" || (command === "run" && argument)) {
       return await commandAgent(command, argument, options, io);
     }
+    if (command === "web") return await commandWeb(options, io);
   } catch (error) {
     io.writeError(`錯誤：${(error as Error).message}\n`);
     return 1;
@@ -145,6 +162,34 @@ function commandNew(path: string, options: Options, io: Io): number {
   }
   io.write(`\n完成。接著執行：cd ${path} && harness chat\n`);
   return 0;
+}
+
+/** 啟動網頁版，直到使用者按 Ctrl-C。 */
+async function commandWeb(options: Options, io: Io): Promise<number> {
+  const port = options.port === undefined ? undefined : Number(options.port);
+  if (port !== undefined && !(Number.isInteger(port) && port >= 0)) {
+    throw new Error(`--port 必須是整數：${options.port}`);
+  }
+  const project = await loadProject(options.project ?? ".");
+  try {
+    const server = await startWebServer({
+      project,
+      port,
+      host: options.host,
+      model: io.model,
+    });
+    io.write(`${project.name} 的網頁版已啟動：${server.url}\n`);
+    io.write("按 Ctrl-C 結束。\n");
+    await io.waitForExit();
+    await server.close();
+    return 0;
+  } finally {
+    await project.close();
+  }
+}
+
+function waitForInterrupt(): Promise<void> {
+  return new Promise((done) => process.once("SIGINT", () => done()));
 }
 
 /** chat 與 run 共用的流程。 */
