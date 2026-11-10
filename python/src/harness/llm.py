@@ -19,6 +19,7 @@ from typing import Any
 from harness import datatypes
 
 FALLBACK_MODEL = "anthropic/claude-opus-5-5"
+EMBED_BATCH_SIZE = 64
 
 # 模型函式：依序產生文字片段（str），最後產生一個 ModelResponse。
 ModelFn = Callable[
@@ -80,6 +81,40 @@ async def complete(
             yield text
     full = litellm.stream_chunk_builder(chunks, messages=messages)
     yield to_model_response(full)
+
+
+async def embed(model: str, texts: list[str]) -> list[list[float]]:
+    """用 embedding 模型把文字轉成向量。
+
+    和 complete 一樣，有設定 HARNESS_BASE_URL 時改連那個端點。
+
+    Args:
+        model: litellm 的 embedding 模型名稱（例如
+            openai/text-embedding-3-small）。
+        texts: 要轉換的文字。
+
+    Returns:
+        每段文字的向量，順序與 texts 相同。
+    """
+    import litellm
+
+    litellm.suppress_debug_info = True
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), EMBED_BATCH_SIZE):
+        batch = texts[start : start + EMBED_BATCH_SIZE]
+        response = await litellm.aembedding(
+            model=model, input=batch, **_endpoint_options()
+        )
+        rows = sorted(response.data, key=lambda row: _field(row, "index"))
+        vectors += [list(_field(row, "embedding")) for row in rows]
+    return vectors
+
+
+def _field(row: Any, name: str) -> Any:
+    """litellm 的 embedding 結果可能是 dict 或物件，兩種都支援。"""
+    if isinstance(row, dict):
+        return row[name]
+    return getattr(row, name)
 
 
 def _endpoint_options() -> dict[str, Any]:

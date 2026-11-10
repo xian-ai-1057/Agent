@@ -2,13 +2,19 @@
 
 專案格式（與 TypeScript 版共用同一份設定）：
     my-project/
-    ├── harness.yaml    名稱、模型、預設 agent、權限
+    ├── harness.yaml    名稱、模型、預設 agent、權限、知識庫、記憶、防護
     ├── AGENTS.md       專案說明，會接在每個 agent 的指示後面（可省略）
     ├── agents/*.md     一個檔案一個 agent：frontmatter 是設定，內文是指示
-    └── tools/*.py      用 @tool 包裝的函式，檔名就是 toolset 名稱
+    ├── tools/*.py      用 @tool 包裝的函式，檔名就是 toolset 名稱
+    ├── skills/*/       一個資料夾一個 skill（SKILL.md 加參考檔案）
+    └── knowledge/      知識庫文件（.md、.txt、.pdf）
 
 agent 的 frontmatter 可以用 subagents 與 handoffs 列出其他 agent 的名稱，
-讓它把工作交出去或把對話轉交出去（見 delegation 模組）。
+讓它把工作交出去或把對話轉交出去（見 delegation 模組）；用 skills 列出
+可用的 skill；用 knowledge 掛上知識庫。
+
+skills、knowledge、memory、guardrails 只有 Python 版支援，TypeScript 版
+會忽略這些設定。
 
 harness.yaml 裡的 mcpServers 是給 TypeScript 版用的，這裡不會啟動；
 被它當成伺服器執行的 tools/*.py 也不會被當成工具模組載入。
@@ -24,11 +30,20 @@ import yaml
 
 from harness import agents
 from harness import builtin
+from harness import guardrails
+from harness import hooks as hooks_lib
+from harness import knowledge as knowledge_lib
+from harness import memory as memory_lib
 from harness import permissions as permissions_lib
+from harness import skills as skills_lib
 from harness import tools as tools_lib
 
 CONFIG_FILE = "harness.yaml"
-SESSIONS_DIR = pathlib.Path(".harness") / "sessions"
+DATA_DIR = pathlib.Path(".harness")
+SESSIONS_DIR = DATA_DIR / "sessions"
+MEMORY_FILE = DATA_DIR / "memory.json"
+KNOWLEDGE_CACHE_DIR = DATA_DIR / "knowledge"
+DEFAULT_KNOWLEDGE_DIR = "knowledge"
 
 
 @dataclasses.dataclass
@@ -42,6 +57,11 @@ class Project:
         tools: 專案 tools/ 底下所有的工具，以名稱為鍵。
         permissions: 專案的權限設定。
         default_agent: 沒指定時使用的 agent 名稱。
+        skills: 專案 skills/ 底下所有的 skill，以名稱為鍵。
+        knowledge: 專案的知識庫，沒有設定時為 None。
+        memory: 長期記憶，harness.yaml 沒有開啟 memory 時為 None。
+        hooks: 依 guardrails 設定建立的 hooks，執行時傳給 run；也可以
+            再加上自己的處理函式。
     """
 
     name: str
@@ -50,6 +70,12 @@ class Project:
     tools: dict[str, tools_lib.Tool]
     permissions: permissions_lib.Permissions
     default_agent: str
+    skills: dict[str, skills_lib.Skill] = dataclasses.field(
+        default_factory=dict
+    )
+    knowledge: knowledge_lib.Knowledge | None = None
+    memory: memory_lib.MemoryStore | None = None
+    hooks: hooks_lib.Hooks = dataclasses.field(default_factory=hooks_lib.Hooks)
 
     @property
     def sessions_dir(self) -> pathlib.Path:
@@ -89,13 +115,17 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
         for item in items
     }
 
+    project_skills = _load_skills(root, toolsets, project_tools)
+    knowledge = _load_knowledge(root, config.get("knowledge"))
+    resources = _Resources(
+        toolsets, project_tools, servers, project_skills, knowledge
+    )
+
     shared = _read_optional(root / "AGENTS.md")
     loaded = {}
     metas = {}
     for agent_path in sorted((root / "agents").glob("*.md")):
-        agent, meta = _load_agent(
-            agent_path, config, shared, toolsets, project_tools, servers
-        )
+        agent, meta = _load_agent(agent_path, config, shared, resources)
         loaded[agent.name] = agent
         metas[agent.name] = meta
     if not loaded:
@@ -112,7 +142,24 @@ def load_project(path: str | pathlib.Path = ".") -> Project:
         tools=project_tools,
         permissions=_load_permissions(config.get("permissions") or {}),
         default_agent=default_agent,
+        skills=project_skills,
+        knowledge=knowledge,
+        memory=memory_lib.MemoryStore(root / MEMORY_FILE)
+        if config.get("memory")
+        else None,
+        hooks=_load_guardrails(config.get("guardrails") or {}),
     )
+
+
+@dataclasses.dataclass
+class _Resources:
+    """建立 agent 時可以引用的專案資源。"""
+
+    toolsets: dict[str, list[tools_lib.Tool]]
+    project_tools: dict[str, tools_lib.Tool]
+    servers: dict[str, Any]
+    skills: dict[str, skills_lib.Skill]
+    knowledge: knowledge_lib.Knowledge | None
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -214,30 +261,161 @@ def _load_agent(
     path: pathlib.Path,
     config: dict[str, Any],
     shared: str,
-    toolsets: dict[str, list[tools_lib.Tool]],
-    project_tools: dict[str, tools_lib.Tool],
-    servers: dict[str, Any],
+    resources: _Resources,
 ) -> tuple[agents.Agent, dict[str, Any]]:
     """讀取一個 agent 的 Markdown 檔，回傳 agent 與它開頭的設定。"""
     meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-    # 沒寫 tools 欄位時，預設可以使用專案裡所有的工具。
+    name = meta.get("name") or path.stem
+    agent_skills = _resolve_skills(name, meta, resources.skills)
     if "tools" in meta:
         names = meta["tools"] or []
-        _check_server_only(names, toolsets, project_tools, servers)
-        agent_tools = resolve_tools(names, toolsets, project_tools)
+        _check_server_only(
+            names,
+            resources.toolsets,
+            resources.project_tools,
+            resources.servers,
+        )
+        agent_tools = resolve_tools(
+            names, resources.toolsets, resources.project_tools
+        )
     else:
-        agent_tools = list(project_tools.values())
+        # 沒寫 tools 欄位時，預設可以使用專案裡所有的工具；但屬於 skill
+        # 的工具要等 skill 載入後才開放，所以先排除。
+        skill_owned = {item.name for s in agent_skills for item in s.tools}
+        agent_tools = [
+            item
+            for item in resources.project_tools.values()
+            if item.name not in skill_owned
+        ]
+    knowledge_tool = _knowledge_tool(name, meta, resources.knowledge)
+    if knowledge_tool is not None:
+        agent_tools.append(knowledge_tool)
     instructions = "\n\n".join(part for part in (body, shared) if part)
     agent = agents.Agent(
-        name=meta.get("name") or path.stem,
+        name=name,
         instructions=instructions,
         tools=agent_tools,
         model=meta.get("model") or config.get("model"),
         model_params=meta.get("modelParams") or config.get("modelParams") or {},
         max_turns=meta.get("maxTurns") or config.get("maxTurns") or 20,
         description=meta.get("description") or "",
+        skills=agent_skills,
     )
     return agent, meta
+
+
+def _resolve_skills(
+    agent_name: str,
+    meta: dict[str, Any],
+    available: dict[str, skills_lib.Skill],
+) -> list[skills_lib.Skill]:
+    """依 agent 設定的 skills 欄位選出 skill；沒寫時可以使用全部。"""
+    if "skills" not in meta:
+        return list(available.values())
+    selected = []
+    for skill_name in meta["skills"] or []:
+        if skill_name not in available:
+            raise ValueError(
+                f"agent {agent_name} 引用不存在的 skill：{skill_name}，"
+                f"可用的有：{sorted(available)}"
+            )
+        selected.append(available[skill_name])
+    return selected
+
+
+def _knowledge_tool(
+    agent_name: str,
+    meta: dict[str, Any],
+    knowledge: knowledge_lib.Knowledge | None,
+) -> tools_lib.Tool | None:
+    """依 agent 設定的 knowledge 欄位建立 search_knowledge 工具。
+
+    knowledge: true 表示可以搜尋整個知識庫；knowledge: {labels: [...]}
+    限定只能搜尋這些標籤（與沒有標籤）的文件。
+    """
+    setting = meta.get("knowledge")
+    if not setting:
+        return None
+    if knowledge is None:
+        raise ValueError(
+            f"agent {agent_name} 設定了 knowledge，但專案沒有知識庫：請建立 "
+            f"{DEFAULT_KNOWLEDGE_DIR}/ 資料夾，或在 {CONFIG_FILE} 設定 "
+            "knowledge.path"
+        )
+    if setting is True:
+        return knowledge.as_tool()
+    if not isinstance(setting, dict):
+        raise ValueError(
+            f"agent {agent_name} 的 knowledge 必須是 true 或 {{labels: [...]}}"
+        )
+    labels = setting.get("labels")
+    top_k = setting.get("topK") or 5
+    if labels is None:
+        return knowledge.as_tool(top_k=top_k)
+    return knowledge.as_tool(labels=[str(item) for item in labels], top_k=top_k)
+
+
+def _load_skills(
+    root: pathlib.Path,
+    toolsets: dict[str, list[tools_lib.Tool]],
+    project_tools: dict[str, tools_lib.Tool],
+) -> dict[str, skills_lib.Skill]:
+    """載入 skills/ 底下每個資料夾的 SKILL.md。"""
+    loaded: dict[str, skills_lib.Skill] = {}
+    for skill_file in sorted(
+        (root / "skills").glob(f"*/{skills_lib.SKILL_FILE}")
+    ):
+        folder = skill_file.parent
+        meta, body = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+        name = str(meta.get("name") or folder.name)
+        description = str(meta.get("description") or "").strip()
+        if not description:
+            raise ValueError(
+                f"{skill_file} 缺少 description：agent 靠這段說明決定什麼時候"
+                "載入這個 skill"
+            )
+        if name in loaded:
+            raise ValueError(f"skill 名稱重複：{name}")
+        loaded[name] = skills_lib.Skill(
+            name=name,
+            description=description,
+            instructions=body,
+            tools=resolve_tools(
+                meta.get("tools") or [], toolsets, project_tools
+            ),
+            root=folder,
+        )
+    return loaded
+
+
+def _load_knowledge(
+    root: pathlib.Path, config: Any
+) -> knowledge_lib.Knowledge | None:
+    """依 harness.yaml 的 knowledge 區塊（或 knowledge/ 資料夾）建立知識庫。"""
+    if config is None and not (root / DEFAULT_KNOWLEDGE_DIR).is_dir():
+        return None
+    if config is False:
+        return None
+    settings = config if isinstance(config, dict) else {}
+    path = root / str(settings.get("path") or DEFAULT_KNOWLEDGE_DIR)
+    if not path.is_dir():
+        raise ValueError(f"找不到知識庫資料夾：{path}")
+    return knowledge_lib.Knowledge(
+        path,
+        embedding_model=settings.get("embeddingModel"),
+        chunk_size=settings.get("chunkSize") or 800,
+        cache_dir=root / KNOWLEDGE_CACHE_DIR,
+    )
+
+
+def _load_guardrails(config: dict[str, Any]) -> hooks_lib.Hooks:
+    """依 harness.yaml 的 guardrails 區塊建立 hooks。"""
+    return guardrails.install(
+        hooks_lib.Hooks(),
+        mask_pii=bool(config.get("maskPii")),
+        block_injection=bool(config.get("blockInjection")),
+        blocked_words=[str(word) for word in config.get("blockedWords") or []],
+    )
 
 
 def _link_agents(

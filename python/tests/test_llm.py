@@ -106,8 +106,15 @@ class _FakeEndpoint(http.server.BaseHTTPRequestHandler):
         length = int(self.headers["Content-Length"])
         body = json.loads(self.rfile.read(length))
         type(self).received.append(
-            {"body": body, "auth": self.headers.get("Authorization")}
+            {
+                "body": body,
+                "auth": self.headers.get("Authorization"),
+                "path": self.path,
+            }
         )
+        if self.path.endswith("/embeddings"):
+            self._send_embeddings(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -128,6 +135,25 @@ class _FakeEndpoint(http.server.BaseHTTPRequestHandler):
         finish = {"index": 0, "delta": {}, "finish_reason": "tool_calls"}
         self._send({"choices": [finish]})
         self.wfile.write(b"data: [DONE]\n\n")
+
+    def _send_embeddings(self, body):
+        """依輸入長度回傳向量，並故意把順序倒過來測試排序。"""
+        rows = [
+            {"object": "embedding", "index": index, "embedding": [len(text)]}
+            for index, text in enumerate(body["input"])
+        ]
+        payload = {
+            "object": "list",
+            "data": list(reversed(rows)),
+            "model": body["model"],
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        }
+        data = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _send(self, payload):
         chunk = {"id": "c", "object": "chat.completion.chunk", **payload}
@@ -181,3 +207,19 @@ def test_endpoint_options_allow_missing_api_key(monkeypatch):
     monkeypatch.delenv("HARNESS_API_KEY", raising=False)
 
     assert llm._endpoint_options()["api_key"] == "not-needed"
+
+
+async def test_embed_uses_endpoint_in_batches_and_keeps_order(
+    endpoint, monkeypatch
+):
+    monkeypatch.setattr(llm, "EMBED_BATCH_SIZE", 2)
+
+    vectors = await llm.embed("my-embedder", ["a", "bb", "ccc"])
+
+    assert vectors == [[1.0], [2.0], [3.0]]
+    assert [item["path"] for item in endpoint.received] == [
+        "/v1/embeddings",
+        "/v1/embeddings",
+    ]
+    assert endpoint.received[0]["body"]["input"] == ["a", "bb"]
+    assert endpoint.received[0]["auth"] == "Bearer test-key"

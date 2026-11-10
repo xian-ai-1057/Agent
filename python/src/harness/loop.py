@@ -12,8 +12,10 @@ from harness import datatypes
 from harness import delegation
 from harness import hooks as hooks_lib
 from harness import llm
+from harness import memory as memory_lib
 from harness import permissions as permissions_lib
 from harness import sessions
+from harness import skills as skills_lib
 from harness import tools as tools_lib
 
 _INTERRUPTED = "工具執行被中斷，沒有結果"
@@ -28,8 +30,14 @@ class _RunOptions:
     deps: Any
     workdir: pathlib.Path
     model_fn: llm.ModelFn
+    memory: memory_lib.MemoryStore | None = None
     # 0 是使用者直接對話的 agent，每進入一層 subagent 加 1。
     depth: int = 0
+
+    @property
+    def user_facing(self) -> bool:
+        """這一層是不是直接和使用者對話（不是 subagent）。"""
+        return self.depth == 0
 
 
 @dataclasses.dataclass
@@ -51,6 +59,7 @@ async def run_stream(
     deps: Any = None,
     workdir: pathlib.Path | None = None,
     model_fn: llm.ModelFn | None = None,
+    memory: memory_lib.MemoryStore | None = None,
 ) -> AsyncIterator[datatypes.Event]:
     """執行 agent 並逐步產生事件，適合接到聊天介面。
 
@@ -65,6 +74,8 @@ async def run_stream(
         deps: 任意物件，工具可從 RunContext.deps 取得。
         workdir: 專案根目錄，預設為目前目錄。
         model_fn: 模型函式，預設透過 litellm 呼叫；測試時可換成假的。
+        memory: 使用者的長期記憶。傳入時 agent 會看到記憶內容，並可以
+            用 remember / forget 工具管理；不傳則不使用記憶。
 
     Yields:
         Event，最後一個一定是 run_end。
@@ -75,6 +86,7 @@ async def run_stream(
         deps=deps,
         workdir=pathlib.Path(workdir or pathlib.Path.cwd()),
         model_fn=model_fn or llm.complete,
+        memory=memory,
     )
     events = _run_loop(
         agent, user_input, session or sessions.Session(), options
@@ -97,32 +109,55 @@ async def _run_loop(
     toolbox = _build_toolbox(agent, session, options, usage)
     # run_start / run_end 只對使用者直接對話的那一層觸發；subagent 的
     # 執行屬於一次工具呼叫，由 pre_tool_use / post_tool_use 涵蓋。
-    if options.depth == 0:
+    if options.user_facing:
         await options.hooks.emit("run_start", user_input, context)
+        user_input, blocked = await options.hooks.filter_text(
+            "pre_user_message", user_input, context
+        )
+        if blocked is not None:
+            # 被擋下的訊息不寫進對話紀錄，模型完全不會看到它。
+            async for event in _finish_blocked(
+                agent, session, usage, blocked.reason, options, context
+            ):
+                yield event
+            return
     session.append({"role": "user", "content": user_input})
 
     output = ""
     stop_reason = "max_turns"
     turns = 0
+    # 有 pre_reply 時要整段檢查完才能送出，所以不逐字串流。
+    hold_text = options.user_facing and options.hooks.has("pre_reply")
     while turns < agent.max_turns:
         turns += 1
         response = None
-        request = _build_request(agent, session.messages)
+        request = _build_request(agent, session.messages, options)
         model = agent.model or llm.default_model()
         stream = options.model_fn(
             model, request, toolbox.schemas, agent.model_params
         )
         async for item in stream:
             if isinstance(item, str):
-                yield datatypes.Event("text_delta", {"text": item})
+                if not hold_text:
+                    yield datatypes.Event("text_delta", {"text": item})
             else:
                 response = item
         if response is None:
             raise RuntimeError("模型函式沒有回傳 ModelResponse")
         usage.add(response.usage)
+        blocked_reason = None
+        if hold_text:
+            blocked_reason = await _check_reply(response, options, context)
+            text = response.message.get("content")
+            if text:
+                yield datatypes.Event("text_delta", {"text": text})
         session.append(response.message)
         yield datatypes.Event("message", {"message": response.message})
 
+        if blocked_reason is not None:
+            output = blocked_reason
+            stop_reason = "blocked"
+            break
         if not response.tool_calls:
             output = response.message.get("content") or ""
             stop_reason = _stop_reason(response.finish_reason)
@@ -144,6 +179,9 @@ async def _run_loop(
             agent = target
             context = _make_context(agent, session, options)
             toolbox = _build_toolbox(agent, session, options, usage)
+        elif _loaded_skill(results):
+            # 載入 skill 後，它的專屬工具從下一次呼叫模型開始可用。
+            toolbox = _build_toolbox(agent, session, options, usage)
 
     result = datatypes.RunResult(
         output=output,
@@ -153,9 +191,62 @@ async def _run_loop(
         stop_reason=stop_reason,
         agent_name=agent.name,
     )
-    if options.depth == 0:
+    if options.user_facing:
         await options.hooks.emit("run_end", result, context)
     yield datatypes.Event("run_end", {"result": result})
+
+
+async def _finish_blocked(
+    agent: agents.Agent,
+    session: sessions.Session,
+    usage: datatypes.Usage,
+    reason: str,
+    options: _RunOptions,
+    context: datatypes.RunContext,
+) -> AsyncIterator[datatypes.Event]:
+    """使用者訊息被 pre_user_message 擋下時，不呼叫模型直接結束。"""
+    yield datatypes.Event("text_delta", {"text": reason})
+    result = datatypes.RunResult(
+        output=reason,
+        messages=session.messages,
+        usage=usage,
+        turns=0,
+        stop_reason="blocked",
+        agent_name=agent.name,
+    )
+    await options.hooks.emit("run_end", result, context)
+    yield datatypes.Event("run_end", {"result": result})
+
+
+async def _check_reply(
+    response: datatypes.ModelResponse,
+    options: _RunOptions,
+    context: datatypes.RunContext,
+) -> str | None:
+    """讓 pre_reply 檢查模型的回覆，必要時直接改寫 response。
+
+    Returns:
+        被拒絕時的原因，否則為 None。
+    """
+    text = response.message.get("content")
+    if not text:
+        return None
+    text, blocked = await options.hooks.filter_text("pre_reply", text, context)
+    if blocked is None:
+        response.message["content"] = text
+        return None
+    # 換掉整則回覆，也取消這次的工具呼叫：被擋下的回覆不該再有後續動作。
+    response.message = {"role": "assistant", "content": blocked.reason}
+    response.tool_calls = []
+    return blocked.reason
+
+
+def _loaded_skill(results: list[datatypes.ToolResult]) -> bool:
+    """這一輪是否有成功載入 skill。"""
+    return any(
+        result.name == skills_lib.LOAD_TOOL and not result.is_error
+        for result in results
+    )
 
 
 async def run(
@@ -212,8 +303,19 @@ def _build_toolbox(
     options: _RunOptions,
     usage: datatypes.Usage,
 ) -> _Toolbox:
-    """組合 agent 自己的工具，以及 subagents、handoffs 對應的工具。"""
+    """組合 agent 可用的所有工具。
+
+    包含 agent 自己的工具、skill 相關工具（含已載入 skill 的專屬工具）、
+    記憶工具，以及 subagents、handoffs 對應的工具。
+    """
     items = list(agent.tools)
+    if agent.skills:
+        items += skills_lib.make_tools(agent.skills)
+        for skill in skills_lib.loaded_skills(agent.skills, session.messages):
+            known = {item.name for item in items}
+            items += [item for item in skill.tools if item.name not in known]
+    if options.memory is not None and options.user_facing:
+        items += memory_lib.make_tools(options.memory)
     # 到達巢狀上限後不再提供 subagent 工具，避免 agent 互相呼叫沒完沒了。
     if options.depth < delegation.MAX_SUBAGENT_DEPTH:
         runner = _subagent_runner(session, options, usage)
@@ -232,7 +334,7 @@ def _build_toolbox(
         if item.name in by_name:
             raise ValueError(
                 f"agent {agent.name} 的工具名稱重複：{item.name}"
-                "（subagents 與 handoffs 也各佔用一個工具名稱）"
+                "（subagents、handoffs、skills 與記憶也會佔用工具名稱）"
             )
         by_name[item.name] = item
     schemas = [item.to_schema() for item in items]
@@ -275,12 +377,22 @@ def _handoff_target(
 
 
 def _build_request(
-    agent: agents.Agent, messages: list[datatypes.Message]
+    agent: agents.Agent,
+    messages: list[datatypes.Message],
+    options: _RunOptions,
 ) -> list[datatypes.Message]:
-    """在對話紀錄前面加上 system prompt。"""
-    if not agent.instructions:
+    """在對話紀錄前面加上 system prompt。
+
+    system prompt 依序是 agent 的指示、可用的 skill 清單與長期記憶；
+    每次呼叫模型都重新組合，所以剛存下的記憶下一次就看得到。
+    """
+    parts = [agent.instructions, skills_lib.prompt_section(agent.skills)]
+    if options.memory is not None and options.user_facing:
+        parts.append(memory_lib.prompt_section(options.memory))
+    system = "\n\n".join(part for part in parts if part)
+    if not system:
         return list(messages)
-    return [{"role": "system", "content": agent.instructions}, *messages]
+    return [{"role": "system", "content": system}, *messages]
 
 
 def _stop_reason(finish_reason: str) -> str:

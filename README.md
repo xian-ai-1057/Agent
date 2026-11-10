@@ -20,11 +20,16 @@
 | 模型 | 任何 OpenAI 相容端點 | litellm（直接連供應商或連端點） |
 | 連接 MCP 伺服器 | 支援 | 尚未支援 |
 | Subagents 與 handoffs | 尚未支援 | [支援](python/README.md#多個-agent-協作) |
+| 知識庫（RAG） | 尚未支援 | [支援](python/README.md#知識庫rag) |
+| Skills | 尚未支援 | [支援](python/README.md#skills) |
+| 長期記憶 | 尚未支援 | [支援](python/README.md#長期記憶) |
+| 訊息防護（個資遮蔽、提示注入） | 尚未支援 | [支援](python/README.md#訊息防護) |
 
 怎麼選：
 
 - **專案是 Python、想用最少的步驟接上**，要把 agent 嵌進既有的 Python
-  網頁服務，或需要多個 agent 協作：用 [Python 版](python/README.md)。
+  網頁服務，或需要多個 agent 協作、知識庫、skills、長期記憶、訊息防護：
+  用 [Python 版](python/README.md)。
 - **專案是 TypeScript / Node.js**，或要連接現成的 MCP 伺服器：用
   TypeScript 版。
 

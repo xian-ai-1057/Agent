@@ -1,0 +1,619 @@
+"""知識庫：讓 agent 從文件裡找答案並附上出處（RAG）。
+
+流程：
+    1. 讀取資料夾裡的文件（.md、.txt，裝了 pypdf 時也支援 .pdf）。
+    2. 依段落切成片段，記下來源檔案、所在標題或頁碼。
+    3. 搜尋時用關鍵字比對（BM25，不需要任何模型）；有設定 embedding
+       模型時再加上語意檢索，兩者的排名合併（hybrid search）。
+    4. 以 search_knowledge 工具提供給 agent，結果附上來源讓 agent 引用。
+
+檔案有變動時，下次搜尋會自動重建索引；embedding 依片段內容快取，
+沒變的片段不會重新計算。
+
+存取範圍用標籤控制：文件可以標上標籤（例如 hr、finance），有標籤的
+文件只有被允許該標籤的 agent 或使用者搜尋得到；沒有標籤的文件所有人
+都搜尋得到。標籤的寫法：
+    - Markdown 檔開頭的 frontmatter：labels: [hr]
+    - 知識庫資料夾裡的 labels.yaml，以檔案路徑樣式指定：
+          "hr/*": [hr]
+          "finance/*.pdf": [finance]
+"""
+
+import asyncio
+import dataclasses
+import fnmatch
+import hashlib
+import json
+import math
+import pathlib
+import re
+import weakref
+from collections.abc import Awaitable
+from collections.abc import Callable
+from typing import Any
+
+import yaml
+
+from harness import datatypes
+from harness import llm
+from harness import tools as tools_lib
+
+TEXT_SUFFIXES = (".md", ".markdown", ".txt")
+PDF_SUFFIX = ".pdf"
+LABELS_FILE = "labels.yaml"
+TOOL_NAME = "search_knowledge"
+
+# BM25 的標準參數。
+_K1 = 1.5
+_B = 0.75
+# Reciprocal Rank Fusion 的平滑常數，常用值。
+_RRF_K = 60
+
+_WORD = re.compile(
+    r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
+    r"|[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]+"
+)
+_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+
+EmbedFn = Callable[[list[str]], Awaitable[list[list[float]]]]
+LabelFilter = Callable[[datatypes.RunContext], list[str] | None]
+
+
+@dataclasses.dataclass
+class Chunk:
+    """知識庫裡的一個片段。
+
+    Attributes:
+        source: 來源檔案（相對於知識庫資料夾）或 add_text 給的名稱。
+        location: 在來源裡的位置（所在標題或頁碼），沒有則為空字串。
+        text: 片段內容。
+        labels: 存取標籤，空的表示所有人都搜尋得到。
+    """
+
+    source: str
+    location: str
+    text: str
+    labels: tuple[str, ...] = ()
+
+    @property
+    def citation(self) -> str:
+        """給人看的出處，例如 hr/leave.md › 特休。"""
+        if not self.location:
+            return self.source
+        return f"{self.source} › {self.location}"
+
+
+@dataclasses.dataclass
+class Hit:
+    """一筆搜尋結果。
+
+    Attributes:
+        chunk: 找到的片段。
+        score: 相關度，越大越相關；只用來排序，不同查詢之間不能比較。
+    """
+
+    chunk: Chunk
+    score: float
+
+
+class Knowledge:
+    """一個知識庫。
+
+    Example:
+        kb = Knowledge(
+            "knowledge", embedding_model="openai/text-embedding-3-small"
+        )
+        agent = harness.Agent(name="faq", tools=[kb.as_tool()])
+
+    Attributes:
+        path: 文件資料夾，None 表示只用 add_text 加入的內容。
+        embedding_model: litellm 的 embedding 模型名稱，None 表示只用
+            關鍵字檢索。
+        chunk_size: 每個片段的目標字數。
+        cache_dir: 存放 embedding 快取的資料夾，None 表示不存檔。
+        label_filter: 依執行環境決定可搜尋標籤的函式（例如依
+            context.deps 裡的使用者部門）。回傳 None 表示不限制。
+        warnings: 建立索引時略過的檔案與原因。
+    """
+
+    def __init__(
+        self,
+        path: str | pathlib.Path | None = None,
+        *,
+        embedding_model: str | None = None,
+        chunk_size: int = 800,
+        cache_dir: str | pathlib.Path | None = None,
+        label_filter: LabelFilter | None = None,
+        embed_fn: EmbedFn | None = None,
+    ) -> None:
+        if chunk_size < 100:
+            raise ValueError("chunk_size 至少要 100")
+        self.path = pathlib.Path(path) if path is not None else None
+        self.embedding_model = embedding_model
+        self.chunk_size = chunk_size
+        self.cache_dir = pathlib.Path(cache_dir) if cache_dir else None
+        self.label_filter = label_filter
+        self.warnings: list[str] = []
+        self._embed_fn = embed_fn
+        self._extra: list[Chunk] = []
+        self._signature: tuple[Any, ...] | None = None
+        self._chunks: list[Chunk] = []
+        self._tokens: list[dict[str, int]] = []
+        self._doc_freq: dict[str, int] = {}
+        self._avg_length = 0.0
+        self._vectors: list[list[float]] = []
+        self._locks: weakref.WeakKeyDictionary[Any, asyncio.Lock] = (
+            weakref.WeakKeyDictionary()
+        )
+
+    def add_text(
+        self, text: str, source: str, labels: list[str] | None = None
+    ) -> None:
+        """直接加入一段文字（例如從資料庫讀出的 FAQ）。
+
+        Args:
+            text: 內容。
+            source: 來源名稱，會出現在搜尋結果的出處。
+            labels: 存取標籤。
+        """
+        label_tuple = tuple(labels or ())
+        self._extra += split_text(text, source, label_tuple, self.chunk_size)
+        self._signature = None
+
+    async def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        labels: list[str] | None = None,
+    ) -> list[Hit]:
+        """搜尋知識庫。
+
+        Args:
+            query: 要找的內容，用自然語言描述即可。
+            top_k: 最多回傳幾筆。
+            labels: 允許的標籤；None 表示不限制。有標籤的文件只有在
+                標籤與這裡有交集時才會被找到。
+
+        Returns:
+            依相關度排序的結果。
+        """
+        await self._ensure_index()
+        allowed = None if labels is None else set(labels)
+        visible = [
+            index
+            for index, chunk in enumerate(self._chunks)
+            if allowed is None
+            or not chunk.labels
+            or allowed.intersection(chunk.labels)
+        ]
+        if not visible or not query.strip():
+            return []
+        rankings = [self._keyword_ranking(query, visible)]
+        if self._vectors:
+            rankings.append(await self._vector_ranking(query, visible))
+        fused: dict[int, float] = {}
+        for ranking in rankings:
+            for rank, index in enumerate(ranking):
+                fused[index] = fused.get(index, 0.0) + 1 / (_RRF_K + rank + 1)
+        best = sorted(fused, key=lambda index: fused[index], reverse=True)
+        return [Hit(self._chunks[i], fused[i]) for i in best[:top_k]]
+
+    def as_tool(
+        self, labels: list[str] | None = None, top_k: int = 5
+    ) -> tools_lib.Tool:
+        """把知識庫包成 agent 可以呼叫的 search_knowledge 工具。
+
+        Args:
+            labels: 這個 agent 可以搜尋的標籤；None 表示不限制。和
+                label_filter 同時設定時，兩者都允許的標籤才搜尋得到。
+            top_k: 每次搜尋最多回傳幾筆。
+
+        Returns:
+            search_knowledge 工具。
+        """
+
+        async def search_knowledge(
+            context: datatypes.RunContext, query: str
+        ) -> str:
+            """搜尋知識庫，取得與問題相關的文件片段與出處。
+
+            回答公司內部規定、產品資訊等問題前先搜尋；回答時只根據
+            找到的內容，並註明出處（方括號裡的來源）。找不到時直接說
+            知識庫裡沒有相關資料，不要自己編造。
+
+            Args:
+                query: 要找的內容，寫成完整的問題或關鍵字，例如
+                    「特休假怎麼計算」。
+            """
+            allowed = _combine_labels(labels, self._dynamic_labels(context))
+            hits = await self.search(query, top_k=top_k, labels=allowed)
+            return format_hits(hits)
+
+        return tools_lib.tool(search_knowledge, name=TOOL_NAME)
+
+    async def stats(self) -> dict[str, Any]:
+        """建立索引並回傳概況，方便確認文件有沒有被讀到。
+
+        Returns:
+            檔案數、片段數、是否使用 embedding 與略過的檔案。
+        """
+        await self._ensure_index()
+        return {
+            "sources": len({chunk.source for chunk in self._chunks}),
+            "chunks": len(self._chunks),
+            "embedding": bool(self._vectors),
+            "warnings": list(self.warnings),
+        }
+
+    def _dynamic_labels(
+        self, context: datatypes.RunContext
+    ) -> list[str] | None:
+        """依執行環境取得可搜尋的標籤。"""
+        if self.label_filter is None:
+            return None
+        return self.label_filter(context)
+
+    async def _ensure_index(self) -> None:
+        """檔案有變動（或從未建立）時重建索引。"""
+        loop = asyncio.get_running_loop()
+        lock = self._locks.setdefault(loop, asyncio.Lock())
+        async with lock:
+            signature = self._current_signature()
+            if signature == self._signature:
+                return
+            self.warnings = []
+            chunks = [*self._read_folder(), *self._extra]
+            self._build_keyword_index(chunks)
+            self._vectors = []
+            if self.embedding_model or self._embed_fn:
+                self._vectors = await self._embed_cached(
+                    [chunk.text for chunk in chunks]
+                )
+            self._chunks = chunks
+            self._signature = signature
+
+    def _current_signature(self) -> tuple[Any, ...]:
+        """用檔案的修改時間與大小判斷內容有沒有變。"""
+        files = []
+        for path in self._files():
+            stat = path.stat()
+            files.append((str(path), stat.st_mtime_ns, stat.st_size))
+        labels_path = self._labels_path()
+        if labels_path is not None and labels_path.exists():
+            stat = labels_path.stat()
+            files.append(("labels", stat.st_mtime_ns, stat.st_size))
+        return (tuple(files), len(self._extra))
+
+    def _files(self) -> list[pathlib.Path]:
+        """知識庫資料夾裡的所有檔案（不含隱藏檔與 labels.yaml）。"""
+        if self.path is None or not self.path.exists():
+            return []
+        return sorted(
+            path
+            for path in self.path.rglob("*")
+            if path.is_file()
+            and path.name != LABELS_FILE
+            and not any(
+                part.startswith(".")
+                for part in path.relative_to(self.path).parts
+            )
+        )
+
+    def _labels_path(self) -> pathlib.Path | None:
+        if self.path is None:
+            return None
+        return self.path / LABELS_FILE
+
+    def _read_folder(self) -> list[Chunk]:
+        """讀取資料夾裡所有支援的檔案並切成片段。"""
+        rules = self._label_rules()
+        chunks: list[Chunk] = []
+        for path in self._files():
+            source = path.relative_to(self.path).as_posix()
+            suffix = path.suffix.lower()
+            if suffix not in (*TEXT_SUFFIXES, PDF_SUFFIX):
+                self.warnings.append(f"{source}：不支援的格式，已略過")
+                continue
+            try:
+                chunks += self._read_file(path, source, rules)
+            except (OSError, UnicodeDecodeError, ImportError) as error:
+                self.warnings.append(f"{source}：{error}")
+        return chunks
+
+    def _read_file(
+        self, path: pathlib.Path, source: str, rules: dict[str, list[str]]
+    ) -> list[Chunk]:
+        """讀取一個檔案並切成片段。"""
+        labels = set(_labels_for(source, rules))
+        if path.suffix.lower() == PDF_SUFFIX:
+            pages = _read_pdf(path)
+            chunks = []
+            for number, page in enumerate(pages, start=1):
+                chunks += split_text(
+                    page,
+                    source,
+                    tuple(sorted(labels)),
+                    self.chunk_size,
+                    location=f"第 {number} 頁",
+                )
+            return chunks
+        text = path.read_text(encoding="utf-8")
+        meta, body = _split_frontmatter(text)
+        labels.update(str(label) for label in meta.get("labels") or [])
+        return split_text(body, source, tuple(sorted(labels)), self.chunk_size)
+
+    def _label_rules(self) -> dict[str, list[str]]:
+        """讀取 labels.yaml。"""
+        path = self._labels_path()
+        if path is None or not path.exists():
+            return {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            self.warnings.append(
+                f"{LABELS_FILE}：格式必須是「路徑樣式: 標籤列表」"
+            )
+            return {}
+        return {
+            str(pattern): [str(label) for label in (labels or [])]
+            for pattern, labels in data.items()
+        }
+
+    def _build_keyword_index(self, chunks: list[Chunk]) -> None:
+        """建立 BM25 需要的詞頻統計。"""
+        self._tokens = []
+        self._doc_freq = {}
+        for chunk in chunks:
+            counts: dict[str, int] = {}
+            for token in tokenize(
+                f"{chunk.source} {chunk.location} {chunk.text}"
+            ):
+                counts[token] = counts.get(token, 0) + 1
+            self._tokens.append(counts)
+            for token in counts:
+                self._doc_freq[token] = self._doc_freq.get(token, 0) + 1
+        total = sum(sum(counts.values()) for counts in self._tokens)
+        self._avg_length = total / len(chunks) if chunks else 0.0
+
+    def _keyword_ranking(self, query: str, visible: list[int]) -> list[int]:
+        """用 BM25 排序，只回傳至少有一個詞命中的片段。"""
+        terms = set(tokenize(query))
+        total = len(self._tokens)
+        scores: dict[int, float] = {}
+        for index in visible:
+            counts = self._tokens[index]
+            length = sum(counts.values()) or 1
+            score = 0.0
+            for term in terms:
+                freq = counts.get(term, 0)
+                if not freq:
+                    continue
+                docs = self._doc_freq.get(term, 0)
+                idf = math.log(1 + (total - docs + 0.5) / (docs + 0.5))
+                norm = _K1 * (1 - _B + _B * length / (self._avg_length or 1))
+                score += idf * freq * (_K1 + 1) / (freq + norm)
+            if score > 0:
+                scores[index] = score
+        return sorted(scores, key=lambda index: scores[index], reverse=True)
+
+    async def _vector_ranking(
+        self, query: str, visible: list[int]
+    ) -> list[int]:
+        """用 embedding 的餘弦相似度排序。"""
+        [query_vector] = await self._embed([query])
+        scores = {
+            index: _cosine(query_vector, self._vectors[index])
+            for index in visible
+        }
+        return sorted(scores, key=lambda index: scores[index], reverse=True)
+
+    async def _embed(self, texts: list[str]) -> list[list[float]]:
+        """呼叫 embedding 模型（或測試時注入的函式）。"""
+        if self._embed_fn is not None:
+            return await self._embed_fn(texts)
+        return await llm.embed(self.embedding_model, texts)
+
+    async def _embed_cached(self, texts: list[str]) -> list[list[float]]:
+        """計算片段的 embedding，內容沒變的片段使用快取。"""
+        cache = self._load_cache()
+        keys = [_cache_key(self.embedding_model or "", text) for text in texts]
+        missing = sorted({key for key in keys if key not in cache})
+        if missing:
+            by_key = dict(zip(keys, texts, strict=True))
+            vectors = await self._embed([by_key[key] for key in missing])
+            cache.update(zip(missing, vectors, strict=True))
+            self._save_cache({key: cache[key] for key in set(keys)})
+        return [cache[key] for key in keys]
+
+    def _cache_path(self) -> pathlib.Path | None:
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / "embeddings.json"
+
+    def _load_cache(self) -> dict[str, list[float]]:
+        path = self._cache_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+
+    def _save_cache(self, cache: dict[str, list[float]]) -> None:
+        path = self._cache_path()
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache), encoding="utf-8")
+
+
+def tokenize(text: str) -> list[str]:
+    """把文字切成檢索用的詞。
+
+    英文與數字以單字為單位；中日韓文字沒有空白分詞，所以取單字與相鄰
+    兩字（bigram），不需要另外的斷詞套件。
+
+    Args:
+        text: 要切的文字。
+
+    Returns:
+        詞的列表（可能重複）。
+    """
+    tokens: list[str] = []
+    for match in _WORD.finditer(text.lower()):
+        word = match.group(0)
+        if word[0].isascii():
+            tokens.append(word)
+            continue
+        tokens.extend(word)
+        tokens.extend(word[i : i + 2] for i in range(len(word) - 1))
+    return tokens
+
+
+def split_text(
+    text: str,
+    source: str,
+    labels: tuple[str, ...],
+    chunk_size: int,
+    location: str = "",
+) -> list[Chunk]:
+    """依段落把文字切成片段。
+
+    段落會盡量合併到接近 chunk_size，不會從段落中間切開；單一段落
+    超過 chunk_size 時才依長度硬切。Markdown 標題會記錄成片段的位置。
+
+    Args:
+        text: 要切的文字。
+        source: 來源名稱。
+        labels: 存取標籤。
+        chunk_size: 每個片段的目標字數。
+        location: 預設的位置（例如 PDF 的頁碼）；遇到 Markdown 標題
+            後改用標題路徑。
+
+    Returns:
+        片段列表。
+    """
+    chunks: list[Chunk] = []
+    buffer: list[str] = []
+    heading = location
+    # 目前所在的各層標題，位置寫成「第一層 › 第二層」。
+    path: dict[int, str] = {}
+    # 只有標題、沒有內文的緩衝不輸出（例如標題後面緊接著子標題）。
+    has_body = False
+
+    def flush() -> None:
+        nonlocal has_body
+        content = "\n\n".join(buffer).strip()
+        if content and has_body:
+            chunks.append(Chunk(source, heading, content, labels))
+        buffer.clear()
+        has_body = False
+
+    for block in re.split(r"\n\s*\n", text):
+        block = block.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        match = _HEADING.match(lines[0])
+        if match:
+            flush()
+            level = len(match.group(1))
+            path = {k: v for k, v in path.items() if k < level}
+            path[level] = match.group(2)
+            heading = " › ".join(path[k] for k in sorted(path))
+        for piece in _hard_split(block, chunk_size):
+            if buffer and len("\n\n".join([*buffer, piece])) > chunk_size:
+                flush()
+            buffer.append(piece)
+            if not (match and len(lines) == 1):
+                has_body = True
+    flush()
+    return chunks
+
+
+def format_hits(hits: list[Hit]) -> str:
+    """把搜尋結果轉成給模型看的文字。
+
+    Args:
+        hits: 搜尋結果。
+
+    Returns:
+        每筆結果附上編號與出處的文字。
+    """
+    if not hits:
+        return "知識庫裡沒有找到相關的內容。"
+    parts = [
+        f"[{number}] 來源：{hit.chunk.citation}\n{hit.chunk.text}"
+        for number, hit in enumerate(hits, start=1)
+    ]
+    return "\n\n---\n\n".join(parts)
+
+
+def _hard_split(block: str, size: int) -> list[str]:
+    """把超過長度的段落依長度切開，前後保留一小段重疊。"""
+    if len(block) <= size:
+        return [block]
+    overlap = size // 8
+    step = size - overlap
+    return [block[start : start + size] for start in range(0, len(block), step)]
+
+
+def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """拆出 Markdown 開頭的 YAML 設定。"""
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    try:
+        meta = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return {}, text
+    if not isinstance(meta, dict):
+        return {}, text
+    return meta, parts[2]
+
+
+def _labels_for(source: str, rules: dict[str, list[str]]) -> list[str]:
+    """依 labels.yaml 的路徑樣式找出檔案的標籤。"""
+    found: list[str] = []
+    for pattern, labels in rules.items():
+        if fnmatch.fnmatchcase(source, pattern):
+            found += labels
+    return found
+
+
+def _read_pdf(path: pathlib.Path) -> list[str]:
+    """讀取 PDF 每一頁的文字。"""
+    try:
+        import pypdf
+    except ImportError as error:
+        raise ImportError(
+            "讀取 PDF 需要 pypdf，請執行 pip install pypdf"
+        ) from error
+    reader = pypdf.PdfReader(str(path))
+    return [page.extract_text() or "" for page in reader.pages]
+
+
+def _combine_labels(
+    fixed: list[str] | None, dynamic: list[str] | None
+) -> list[str] | None:
+    """合併 agent 設定的標籤與執行時決定的標籤（取交集）。"""
+    if fixed is None:
+        return dynamic
+    if dynamic is None:
+        return fixed
+    return [label for label in fixed if label in dynamic]
+
+
+def _cache_key(model: str, text: str) -> str:
+    """embedding 快取的鍵：模型名稱加內容的雜湊。"""
+    return hashlib.sha256(f"{model}\n{text}".encode()).hexdigest()
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    """兩個向量的餘弦相似度。"""
+    dot = sum(a * b for a, b in zip(left, right, strict=False))
+    norm = math.sqrt(sum(a * a for a in left)) * math.sqrt(
+        sum(b * b for b in right)
+    )
+    return dot / norm if norm else 0.0
