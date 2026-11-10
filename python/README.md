@@ -1,4 +1,4 @@
-# Harness（Python 版）
+# Agent Harness（Python 版）
 
 把既有 Python 專案的功能包成工具，交給聊天 agent 使用的輕量框架。
 
@@ -27,7 +27,7 @@ Python 版的特點：
 需要 Python 3.11 以上。
 
 ```bash
-pip install "git+https://github.com/xian-ai-1057/Agent.git#subdirectory=python"
+pip install "git+https://github.com/xian-ai-1057/AgentHarness.git#subdirectory=python"
 ```
 
 要連接 MCP 伺服器的話，另外安裝 MCP 套件：`pip install "mcp>=2"`。
@@ -35,8 +35,8 @@ pip install "git+https://github.com/xian-ai-1057/Agent.git#subdirectory=python"
 開發這個框架本身：
 
 ```bash
-git clone https://github.com/xian-ai-1057/Agent.git
-cd Agent/python
+git clone https://github.com/xian-ai-1057/AgentHarness.git
+cd AgentHarness/python
 pip install -e ".[dev]"
 pytest
 ```
@@ -497,7 +497,7 @@ agent 會得到 `search_knowledge` 工具，搜尋結果附上來源檔案與所
   可以看到哪些檔案被略過。讀取 PDF 需要 pypdf：
 
   ```bash
-  pip install "agent-harness[pdf] @ git+https://github.com/xian-ai-1057/Agent.git#subdirectory=python"
+  pip install "agent-harness[pdf] @ git+https://github.com/xian-ai-1057/AgentHarness.git#subdirectory=python"
   ```
 
 `harness.yaml`（整個區塊可省略，有 `knowledge/` 資料夾就會啟用）：

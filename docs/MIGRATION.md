@@ -39,7 +39,7 @@ my_project/                 ← 既有專案
 Python 版：
 
 ```bash
-pip install "git+https://github.com/xian-ai-1057/Agent.git#subdirectory=python"
+pip install "git+https://github.com/xian-ai-1057/AgentHarness.git#subdirectory=python"
 cd my_project
 pyharness new .
 ```
