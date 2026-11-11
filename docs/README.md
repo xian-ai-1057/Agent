@@ -28,8 +28,9 @@ npm run preview    # 預覽建置結果
 
 ## 部署到 Vercel
 
-1. 在 Vercel 匯入這個 GitHub repo。
-2. **Root Directory 設成 `docs`**。其他設定由 `docs/vercel.json` 提供（VitePress、`npm run build`、輸出到 `.vitepress/dist`、不帶 `.html` 的網址）。
-3. 按 Deploy。之後推送到 main 會自動更新正式網址，每個 PR 也會有自己的預覽網址。
+Vercel 專案的 **Root Directory 設成 `docs`**，只建置這個資料夾，不會碰到 repo 其他部分。其他設定寫在 `docs/vercel.json`（VitePress、`npm run build`、輸出到 `.vitepress/dist`、不帶 `.html` 的網址）。
 
-Vercel 預設在 Root Directory 以外的檔案變動時也會重新建置；只想在 `docs/` 有變動時才建置，可以在專案設定的 **Ignored Build Step** 填 `git diff --quiet HEAD^ HEAD -- .`。
+- 推送到 main 會自動更新正式網址，每個 PR 也會有自己的預覽網址。
+- 只有 `docs/` 有變動時才會重新建置；其他的 commit 會被略過。
+
+網址改變時，記得一併更新根目錄 `README.md`、`python/README.md`、`Dockerfile` 與 `docker-compose.yml` 裡的文件網址。

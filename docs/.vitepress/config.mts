@@ -34,6 +34,7 @@ export default defineConfig({
   description:
     "完全開源、不綁定模型供應商的 agent harness。用幾個檔案定義 agent，其餘交給框架。",
   cleanUrls: true,
+  srcExclude: ["README.md"],
   lastUpdated: true,
   head: [["link", { rel: "icon", href: "/logo.svg", type: "image/svg+xml" }]],
 
