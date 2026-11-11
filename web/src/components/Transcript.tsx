@@ -4,8 +4,8 @@ import { useState } from "react";
 import {
   type Block,
   type FileChange,
-  firstLine,
   formatArgs,
+  resultPreview,
   type Step,
   summarizeSteps,
   type Turn,
@@ -128,7 +128,9 @@ function StepRow({ step }: { step: Step }) {
         <span className="step-name">{step.name}</span>
         <span className="step-args">{args}</span>
         {step.status === "done" && step.result && (
-          <span className="step-result anim-in">{firstLine(step.result)}</span>
+          <span className="step-result anim-in">
+            {resultPreview(step.result)}
+          </span>
         )}
         {step.status === "error" && (
           <span className="step-flag warn anim-in">工具錯誤</span>

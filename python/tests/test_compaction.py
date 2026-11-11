@@ -198,6 +198,19 @@ class TestSettings:
             compaction.Compaction(**kwargs)
 
 
+class TestSummaryInstruction:
+    def test_says_it_is_not_from_the_user(self):
+        # 摘要指令以 user 的身分送出；沒講明的話，模型會把這次壓縮要求
+        # 寫成使用者的需求。
+        first_line = compaction.SUMMARY_INSTRUCTION.splitlines()[0]
+        assert "harness" in first_line
+        assert "不是使用者說的話" in first_line
+
+    def test_separates_system_prompt_from_the_user(self):
+        # 沒講明的話，模型會把 system prompt 裡 agent 的角色寫成使用者的身分。
+        assert "不是使用者的身分" in compaction.SUMMARY_INSTRUCTION
+
+
 class TestAutoCompaction:
     """run 裡的自動壓縮。"""
 

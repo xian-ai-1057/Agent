@@ -219,10 +219,35 @@ export function formatArgs(step: Step, limit = 120): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-/** 結果的第一行，太長就截斷。 */
-export function firstLine(text: string | undefined, limit = 80): string {
-  const line = (text ?? "").trim().split("\n")[0] ?? "";
+/**
+ * 步驟列上的結果預覽：縮成一行，太長就截斷。
+ *
+ * 工具常回傳排版過的 JSON，第一行只有 `{` 或 `[`，所以 JSON 先壓成
+ * 一行；其他文字取第一個非空白的行。
+ */
+export function resultPreview(text: string | undefined, limit = 80): string {
+  const trimmed = (text ?? "").trim();
+  const line = compactJson(trimmed) ?? firstNonEmptyLine(trimmed);
   return line.length > limit ? `${line.slice(0, limit)}…` : line;
+}
+
+/** 是 JSON 物件或陣列時回傳單行的寫法，否則回傳 undefined。 */
+function compactJson(text: string): string | undefined {
+  if (!text.startsWith("{") && !text.startsWith("[")) return undefined;
+  try {
+    return JSON.stringify(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}
+
+function firstNonEmptyLine(text: string): string {
+  return (
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line !== "") ?? ""
+  );
 }
 
 function short(value: unknown): string {
