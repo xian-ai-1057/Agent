@@ -1,10 +1,35 @@
 # Agent Harness
 
-把既有專案的功能包成工具，交給聊天 agent 使用的輕量框架。
+開源、輕量、不綁定模型供應商的 agent 框架。
 
-你原本的報告產生器、專案小幫手、copilot，都可以變成同一種形狀：
-**一個 agent（一段指示）加上一組工具（你既有的函式）**。框架負責其餘
-的事：呼叫模型、執行工具、把結果送回模型、保存對話、權限確認。
+在 Agent Harness 裡，每個 agent 都是同一種形狀：**一段指示，加上一組
+工具**。指示寫在 Markdown 檔，工具就是普通的函式或現成的 MCP 伺服器。
+其餘的事交給框架：呼叫模型、執行工具並把結果送回模型、保存與接續
+對話、在危險操作前取得使用者同意、在關鍵時間點插入自訂邏輯。
+
+## 特色
+
+- **不綁定模型**：連接任何 OpenAI 相容端點（TypeScript 版）或透過
+  litellm（Python 版），Claude、GPT、Gemini、本地模型都能用，換模型
+  只要改設定。
+- **用檔案定義 agent**：`harness.yaml` 加上 `agents/*.md`，不需要寫
+  程式就能調整 agent 的行為，也方便放進版控與審查。
+- **工具來源不限**：Python 函式、TypeScript 函式、現成的 MCP 伺服器，
+  以及內建的檔案工具。
+- **安全的預設值**：權限模式與 allow / deny / ask 規則，會寄信、改資料、
+  花錢的工具執行前先問使用者；hooks 可以稽核、攔截或改寫工具呼叫。
+- **可接續的對話紀錄**：只附加不改寫的 JSONL 檔，兩個版本互通。
+- **多種使用方式**：命令列聊天、單次執行（適合排程與腳本）、網頁介面，
+  或當成函式庫嵌進自己的服務。
+- **進階能力（Python 版）**：多個 agent 協作、知識庫（RAG）、skills、
+  長期記憶、訊息防護、對話壓縮。
+
+可以用來做的事，例如：
+
+- 為既有的系統或資料加上自然語言介面
+- 客服、內部知識問答、資料分析等對話式助手
+- 在網頁服務裡提供 copilot 功能
+- 由排程觸發、無人值守的自動化任務
 
 ## 兩個版本
 
@@ -29,22 +54,22 @@
 
 怎麼選：
 
-- **專案是 Python、想用最少的步驟接上**，要把 agent 嵌進既有的 Python
+- **工具是 Python、想用最少的步驟接上**，要把 agent 嵌進 Python
   網頁服務，或需要多個 agent 協作、知識庫、skills、長期記憶、訊息防護、
   對話壓縮：
   用 [Python 版](python/README.md)。
-- **專案是 TypeScript / Node.js**：用 TypeScript 版。
+- **工具是 TypeScript、或要嵌進 Node.js 服務**：用 TypeScript 版。
 
 兩個版本都能連接現成的 MCP 伺服器，設定方式相同（`harness.yaml` 的
 `mcpServers`）。
 
-`examples/report_bot` 同時提供兩種工具寫法，所以兩個版本都能直接執行它。
+`examples/report_bot` 同時提供兩種工具寫法，兩個版本都能直接執行它。
 
 以下是 TypeScript 版的說明。
 
 ```
                     ┌────────────────────────┐
-  你 ── 聊天 ──────▶│        harness         │
+使用者 ── 對話 ────▶│        harness         │
                     │ 主迴圈 / 權限 / 對話紀錄 │
                     └───────┬────────┬───────┘
                             │        │
@@ -57,8 +82,8 @@
 
 - **模型**：連接任何 OpenAI 相容的端點。用 LiteLLM Proxy 就能接 Claude、
   Gemini 等所有 litellm 支援的模型，換模型只要改設定。
-- **Python 專案的工具**：在 Python 端用 `@mcp.tool()` 標記函式，harness
-  會自動啟動並連上它。既有的程式碼不用改。
+- **Python 寫的工具**：在 Python 端用 `@mcp.tool()` 標記函式，harness
+  會自動啟動並連上它，原本的程式碼不需要改動。
 
 ## 安裝
 
@@ -155,8 +180,8 @@ pip install "mcp>=2"        # Python 端的工具伺服器需要這個套件
 harness chat
 ```
 
-想先看完整的例子，可以跑 `examples/report_bot`：它把一份「既有的」
-Python 銷售報告程式包成三個工具。
+想先看完整的例子，可以跑 `examples/report_bot`：它把一個 Python 銷售
+報告程式包成三個工具，示範怎麼為現有的程式碼加上 agent。
 
 ```bash
 cd examples/report_bot
@@ -169,7 +194,7 @@ harness chat
 
 ## 專案格式
 
-每個專案都長一樣，這也是既有專案要移轉成的形狀：
+每個專案都是同樣的結構：
 
 ```
 my_bot/
@@ -226,7 +251,7 @@ Python 專案用 [MCP](https://modelcontextprotocol.io/)（工具伺服器的通
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from my_project import reports        # 你既有的程式碼
+from my_project import reports        # 要公開給 agent 的程式碼
 
 mcp = MCPServer("report")
 
@@ -337,7 +362,7 @@ export const buildReport = tool({
 
 ## 在 TypeScript 程式裡使用
 
-不需要專案資料夾也能用，適合把 agent 嵌進既有的 Node.js 服務：
+不需要專案資料夾也能用，適合把 agent 嵌進 Node.js 服務：
 
 ```ts
 import { defineAgent, run } from "agent-harness";
@@ -511,9 +536,10 @@ harness web --port 8080     # 換埠號
 `python/src/harness/web/static`。Python 版用 pip 從 git 安裝時沒有
 Node.js 可以打包，所以這份打包結果要一起提交。
 
-## 移轉既有專案
+## 為既有專案加上 agent
 
-見 [docs/MIGRATION.md](docs/MIGRATION.md)。
+已經有一套程式碼，想讓 agent 透過工具使用它的功能：見
+[docs/MIGRATION.md](docs/MIGRATION.md)。
 
 ## 設計來源
 
@@ -525,7 +551,7 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 
 ## 目前的限制與還沒有的功能
 
-- **Python 程式不能直接呼叫 TypeScript 版。** 要把 agent 嵌進既有的
+- **Python 程式不能直接呼叫 TypeScript 版。** 要把 agent 嵌進
   Python 網頁服務，請用 [Python 版](python/README.md)。
 - **`deps` 不會傳到 Python 工具伺服器。** 伺服器是獨立的行程，使用者
   身分這類資訊目前只能靠環境變數傳遞，所以一個伺服器只適合服務一位

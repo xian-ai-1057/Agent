@@ -16,7 +16,7 @@ defaultAgent: main
 `;
 
 const CONFIG_MCP = `
-# 把既有的 Python 功能公開成工具的 MCP 伺服器。
+# 把 Python 函式公開成工具的 MCP 伺服器。
 # harness 啟動時會自動執行它，伺服器名稱（tools）就是 toolset 名稱。
 mcpServers:
   tools:
@@ -54,9 +54,9 @@ tools:
 自己編造工具才能取得的內容。
 `;
 
-const PYTHON_SERVER = `"""把既有專案的功能公開成工具。
+const PYTHON_SERVER = `"""把函式公開成工具。
 
-實際移轉時，在這裡 import 既有專案的模組，再用 @mcp.tool() 包一層。
+在這裡定義新的函式，或 import 現有的模組，再用 @mcp.tool() 包一層。
 需要先安裝 MCP 套件：pip install "mcp>=2"
 """
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-harness"
 version = "0.8.0"
-description = "把既有 Python 專案的功能包成工具，交給聊天 agent 使用的輕量框架"
+description = "Python implementation of Agent Harness: an open-source, lightweight, model-agnostic agent harness."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

@@ -1,4 +1,4 @@
-"""Harness：把既有 Python 專案的功能包成工具，交給聊天 agent 使用。
+"""Agent Harness 的 Python 實作：開源、輕量、不綁定模型供應商的 agent 框架。
 
 最小範例：
     import harness

@@ -1,7 +1,7 @@
 {
   "name": "agent-harness",
   "version": "0.2.0",
-  "description": "把既有專案的功能包成工具，交給聊天 agent 使用的輕量框架",
+  "description": "An open-source, lightweight, model-agnostic agent harness: define agents in Markdown, give them tools, and run them from the CLI, a web UI, or your own code.",
   "type": "module",
   "engines": {
     "node": ">=22.18"
