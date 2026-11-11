@@ -131,6 +131,11 @@ export interface SessionDetail {
    * 索引為鍵。
    */
   feedback?: Record<string, Feedback>;
+  /**
+   * 產生每則回覆的模型（Python 版），以 assistant 訊息在 messages 裡的索引
+   * 為鍵；這個功能加入之前的回覆沒有記錄。
+   */
+  replyModels?: Record<string, string>;
 }
 
 /**
