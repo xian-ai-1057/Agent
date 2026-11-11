@@ -85,9 +85,9 @@ tools:
 """
 
 _EXAMPLE_TOOL = '''\
-"""範例工具：把既有專案的函式包成工具。
+"""範例工具：把函式包成工具。
 
-實際移轉時，在這裡 import 既有專案的模組，再用 @harness.tool 包一層。
+在這裡定義新的函式，或 import 現有的模組，再用 @harness.tool 包一層。
 """
 
 import harness

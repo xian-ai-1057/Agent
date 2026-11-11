@@ -1,5 +1,5 @@
 /**
- * Harness：把既有專案的功能包成工具，交給聊天 agent 使用。
+ * Agent Harness：完全開源、不綁定模型供應商的 agent harness。
  *
  * @example
  * import { defineAgent, run, tool } from "agent-harness";

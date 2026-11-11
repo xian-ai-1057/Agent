@@ -1,22 +1,23 @@
 # Agent Harness（Python 版）
 
-把既有 Python 專案的功能包成工具，交給聊天 agent 使用的輕量框架。
+Agent Harness 的 Python 實作：完全開源、不綁定模型供應商的 agent harness。
+為誰而做見[根目錄的 README](../README.md#為誰而做)。
 
-這是 Harness 的 Python 實作，和根目錄的 TypeScript 版使用**同一種專案
-格式**（同一份 `harness.yaml` 與 `agents/*.md`）。兩個版本的比較與選擇
-方式見[根目錄的 README](../README.md#兩個版本)。
+和根目錄的 TypeScript 版使用**同一種專案格式**（同一份 `harness.yaml` 與
+`agents/*.md`）。兩個版本的比較與選擇方式見
+[根目錄的 README](../README.md#兩個版本)。
 
 Python 版的特點：
 
-- **工具直接 import 既有函式。** 在函式上加 `@harness.tool` 就完成，
-  不需要另外的工具伺服器。
-- **可以嵌進既有的 Python 服務。** FastAPI、Streamlit、Flask 裡直接
+- **工具就是普通的 Python 函式。** 在函式上加 `@harness.tool` 就完成，
+  不需要另外的工具伺服器，也可以直接包裝現有的程式碼。
+- **可以嵌進 Python 服務。** FastAPI、Streamlit、Flask 裡直接
   `import harness`。
 - **模型透過 litellm 連接**，Claude、OpenAI、Gemini、Hermes、Ollama 上
   的本地模型都能用。
 - **多個 agent 可以協作。** 把工作交給 subagent，或把整段對話轉交
   （handoff）給另一個 agent。
-- **企業級 agent 常用的能力**：[知識庫（RAG）](#知識庫rag)、
+- **正式上線的 agent 常用的能力**：[知識庫（RAG）](#知識庫rag)、
   [Skills](#skills)、[長期記憶](#長期記憶)、[訊息防護](#訊息防護)。
 - **長時間的對話不會塞爆上下文**：[對話壓縮](#對話壓縮)。
 - **可以連接現成的 MCP 伺服器**，和 TypeScript 版用同一份設定：
@@ -56,8 +57,8 @@ export HARNESS_MODEL=anthropic/claude-opus-5-5    # litellm 的模型名稱
 pyharness chat              # 開始聊天
 ```
 
-想先看完整的例子，可以跑 `examples/report_bot`：它把一份「既有的」銷售
-報告程式包成三個工具。
+想先看完整的例子，可以跑 `examples/report_bot`：它把一個銷售報告程式
+包成三個工具，示範怎麼為現有的程式碼加上 agent。
 
 ```bash
 cd examples/report_bot
@@ -111,7 +112,7 @@ tools:
 可以使用專案裡所有的工具。
 
 專案根目錄會自動加入 Python 的搜尋路徑，所以 `tools/` 裡的檔案可以
-直接 import 專案既有的套件。
+直接 import 專案裡的其他套件。
 
 ## 寫工具
 
@@ -120,7 +121,7 @@ tools:
 
 ```python
 import harness
-from my_project import reports  # 你既有的程式碼
+from my_project import reports  # 要公開給 agent 的程式碼
 
 
 @harness.tool
