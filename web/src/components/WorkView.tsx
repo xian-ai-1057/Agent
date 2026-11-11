@@ -10,6 +10,7 @@ import { activityLabel, formatAgo, formatDuration, useNow } from "../format.ts";
 import { useStore } from "../store.ts";
 import { CheckIcon, CrossIcon, ShieldIcon } from "./Icons.tsx";
 import { Link } from "./Sidebar.tsx";
+import { showToast } from "./shell/toast.tsx";
 
 type Filter = "all" | "waiting" | "running" | "finished";
 
@@ -115,7 +116,7 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
     setBusy(true);
     await api
       .decide(summary.id, approval.id, decision)
-      .catch((error: Error) => alert(error.message));
+      .catch((error: Error) => showToast(error.message, "error"));
     setBusy(false);
   };
 
@@ -150,7 +151,7 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
       <span className="work-status">
         {status === "running" && <span className="ring" />}
         {status === "waiting" && (
-          <span className="anim-pop" style={{ color: "var(--accent)" }}>
+          <span className="anim-pop accent-text">
             <ShieldIcon size={18} />
           </span>
         )}
@@ -160,7 +161,7 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
           </span>
         )}
         {status === "error" && (
-          <span className="anim-pop" style={{ color: "var(--danger)" }}>
+          <span className="anim-pop danger-text">
             <CrossIcon />
           </span>
         )}
@@ -200,7 +201,11 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
           <button
             type="button"
             className="btn btn-outline"
-            onClick={() => void api.stop(summary.id)}
+            onClick={() =>
+              void api
+                .stop(summary.id)
+                .catch((error: Error) => showToast(error.message, "error"))
+            }
           >
             停止
           </button>

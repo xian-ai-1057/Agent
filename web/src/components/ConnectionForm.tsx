@@ -169,7 +169,7 @@ export function ConnectionForm({
       <div className="connection-actions">
         <button
           type="submit"
-          className="btn btn-dark"
+          className="btn btn-accent"
           disabled={state === "saving"}
         >
           {state === "saving" ? "正在測試連線…" : "測試連線並儲存"}
