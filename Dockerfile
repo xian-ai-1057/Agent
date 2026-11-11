@@ -1,7 +1,7 @@
 # Agent Harness 的網頁服務（Python 版）。
 #
 # 一般不需要直接用這個檔案：在 repo 根目錄執行 `docker compose up -d`
-# 就會建置並啟動，說明見 README 的「快速部署」。
+# 就會建置並啟動，說明見文件網站的「快速部署」（https://agent-harness-docs-ten.vercel.app/guide/deploy）。
 #
 # 公司網路要透過 proxy 才能連外時，把 proxy 寫在 .env（見 .env.example），
 # docker compose 會在建置時與執行時都帶上。proxy 不會寫進映像檔。

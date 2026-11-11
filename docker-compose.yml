@@ -4,7 +4,7 @@
 #   docker compose logs harness   看網址與自動產生的登入密碼
 #
 # 不需要任何設定就能啟動。要調整的話，把 .env.example 複製成 .env 再修改
-# （埠號、登入密碼、proxy、模型金鑰）。說明見 README 的「快速部署」。
+# （埠號、登入密碼、proxy、模型金鑰）。說明見文件網站的「快速部署」（https://agent-harness-docs-ten.vercel.app/guide/deploy）。
 
 name: harness
 

@@ -1,11 +1,11 @@
 # Agent Harness（Python 版）
 
 Agent Harness 的 Python 實作：完全開源、不綁定模型供應商的 agent harness。
-為誰而做見[根目錄的 README](../README.md#為誰而做)。
+為誰而做見[說明文件](https://agent-harness-docs-ten.vercel.app/)。
 
 和根目錄的 TypeScript 版使用**同一種專案格式**（同一份 `harness.yaml` 與
 `agents/*.md`）。兩個版本的比較與選擇方式見
-[根目錄的 README](../README.md#兩個版本)。
+[說明文件的「兩個版本的比較」](https://agent-harness-docs-ten.vercel.app/reference/versions)。
 
 Python 版的特點：
 
@@ -1295,7 +1295,7 @@ pyharness web -p ~/my-assistant
 沒有 `harness.yaml` 時不會自動建立，以免指錯位置。
 
 和 TypeScript 版的 `harness web` 是同一份網頁，功能說明見
-[根目錄 README 的網頁版](../README.md#網頁版)：串流對話、工具步驟、
+[說明文件的「網頁版」](https://agent-harness-docs-ten.vercel.app/guide/web)：串流對話、工具步驟、
 權限確認與寫檔差異、同時跑好幾段對話、出錯重試，以及寫回
 `harness.yaml` 的設定頁。
 
