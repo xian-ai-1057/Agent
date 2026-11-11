@@ -75,16 +75,20 @@ _MAIN_AGENT = """\
 ---
 name: main
 description: 專案的主要助手
-# tools 可以寫 toolset 名稱（tools/ 底下的檔名、mcpServers 的伺服器名稱、
-# 內建的 files、sandbox）或單一工具名稱；整個欄位不寫的話，可以使用
-# tools/ 與 mcpServers 的所有工具（內建的要明確列出）。
+# tools 可以寫 toolset 名稱（tools/ 底下的檔名、mcpServers 的伺服器名稱）
+# 或單一工具名稱；整個欄位不寫的話，可以使用 tools/ 與 mcpServers 的所有
+# 工具。內建的 toolset 要明確列出才會啟用：files（讀取、搜尋、修改檔案）、
+# shell（執行指令）、plan（列出計畫）、web（讀取網頁）、sandbox（在
+# Docker 容器裡執行 Python，需要 harness.yaml 的 sandbox 設定）。
 tools:
   - example
 # 多個 agent 協作時（名稱是 agents/ 底下其他 agent 的 name）：
 # subagents: [researcher]   # 把工作交給它，它做完只回傳結果
 # handoffs: [billing]       # 把整段對話轉交給它，由它直接回覆使用者
 # skills 是 skills/ 底下的資料夾名稱；整個欄位不寫的話可以使用全部 skill。
-# skills: [refund]
+# 也可以列出內建的 skill：skill-creator、code-review、debugging、
+# planning、web-research、git-commit。
+# skills: [refund, code-review]
 # 搜尋知識庫（knowledge/ 資料夾）；用 {labels: [hr]} 限定可搜尋的範圍。
 # knowledge: true
 ---

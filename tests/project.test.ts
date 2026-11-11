@@ -88,6 +88,9 @@ describe("loadProject", () => {
       "read_file",
       "list_dir",
       "write_file",
+      "edit_file",
+      "find_files",
+      "search_files",
       "word_count",
     ]);
   });

@@ -327,7 +327,7 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--border
   <rect class="box" x="580" y="160" width="170" height="90" rx="10"/>
   <text x="665" y="192" text-anchor="middle">工具</text>
   <text class="sub" x="665" y="214" text-anchor="middle">Python / TS 函式</text>
-  <text class="sub" x="665" y="233" text-anchor="middle">MCP 伺服器 · 檔案工具</text>
+  <text class="sub" x="665" y="233" text-anchor="middle">MCP 伺服器 · 內建工具</text>
   <path class="arrow" d="M140 125 H226" marker-end="url(#ah)"/>
   <path class="arrow" d="M230 148 H144" marker-end="url(#ah)"/>
   <path class="arrow" d="M490 100 C530 100 540 70 576 66" marker-end="url(#ah)"/>
@@ -343,7 +343,7 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--border
 <div class="cards">
   <div class="card"><h3>不綁定模型</h3><p>TypeScript 版連接任何 OpenAI 相容端點，Python 版透過 litellm 直連各家供應商。換模型只要改設定。</p></div>
   <div class="card"><h3>用檔案定義 agent</h3><p><code>harness.yaml</code> 加上 <code>agents/*.md</code>，不寫程式就能調整行為，也方便放進版控與審查。</p></div>
-  <div class="card"><h3>工具來源不限</h3><p>Python 函式、TypeScript 函式、現成的 MCP 伺服器，以及內建的檔案工具。</p></div>
+  <div class="card"><h3>工具來源不限</h3><p>Python 函式、TypeScript 函式、現成的 MCP 伺服器，以及參考 Claude Code 與 Codex 設計的內建工具：檔案、搜尋、指令、計畫、網頁。</p></div>
   <div class="card"><h3>安全的預設值</h3><p>權限模式與 allow / deny / ask 規則；會寄信、改資料、花錢的工具，執行前先問使用者。</p></div>
   <div class="card"><h3>Hooks</h3><p>在工具執行前後、每一輪開始與結束時插入邏輯：稽核、攔截、改寫參數或結果。</p></div>
   <div class="card"><h3>可接續的對話</h3><p>只附加、不改寫的 JSONL 對話紀錄，TypeScript 與 Python 兩個版本互通。</p></div>
@@ -496,7 +496,7 @@ tools:
   - files         <span class="c"># 內建的檔案工具</span>
 ---
 你是銷售報告助手。需要數字時一定要呼叫工具取得，不要自己估算。</code></pre>
-<p><code>tools</code> 可以寫 toolset 名稱或單一工具名稱。toolset 有三種：<code>mcpServers</code> 裡的伺服器名稱、<code>tools/</code> 底下 TypeScript 檔的檔名、內建的 <code>files</code>。不寫的話 agent 可以使用專案裡所有的工具。</p>
+<p><code>tools</code> 可以寫 toolset 名稱或單一工具名稱。toolset 有三種：<code>mcpServers</code> 裡的伺服器名稱、<code>tools/</code> 底下 TypeScript 檔的檔名、內建的 <code>files</code>、<code>shell</code>、<code>plan</code>、<code>web</code>。不寫的話 agent 可以使用專案裡所有的工具（不含內建工具）。</p>
 </section>
 
 <section id="tools">
@@ -556,7 +556,18 @@ def build_report(month: str) -> str:
 
 if __name__ == "__main__":
     mcp.run()</code></pre>
-<p class="muted">內建的 <code>files</code> toolset 提供讀取、列出與寫入專案內檔案的工具；<code>write_file</code> 預設需要使用者同意。</p>
+<h3 id="builtin-tools">內建工具</h3>
+<p>設計參考 Claude Code 與 Codex，兩個版本的名稱、參數與輸出都相同。要在 agent 的 <code>tools</code> 明確列出才會啟用。</p>
+<div class="table-wrap"><table>
+<thead><tr><th>toolset</th><th>工具</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td><code>files</code></td><td><code>read_file</code>、<code>list_dir</code>、<code>find_files</code>、<code>search_files</code>、<code>write_file</code>*、<code>edit_file</code>*</td><td>讀取（可分段）、依檔名或內容搜尋、寫入與精準修改專案內的檔案</td></tr>
+<tr><td><code>shell</code></td><td><code>run_command</code>*</td><td>在專案資料夾執行指令，回傳結束代碼與輸出，有逾時</td></tr>
+<tr><td><code>plan</code></td><td><code>update_plan</code></td><td>列出多步驟工作的計畫並更新進度</td></tr>
+<tr><td><code>web</code></td><td><code>web_fetch</code>*</td><td>讀取網址，HTML 轉成純文字</td></tr>
+</tbody>
+</table></div>
+<p class="muted">* 預設需要使用者同意。所有路徑都限制在專案資料夾裡。</p>
 </section>
 
 <section id="permissions">
@@ -745,6 +756,8 @@ tools: [find_order, issue_refund]
 2. 讀 policy.md 判斷是否在可退款期間內。
 3. 符合條件才呼叫 issue_refund。</code></pre>
 <p class="muted">agent 沒寫 <code>skills</code> 欄位時可以使用全部 skill；<code>skills: [refund]</code> 指定、<code>skills: []</code> 表示不用。</p>
+<h3>內建 skills</h3>
+<p>框架附帶 <code>skill-creator</code>、<code>code-review</code>、<code>debugging</code>、<code>planning</code>、<code>web-research</code>、<code>git-commit</code>，在 agent 的 <code>skills</code> 欄位列出名稱就能使用。專案 <code>skills/</code> 裡有同名的 skill 時以專案的為準。</p>
 </section>
 
 <section id="memory">

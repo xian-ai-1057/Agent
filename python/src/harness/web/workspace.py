@@ -143,7 +143,7 @@ class Workspace:
             "toolsets": [
                 {
                     "name": name,
-                    "builtin": name in builtin.TOOLSETS
+                    "builtin": builtin.is_builtin_toolset(name, items)
                     or name == sandbox_lib.TOOLSET,
                     "tools": [_tool_info(item) for item in items],
                 }

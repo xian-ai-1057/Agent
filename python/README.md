@@ -23,6 +23,9 @@ Python 版的特點：
 - **agent 可以自己寫程式解析文件、分析資料**，程式在隔離的 Docker 容器
   裡執行：[在沙盒裡執行程式](#在沙盒裡執行程式)。可以
   [架在伺服器上](#部署到伺服器)給大家用瀏覽器使用。
+- **參考 Claude Code 與 Codex 的[內建工具](#內建工具)與
+  [內建 skills](#內建-skills)**：讀取、搜尋與修改檔案、執行指令、追蹤
+  計畫、讀取網頁，以及 code-review、debugging 等現成的 skill。
 - **可以連接現成的 MCP 伺服器**，和 TypeScript 版用同一份設定：
   [連接 MCP 伺服器](#連接-mcp-伺服器)。
 
@@ -112,8 +115,9 @@ tools:
 ```
 
 `tools` 可以寫 toolset 名稱（`tools/` 底下的檔名、`mcpServers` 的
-伺服器名稱，或內建的 `files`）或單一工具名稱。整個欄位不寫的話，agent
-可以使用專案裡所有的工具。
+伺服器名稱，或[內建的](#內建工具) `files`、`shell`、`plan`、`web`）或
+單一工具名稱。整個欄位不寫的話，agent 可以使用專案裡所有的工具（不含
+內建工具）。
 
 專案根目錄會自動加入 Python 的搜尋路徑，所以 `tools/` 裡的檔案可以
 直接 import 專案裡的其他套件。
@@ -193,6 +197,59 @@ def my_orders(context: harness.RunContext) -> list[dict]:
 `context.deps` 就是呼叫 `harness.run(..., deps=...)` 時傳進來的物件。
 使用者身分應該從這裡取得，不要做成工具的參數，否則模型可以填別人的
 ID。
+
+## 內建工具
+
+不用寫任何程式就能給 agent 的工具，設計參考 Claude Code 與 Codex，和
+TypeScript 版的名稱、參數與輸出都相同。內建工具**要在 agent 的 `tools`
+明確列出**才會啟用；專案裡有同名的 toolset（例如 `tools/web.py` 或名為
+`web` 的 MCP 伺服器）時以專案的為準。
+
+| toolset | 工具 | 用途 | 需要同意 |
+|---|---|---|---|
+| `files` | `read_file` | 讀取文字檔；可用 `offset`、`limit` 只讀其中幾行 | |
+| | `list_dir` | 列出資料夾內容 | |
+| | `find_files` | 用 glob 樣式找檔案，例如 `*.py`、`src/**/*.ts` | |
+| | `search_files` | 用正規表示式搜尋檔案內容，回傳「路徑:行號: 內容」 | |
+| | `write_file` | 寫入整個檔案 | ✓ |
+| | `edit_file` | 把一段原文精準換成新文字，不必重寫整個檔案 | ✓ |
+| `shell` | `run_command` | 在專案資料夾執行指令（測試、建置、git…），回傳結束代碼與輸出 | ✓ |
+| `plan` | `update_plan` | 列出多步驟工作的計畫並更新每一步的狀態 | |
+| `web` | `web_fetch` | 讀取網址，HTML 轉成保留標題、清單與連結的純文字 | ✓ |
+
+```markdown
+---
+name: dev
+description: 幫忙修改程式、跑測試
+tools: [files, shell, plan]
+skills: [code-review, debugging]
+---
+修改前先讀檔；改完一定要跑測試確認。
+```
+
+- 所有路徑都限制在專案資料夾裡；搜尋會略過 `.git`、`node_modules`、
+  `.harness`、`.venv` 等資料夾，也不跟著符號連結走。
+- `edit_file` 要求原文只出現一次（或設定 `replace_all`），並保留檔案
+  原本的換行字元。
+- `run_command` 沒有標準輸入、有逾時（預設 120 秒，最多 600 秒），
+  逾時或使用者中斷時會連同子行程一起終止。
+  它直接在這台電腦上執行；要讓 agent 執行自己寫的程式、又需要隔離時，
+  改用 [`sandbox`](#在沙盒裡執行程式)（在 Docker 容器裡執行）。
+- `update_plan` 不存任何狀態：最新一次呼叫的參數就是目前的計畫。
+- `web_fetch` 會把網址送到外部，所以預設需要同意；信任的話加上
+  `permissions.allow: [web_fetch]`。它會使用 `HTTPS_PROXY` 等代理設定。
+
+在程式裡使用：
+
+```python
+from harness import builtin
+
+agent = harness.Agent(
+    name="dev",
+    instructions="...",
+    tools=[*builtin.TOOLSETS["files"], *builtin.TOOLSETS["shell"]],
+)
+```
 
 ## 連接 MCP 伺服器
 
@@ -695,6 +752,32 @@ refund = harness.Skill(
 )
 agent = harness.Agent(name="cs", instructions="...", skills=[refund])
 ```
+
+### 內建 skills
+
+框架附帶幾個常用的 skill，寫法參考 Claude 與 Codex 的 skills。在 agent
+的 `skills` 欄位列出名稱就能使用（沒寫 `skills` 欄位時只會拿到專案自己
+的 skill，不含內建的）：
+
+| skill | 用途 | 載入後開放的工具 |
+|---|---|---|
+| `skill-creator` | 建立或改寫 skill，附 SKILL.md 範本 | `files` |
+| `code-review` | 審查 git 變更，依嚴重程度回報問題，附檢查清單 | `files`、`shell` |
+| `debugging` | 重現 → 縮小範圍 → 驗證假設 → 修正 → 確認 | `files`、`shell`、`plan` |
+| `planning` | 把多步驟工作拆成計畫並持續更新進度 | `plan` |
+| `web-research` | 查證網路資料，整理成附來源的回答 | `web` |
+| `git-commit` | 檢查變更、撰寫 commit 訊息，經確認後 commit | `shell` |
+
+```yaml
+skills: [code-review, git-commit]
+```
+
+- 專案 `skills/` 裡有同名的 skill 時以專案的為準，所以想調整內建 skill
+  的做法，可以把 `harness/builtin/skills/<名稱>/` 複製到專案的 `skills/`
+  再修改（或請 agent 用 `skill-creator` 幫你改）。
+- 內建 skill 的專屬工具一律來自內建 toolsets，而且照樣受權限設定管制
+  （例如 `run_command` 仍會先問使用者）。
+- 不使用專案資料夾時：`harness.builtin_skills()["code-review"]`。
 
 ## 長期記憶
 

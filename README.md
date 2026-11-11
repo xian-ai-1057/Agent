@@ -39,7 +39,8 @@ litellm 直接連各家供應商。換模型只要改設定，不用改程式。
 調整 agent 的行為，也方便放進版控與審查。
 
 **工具來源不限。** Python 函式、TypeScript 函式、現成的 MCP 伺服器，
-以及內建的檔案工具。
+以及參考 Claude Code 與 Codex 設計的內建工具：讀取、搜尋與修改檔案、
+執行指令、追蹤計畫、讀取網頁。
 
 **安全的預設值。** 權限模式與 allow / deny / ask 規則：會寄信、改資料、
 花錢的工具，執行前先問使用者。Hooks 可以稽核、攔截或改寫工具呼叫。
@@ -261,8 +262,50 @@ tools:
 ```
 
 `tools` 可以寫 toolset 名稱或單一工具名稱。toolset 有三種：
-`mcpServers` 裡的伺服器名稱、`tools/` 底下 TypeScript 檔的檔名、內建的
-`files`。整個欄位不寫的話，agent 可以使用專案裡所有的工具。
+`mcpServers` 裡的伺服器名稱、`tools/` 底下 TypeScript 檔的檔名、
+[內建 toolset](#內建工具)（`files`、`shell`、`plan`、`web`）。整個欄位
+不寫的話，agent 可以使用專案裡所有的工具（不含內建工具）。
+
+## 內建工具
+
+不用寫任何程式就能給 agent 的工具，設計參考 Claude Code 與 Codex。兩個
+版本的名稱、參數與輸出都相同。內建工具**要在 agent 的 `tools` 明確列出**
+才會啟用；專案裡有同名的 toolset 時以專案的為準。
+
+| toolset | 工具 | 用途 | 需要同意 |
+|---|---|---|---|
+| `files` | `read_file` | 讀取文字檔；可用 `offset`、`limit` 只讀其中幾行 | |
+| | `list_dir` | 列出資料夾內容 | |
+| | `find_files` | 用 glob 樣式找檔案，例如 `*.py`、`src/**/*.ts` | |
+| | `search_files` | 用正規表示式搜尋檔案內容，回傳「路徑:行號: 內容」 | |
+| | `write_file` | 寫入整個檔案 | ✓ |
+| | `edit_file` | 把一段原文精準換成新文字，不必重寫整個檔案 | ✓ |
+| `shell` | `run_command` | 在專案資料夾執行指令（測試、建置、git…），回傳結束代碼與輸出 | ✓ |
+| `plan` | `update_plan` | 列出多步驟工作的計畫並更新每一步的狀態 | |
+| `web` | `web_fetch` | 讀取網址，HTML 轉成保留標題、清單與連結的純文字 | ✓ |
+
+```markdown
+---
+name: dev
+description: 幫忙修改程式、跑測試
+tools: [files, shell, plan]
+---
+修改前先讀檔；改完一定要跑測試確認。
+```
+
+幾個設計重點：
+
+- **所有路徑都限制在專案資料夾裡**，`../` 或絕對路徑會被拒絕；搜尋會
+  略過 `.git`、`node_modules`、`.harness` 等資料夾，也不跟著符號連結走。
+- **`edit_file` 要求原文只出現一次**（或設定 `replace_all`），避免改錯
+  地方；找不到或出現多次時，錯誤訊息會告訴模型怎麼修正。
+- **`run_command` 沒有標準輸入、有逾時**（預設 120 秒，最多 600 秒），
+  輸出過長時保留頭尾。指令在專案資料夾裡執行，但指令本身能做的事不受
+  限制，所以預設需要同意。
+- **`update_plan` 不存任何狀態**：每次傳入完整的步驟清單，最新一次呼叫
+  就是目前的計畫，對話紀錄裡看得到、接續對話時也還在（同 Codex 的做法）。
+- **`web_fetch` 會把網址送到外部**，所以預設需要同意。信任的話在
+  `harness.yaml` 加上 `permissions.allow: [web_fetch]`。
 
 ## 用 Python 寫工具
 
@@ -577,6 +620,7 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 | 5 | `permissions.ts`、`hooks.ts` | 工具執行前的權限判斷與自訂邏輯 |
 | 6 | `session.ts` | 對話紀錄怎麼存成 JSONL 檔、怎麼接續 |
 | 7 | `mcp.ts`、`project.ts` | 連接 MCP 伺服器、載入專案資料夾 |
+| 8 | `builtin/` | 內建工具：檔案、搜尋、指令、計畫、網頁 |
 
 Python 版（`python/src/harness/`）的結構相同（`loop.py`、`llm.py`、
 `tools.py`…），另外多了多個 agent 協作（`delegation.py`）、知識庫
@@ -588,7 +632,8 @@ Python 版（`python/src/harness/`）的結構相同（`loop.py`、`llm.py`、
 | 來源 | 採用的設計 |
 |---|---|
 | OpenAI Agents SDK | `Agent` 與執行迴圈分離、用 schema 定義工具參數、`context.deps` 傳遞相依物件、工具層級的 `needsApproval` |
-| Claude Agent SDK / Claude Code | Hooks、權限模式與 allow / deny / ask 規則、只附加不改寫的 JSONL 對話紀錄、用 Markdown 檔定義 agent、用 MCP 接外部工具 |
+| Claude Agent SDK / Claude Code | Hooks、權限模式與 allow / deny / ask 規則、只附加不改寫的 JSONL 對話紀錄、用 Markdown 檔定義 agent、用 MCP 接外部工具、內建工具（Read / Edit / Glob / Grep / Bash / WebFetch）、`SKILL.md` 格式的 skills |
+| OpenAI Codex | `update_plan` 計畫工具、`shell` 指令工具、內建 skills（skill-creator 等） |
 | Hermes Agent | 不綁定模型供應商、toolsets（成組啟用工具）、專案層級的 `AGENTS.md` |
 | DeepSeek Harness | 對話壓縮的做法（Python 版） |
 
@@ -603,7 +648,8 @@ Python 版（`python/src/harness/`）的結構相同（`loop.py`、`llm.py`、
   同一個專案仍然可以執行（只是沒有這些功能）：
   - Subagents 與 handoffs（agent 之間互相呼叫或轉交）
   - 知識庫（RAG）
-  - Skills（需要時才載入的說明文件）
+  - Skills（需要時才載入的說明文件），包含內建的 skill-creator、
+    code-review 等 skills
   - 跨對話的長期記憶
   - 訊息防護（個資遮蔽、提示注入偵測）
   - 對話過長時的自動壓縮（Python 版壓縮過的對話，TypeScript 版可以

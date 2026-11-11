@@ -12,7 +12,11 @@
 
 agent 的 frontmatter 可以用 subagents 與 handoffs 列出其他 agent 的名稱，
 讓它把工作交出去或把對話轉交出去（見 delegation 模組）；用 skills 列出
-可用的 skill；用 knowledge 掛上知識庫。
+可用的 skill（專案的 skills/ 或內建的 skill，見 builtin 模組）；用
+knowledge 掛上知識庫。
+
+內建的 toolsets（files、shell、plan、web）與內建 skills 都要明確列出才會
+給 agent。專案裡有同名的 toolset 或 skill 時，以專案的為準。
 
 skills、knowledge、memory、guardrails、compaction、sandbox 只有 Python 版
 支援，TypeScript 版會忽略這些設定。
@@ -78,8 +82,8 @@ class Project:
         compaction: 對話壓縮的設定，預設開啟；harness.yaml 寫
             compaction: false 時為 None。
         mcp_connections: 依 mcpServers 建立的 MCP 連線。
-        toolsets: 每個 toolset（含內建的 files）包含哪些工具，以 toolset
-            名稱為鍵。
+        toolsets: 每個 toolset（含內建的 files、shell、plan、web）包含哪些
+            工具，以 toolset 名稱為鍵。
     """
 
     name: str
@@ -166,7 +170,7 @@ def _assemble(
     project_tools = {
         item.name: item
         for set_name, items in toolsets.items()
-        if set_name not in builtin.TOOLSETS
+        if not builtin.is_builtin_toolset(set_name, items)
         for item in items
     }
     # 沙盒和內建的 files 一樣不算專案工具：agent 要明確列出才能使用。
@@ -179,9 +183,11 @@ def _assemble(
             )
         toolsets[sandbox_lib.TOOLSET] = sandbox.tools()
 
-    project_skills = _load_skills(root, toolsets, project_tools)
+    project_skills = _load_skills(root / "skills", toolsets, project_tools)
     knowledge = _load_knowledge(root, config.get("knowledge"))
-    resources = _Resources(toolsets, project_tools, project_skills, knowledge)
+    resources = _Resources(
+        toolsets, project_tools, project_skills, knowledge, builtin_skills()
+    )
 
     shared = _read_optional(root / "AGENTS.md")
     loaded = {}
@@ -225,6 +231,7 @@ class _Resources:
     project_tools: dict[str, tools_lib.Tool]
     skills: dict[str, skills_lib.Skill]
     knowledge: knowledge_lib.Knowledge | None
+    builtin_skills: dict[str, skills_lib.Skill]
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -252,7 +259,7 @@ def resolve_tools(
     """把 agent 設定裡的名稱換成實際的工具。
 
     名稱可以是 toolset（tools/ 底下的檔名、MCP 伺服器名稱，或內建的
-    files）或單一工具。
+    files、shell、plan、web）或單一工具。
 
     Args:
         names: agent 設定的 tools 欄位。
@@ -317,11 +324,18 @@ def _connect_servers(
     existing = {
         item.name: set_name
         for set_name, items in toolsets.items()
+        # 和伺服器同名的內建 toolset 會被伺服器取代，不必檢查。
+        if not (
+            set_name in servers and builtin.is_builtin_toolset(set_name, items)
+        )
         for item in items
     }
     found: dict[str, list[tools_lib.Tool]] = {}
     for server_name, server_config in servers.items():
-        if server_name in toolsets:
+        items = toolsets.get(server_name)
+        if items is not None and not builtin.is_builtin_toolset(
+            server_name, items
+        ):
             continue
         connection = mcp_servers.from_config(server_name, server_config, root)
         connections.append(connection)
@@ -377,7 +391,9 @@ def _load_agent(
     """讀取一個 agent 的 Markdown 檔，回傳 agent 與它開頭的設定。"""
     meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
     name = meta.get("name") or path.stem
-    agent_skills = _resolve_skills(name, meta, resources.skills)
+    agent_skills = _resolve_skills(
+        name, meta, resources.skills, resources.builtin_skills
+    )
     if "tools" in meta:
         names = meta["tools"] or []
         agent_tools = resolve_tools(
@@ -413,18 +429,25 @@ def _resolve_skills(
     agent_name: str,
     meta: dict[str, Any],
     available: dict[str, skills_lib.Skill],
+    builtin_available: dict[str, skills_lib.Skill],
 ) -> list[skills_lib.Skill]:
-    """依 agent 設定的 skills 欄位選出 skill；沒寫時可以使用全部。"""
+    """依 agent 設定的 skills 欄位選出 skill。
+
+    沒寫時可以使用專案的全部 skill（不含內建 skill）；列出的名稱先找
+    專案的 skills/，找不到再找內建 skill。
+    """
     if "skills" not in meta:
         return list(available.values())
     selected = []
     for skill_name in meta["skills"] or []:
-        if skill_name not in available:
+        found = available.get(skill_name) or builtin_available.get(skill_name)
+        if found is None:
             raise ValueError(
                 f"agent {agent_name} 引用不存在的 skill：{skill_name}，"
-                f"可用的有：{sorted(available)}"
+                f"專案的有：{sorted(available)}，"
+                f"內建的有：{sorted(builtin_available)}"
             )
-        selected.append(available[skill_name])
+        selected.append(found)
     return selected
 
 
@@ -460,16 +483,29 @@ def _knowledge_tool(
     return knowledge.as_tool(labels=[str(item) for item in labels], top_k=top_k)
 
 
+def builtin_skills() -> dict[str, skills_lib.Skill]:
+    """載入框架內建的 skill。
+
+    內建 skill 的專屬工具只會從內建 toolsets 取得，不受專案裡同名
+    toolset 影響。不使用專案資料夾時，也可以直接把它們交給 Agent：
+
+        skills = harness.builtin_skills()
+        agent = harness.Agent(..., skills=[skills["code-review"]])
+
+    Returns:
+        以 skill 名稱為鍵的內建 skill。
+    """
+    return _load_skills(builtin.SKILLS_DIR, dict(builtin.TOOLSETS), {})
+
+
 def _load_skills(
-    root: pathlib.Path,
+    directory: pathlib.Path,
     toolsets: dict[str, list[tools_lib.Tool]],
     project_tools: dict[str, tools_lib.Tool],
 ) -> dict[str, skills_lib.Skill]:
-    """載入 skills/ 底下每個資料夾的 SKILL.md。"""
+    """載入資料夾底下每個子資料夾的 SKILL.md。"""
     loaded: dict[str, skills_lib.Skill] = {}
-    for skill_file in sorted(
-        (root / "skills").glob(f"*/{skills_lib.SKILL_FILE}")
-    ):
+    for skill_file in sorted(directory.glob(f"*/{skills_lib.SKILL_FILE}")):
         folder = skill_file.parent
         meta, body = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
         name = str(meta.get("name") or folder.name)

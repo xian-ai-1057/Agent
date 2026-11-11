@@ -10,7 +10,7 @@
  * 工具有三個來源，每個來源都是一個 toolset：
  *   - harness.yaml 的 mcpServers：名稱是伺服器名稱
  *   - tools/ 底下的檔案：名稱是檔名
- *   - 內建工具：files
+ *   - 內建工具：files、shell、plan、web（見 builtin/index.ts）
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -18,7 +18,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { type Agent, defineAgent } from "./agent.ts";
-import { fileTools } from "./builtin/files.ts";
+import { BUILTIN_TOOLSETS } from "./builtin/index.ts";
 import {
   connectMcpServer,
   type McpConnection,
@@ -29,7 +29,6 @@ import { isToolLike, type Tool, tool } from "./tool.ts";
 
 export const CONFIG_FILE = "harness.yaml";
 const TOOL_EXTENSIONS = [".ts", ".mts", ".js", ".mjs"];
-const BUILTIN_TOOLSETS: Record<string, Tool[]> = { files: fileTools };
 
 /** 一個載入完成的專案。 */
 export interface Project {
@@ -40,7 +39,7 @@ export interface Project {
   agents: Record<string, Agent>;
   /** 專案自己的工具（不含內建工具），以名稱為鍵。 */
   tools: Record<string, Tool>;
-  /** 每個 toolset（含內建的 files）包含哪些工具，以 toolset 名稱為鍵。 */
+  /** 每個 toolset（含內建的 files、shell 等）包含哪些工具，以 toolset 名稱為鍵。 */
   toolsets: Record<string, Tool[]>;
   permissions: Permissions;
   /** 沒指定時使用的 agent 名稱。 */
@@ -126,8 +125,8 @@ export function parseFrontmatter(text: string): {
 
 /**
  * 把 agent 設定裡的名稱換成實際的工具。
- * 名稱可以是 toolset（MCP 伺服器名稱、tools/ 底下的檔名、內建的 files）
- * 或單一工具。
+ * 名稱可以是 toolset（MCP 伺服器名稱、tools/ 底下的檔名、內建的 files、
+ * shell、plan、web）或單一工具。
  *
  * @throws 名稱既不是 toolset 也不是工具時。
  */
@@ -171,11 +170,17 @@ async function loadToolModules(root: string): Promise<Toolsets> {
 
 /** 把所有 toolset 的工具攤平成以名稱為鍵的表，並檢查名稱沒有重複。 */
 function indexTools(toolsets: Toolsets): Record<string, Tool> {
+  // 專案裡有同名 toolset 時，那個內建 toolset 會被取代，不必檢查。
+  const builtinNames = new Set(
+    Object.entries(BUILTIN_TOOLSETS)
+      .filter(([setName]) => !(setName in toolsets))
+      .flatMap(([, items]) => items.map((item) => item.name)),
+  );
   const tools: Record<string, Tool> = {};
   const origin: Record<string, string> = {};
   for (const [setName, items] of Object.entries(toolsets)) {
     for (const item of items) {
-      if (BUILTIN_TOOLSETS.files?.some((b) => b.name === item.name)) {
+      if (builtinNames.has(item.name)) {
         throw new Error(`${setName} 的工具 ${item.name} 與內建工具同名`);
       }
       if (tools[item.name]) {

@@ -36,6 +36,7 @@ from harness.mcp_servers import connect as connect_mcp_server
 from harness.memory import MemoryStore
 from harness.permissions import Permissions
 from harness.project import Project
+from harness.project import builtin_skills
 from harness.project import load_project
 from harness.sandbox import Sandbox
 from harness.sessions import Session
@@ -71,6 +72,7 @@ __all__ = [
     "Usage",
     "VectorStore",
     "allow",
+    "builtin_skills",
     "compact",
     "connect_mcp_server",
     "deny",
