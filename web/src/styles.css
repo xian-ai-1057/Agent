@@ -1254,8 +1254,10 @@ h3 {
   background: var(--accent-hover);
 }
 
+/* 還不能送出時用灰色，紅色只留給可以按的時候。 */
 .send-btn:disabled {
-  opacity: 0.35;
+  background: var(--line-2);
+  color: var(--faint);
   cursor: default;
 }
 
@@ -2821,6 +2823,13 @@ h3 {
   }
   .topbar {
     display: flex;
+  }
+  /* 頂端列已經顯示標題，頁面自己的標題列就不再重複。 */
+  .main-header .main-title {
+    visibility: hidden;
+  }
+  .main-header {
+    min-height: 44px;
   }
   .scrim {
     display: block;

@@ -8,6 +8,7 @@ import {
   languageOf,
   previewKind,
 } from "../../web/src/components/chat/filetype.ts";
+import { displayMath } from "../../web/src/components/chat/math.ts";
 import {
   latestPlan,
   parsePlan,
@@ -230,5 +231,23 @@ describe("previewKind", () => {
     expect(languageOf("notes.txt")).toBe("");
     expect(extensionOf("dir.v2/archive")).toBe("");
     expect(extensionOf(".env")).toBe("");
+  });
+});
+
+describe("displayMath", () => {
+  it("turns a whole-line $$…$$ into a display block", () => {
+    expect(displayMath("前文\n\n$$r = \\frac{b-a}{a}$$\n\n後文")).toBe(
+      "前文\n\n$$\nr = \\frac{b-a}{a}\n$$\n\n後文",
+    );
+  });
+
+  it("keeps inline $$ and currency untouched", () => {
+    const text = "費用 NT$1,000 到 NT$2,000，公式 $$x$$ 在句子裡";
+    expect(displayMath(text)).toBe(text);
+  });
+
+  it("leaves code fences alone", () => {
+    const text = "```\n$$x$$\n```";
+    expect(displayMath(text)).toBe(text);
   });
 });

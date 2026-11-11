@@ -45,12 +45,7 @@ export function TurnView({
 }) {
   return (
     <>
-      {turn.user && (
-        <div className="ch-user anim-in">
-          <div className="msg-user">{turn.user}</div>
-          <UserCopy text={turn.user} />
-        </div>
-      )}
+      {/* 附件放在訊息上方，和 Claude、ChatGPT 一樣先看到附了什麼。 */}
       {turn.attachments.length > 0 && (
         <ul className="msg-attachments anim-in" aria-label="附加的檔案">
           {turn.attachments.map((path) => (
@@ -59,6 +54,12 @@ export function TurnView({
             </li>
           ))}
         </ul>
+      )}
+      {turn.user && (
+        <div className="ch-user anim-in">
+          <div className="msg-user">{turn.user}</div>
+          <UserCopy text={turn.user} />
+        </div>
       )}
       {turn.blocks.map((block) => (
         <BlockView key={block.key} block={block} />

@@ -17,6 +17,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "./chat/chat.css";
 import { CodeBlock } from "./chat/CodeBlock.tsx";
+import { displayMath } from "./chat/math.ts";
 
 type Plugins = NonNullable<
   Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
@@ -111,6 +112,10 @@ export const Markdown = memo(function Markdown({
   streaming?: boolean;
 }) {
   const rehypePlugins = useRehypePlugins(text, streaming);
+  const source = useMemo(
+    () => (streaming ? text : displayMath(text)),
+    [text, streaming],
+  );
   return (
     <div className="md">
       <ReactMarkdown
@@ -118,7 +123,7 @@ export const Markdown = memo(function Markdown({
         rehypePlugins={rehypePlugins}
         components={components}
       >
-        {text}
+        {source}
       </ReactMarkdown>
       {streaming && (
         <span className="caret" aria-hidden="true">
