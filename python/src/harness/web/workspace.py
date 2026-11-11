@@ -7,10 +7,17 @@
 送給瀏覽器的資料格式和 TypeScript 版完全相同（見根目錄的
 src/web/protocol.ts），兩個版本共用同一份前端。所以這裡的 dict 鍵名
 一律用 camelCase。
+
+Python 版另外支援：對話改名、刪除與搜尋，每段對話自己選模型、工具與
+skills，以及對回覆按讚或倒讚。這些資料存在對話紀錄旁邊的
+<id>.meta.json，對話紀錄（JSONL）的格式不變；評價另外附加到
+.harness/feedback.jsonl，方便管理者之後檢視。
 """
 
 import asyncio
 import dataclasses
+import datetime
+import functools
 import json
 import os
 import pathlib
@@ -32,6 +39,7 @@ from harness import project as project_lib
 from harness import providers
 from harness import sandbox as sandbox_lib
 from harness import sessions as sessions_lib
+from harness import skills as skills_lib
 from harness import tools as tools_lib
 from harness.builtin import files
 from harness.web import config as config_lib
@@ -48,6 +56,14 @@ _MODEL_TEST_TIMEOUT = 20
 _SESSION_ID = re.compile(r"^[\w-]+$")
 # subagent 步驟的結果只是給人瀏覽的，太長的部分不保留。
 _SUBAGENT_RESULT_LIMIT = 4000
+_CUSTOM_TITLE_LIMIT = 100
+_SEARCH_LIMIT = 30
+_RECENT_LIMIT = 20
+_SNIPPET_LENGTH = 60
+RATINGS = ("up", "down")
+_COMMENT_LIMIT = 2000
+FEEDBACK_LOG = project_lib.DATA_DIR / "feedback.jsonl"
+ENDPOINT_PROVIDER = "OpenAI 相容端點"
 
 
 class WebError(Exception):
@@ -95,6 +111,15 @@ class _State:
     subagent_steps: dict[str, list[dict[str, Any]]] = dataclasses.field(
         default_factory=dict
     )
+    # 以下存在 .meta.json，伺服器重新啟動後仍然保留。
+    custom_title: str | None = None
+    options: dict[str, Any] = dataclasses.field(
+        default_factory=lambda: _default_options()
+    )
+    # 以 assistant 訊息的索引（字串）為鍵。
+    feedback: dict[str, dict[str, Any]] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 class Workspace:
@@ -127,6 +152,9 @@ class Workspace:
             name: (agent.model, agent.max_turns)
             for name, agent in project.agents.items()
         }
+        # harness.yaml 的 models：管理者另外開放給使用者選的模型。
+        self._model_choices = config_lib.read_model_choices(project.root)
+        self._builtin_skills = project_lib.builtin_skills()
 
     def subscribe(self, listener: Listener) -> Callable[[], None]:
         """訂閱事件。
@@ -160,6 +188,22 @@ class Workspace:
                 for name, items in project.toolsets.items()
             ],
             "permissions": self._permission_settings(),
+            "features": {
+                "files": True,
+                "sessionAdmin": True,
+                "search": True,
+                "sessionOptions": True,
+                "feedback": True,
+            },
+            "models": self._model_options(),
+            "skills": [
+                {
+                    "name": item.name,
+                    "description": item.description,
+                    "builtin": builtin_skill,
+                }
+                for item, builtin_skill in self._available_skills().values()
+            ],
             "model": {
                 "config": dict(self._settings),
                 "env": {
@@ -186,7 +230,7 @@ class Workspace:
         return sorted(summaries, key=lambda item: -item["updatedAt"])
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        """一段對話的完整內容。
+        """一段對話的完整內容，含選項與使用者對回覆的評價。
 
         Raises:
             WebError: 找不到這段對話。
@@ -199,6 +243,8 @@ class Workspace:
             "approvals": [item.approval for item in state.approvals.values()],
             "mode": state.mode,
             "subagentSteps": state.subagent_steps,
+            "options": dict(state.options),
+            "feedback": state.feedback,
         }
 
     def start_run(
@@ -207,6 +253,7 @@ class Workspace:
         session_id: str | None = None,
         agent: str | None = None,
         attachments: list[str] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """送出一則訊息並在背景開始執行。沒給 session_id 時建立新的對話。
 
@@ -215,10 +262,11 @@ class Workspace:
             session_id: 要接續的對話；None 表示建立新的對話。
             agent: 新對話使用的 agent。
             attachments: 上傳時回傳的檔案路徑，說明會接在訊息後面。
+            options: 新對話的選項（見 set_options），只需要給要改的欄位。
 
         Raises:
             WebError: 訊息與附件都是空的、附件不是上傳的檔案、agent 不
-                存在，或這段對話還在執行。
+                存在、選項不合法，或這段對話還在執行。
         """
         text = text.strip()
         try:
@@ -230,7 +278,17 @@ class Workspace:
         if session_id:
             state = self._require(session_id)
         else:
-            state = self._create(agent or self.project.default_agent)
+            agent = agent or self.project.default_agent
+            if agent not in self.project.agents:
+                raise WebError(400, f"沒有 {agent} 這個 agent")
+            # 先檢查選項，不合法時不會留下空的對話。
+            checked = self._checked_options(
+                options or {}, _default_options(), agent
+            )
+            state = self._create(agent)
+            if checked != state.options:
+                state.options = checked
+                self._save_meta(state)
         self._assert_idle(state)
         if state.title == _UNTITLED:
             first = pathlib.PurePosixPath(attachments[0]).name if notes else ""
@@ -253,6 +311,145 @@ class Workspace:
             raise WebError(400, "這段對話沒有需要重試的內容")
         self._start(state, None)
         return self._summary(state)
+
+    def rename(self, session_id: str, title: str) -> dict[str, Any]:
+        """幫對話改名；名稱會存檔，伺服器重新啟動後仍然保留。
+
+        Args:
+            session_id: 要改名的對話。
+            title: 新的名稱，前後的空白會去掉。
+
+        Returns:
+            改名後的摘要。
+
+        Raises:
+            WebError: 找不到對話，或名稱是空的、超過 100 個字。
+        """
+        state = self._require(session_id)
+        title = title.strip()
+        if not title or len(title) > _CUSTOM_TITLE_LIMIT:
+            raise WebError(400, f"名稱要有 1 到 {_CUSTOM_TITLE_LIMIT} 個字")
+        state.custom_title = title
+        self._save_meta(state)
+        summary = self._summary(state)
+        self._emit({"type": "session", "summary": summary})
+        return summary
+
+    def delete(self, session_id: str) -> None:
+        """刪除對話的紀錄與設定，並通知瀏覽器（session_deleted）。
+
+        Raises:
+            WebError: 找不到對話，或它還在執行、等使用者確認。
+        """
+        state = self._require(session_id)
+        if state.task is not None or state.status in ("running", "waiting"):
+            raise WebError(409, "這段對話還在執行，請先停止再刪除")
+        state.session.path.unlink(missing_ok=True)
+        _meta_path(self.project, session_id).unlink(missing_ok=True)
+        del self._states[session_id]
+        self._emit({"type": "session_deleted", "sessionId": session_id})
+
+    def search(self, query: str) -> list[dict[str, Any]]:
+        """依標題與對話內容搜尋對話，最近有動靜的排前面。
+
+        不分大小寫，比對標題以及使用者與 agent 的訊息（不含工具結果與
+        附件說明）。
+
+        Args:
+            query: 要找的文字；空的時回傳最近的 20 段對話。
+
+        Returns:
+            SearchResult（見 src/web/protocol.ts）的列表，最多 30 筆。
+            命中訊息內容時附上含關鍵字的一小段文字。
+        """
+        self.list_sessions()
+        states = sorted(self._states.values(), key=lambda s: -s.updated_at)
+        query = query.strip()
+        if not query:
+            return [_search_result(s, self._title(s)) for s in states][
+                :_RECENT_LIMIT
+            ]
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        results = []
+        for state in states:
+            title = self._title(state)
+            snippet = _find_snippet(state.session.messages, pattern)
+            if snippet is None and not pattern.search(title):
+                continue
+            results.append(_search_result(state, title, snippet))
+            if len(results) >= _SEARCH_LIMIT:
+                break
+        return results
+
+    def set_options(
+        self, session_id: str, changes: dict[str, Any]
+    ) -> dict[str, Any]:
+        """設定對話自己的模型、工具與 skills，下一輪開始生效。
+
+        Args:
+            session_id: 要設定的對話。
+            changes: 要改的欄位：model（ProjectInfo.models 裡的名稱，null
+                表示跟著 agent）、tools（agent 的工具名稱，null 表示全部）、
+                skills（一定要用的 skill 名稱）。沒給的欄位不變。
+
+        Returns:
+            設定後完整的選項。
+
+        Raises:
+            WebError: 找不到對話，或選項不合法。
+        """
+        state = self._require(session_id)
+        agent = self._active_agent(state).name
+        state.options = self._checked_options(changes, state.options, agent)
+        self._save_meta(state)
+        self._emit({"type": "session", "summary": self._summary(state)})
+        return dict(state.options)
+
+    def set_feedback(self, session_id: str, index: Any, feedback: Any) -> None:
+        """記下使用者對一則回覆的評價；None 表示取消。
+
+        評價存在對話的 .meta.json；每次送出的評價另外附加一行到
+        .harness/feedback.jsonl，給管理者之後檢視。
+
+        Args:
+            session_id: 對話。
+            index: 這則 assistant 訊息在 messages 裡的索引。
+            feedback: {"rating": "up" | "down", "reasons": [...],
+                "comment": "..."}，或 None。
+
+        Raises:
+            WebError: 找不到對話、索引不是 assistant 訊息，或評價不合法。
+        """
+        state = self._require(session_id)
+        messages = state.session.messages
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < len(messages)
+            or messages[index].get("role") != "assistant"
+        ):
+            raise WebError(400, "index 要指向一則 agent 的回覆")
+        key = str(index)
+        if feedback is None:
+            state.feedback.pop(key, None)
+            self._save_meta(state)
+            return
+        cleaned = _checked_feedback(feedback)
+        state.feedback[key] = cleaned
+        self._save_meta(state)
+        record = {
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            "sessionId": session_id,
+            "index": index,
+            "rating": cleaned["rating"],
+            "reasons": cleaned.get("reasons", []),
+            "comment": cleaned.get("comment", ""),
+            "model": self._run_model(state),
+        }
+        log = self.project.root / FEEDBACK_LOG
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def stop(self, session_id: str) -> None:
         """停止執行；等待中的確認一律視為拒絕。"""
@@ -426,7 +623,7 @@ class Workspace:
         project = self.project
         try:
             events = loop.run_stream(
-                project.agents[state.agent],
+                self._run_agent(state),
                 text,
                 session=state.session,
                 permissions=self._permissions_for(state),
@@ -771,15 +968,147 @@ class Workspace:
             "maxTurnsSource": turns_source,
         }
 
+    def _model_options(self) -> list[dict[str, Any]]:
+        """輸入框可以選的模型。
+
+        依序是專案預設的模型、各 agent 的模型與 harness.yaml 的 models，
+        名稱重複的只留第一個。
+        """
+        default = self._settings["model"] or llm.default_model()
+        choices = [{"name": default, "isDefault": True}]
+        choices += [
+            {"name": agent.model or llm.default_model()}
+            for agent in self.project.agents.values()
+        ]
+        choices += self._model_choices
+        options: dict[str, dict[str, Any]] = {}
+        for choice in choices:
+            name = choice["name"]
+            if name in options:
+                continue
+            option = {
+                "name": name,
+                "label": choice.get("label") or _model_label(name),
+                "provider": _provider_label(name),
+            }
+            vision = None if providers.uses_endpoint() else _vision(name)
+            if vision is not None:
+                option["vision"] = vision
+            if choice.get("isDefault"):
+                option["isDefault"] = True
+            options[name] = option
+        return list(options.values())
+
+    def _available_skills(self) -> dict[str, tuple[skills_lib.Skill, bool]]:
+        """專案的 skills 加上內建 skills；同名時以專案的為準。
+
+        Returns:
+            以名稱為鍵，值為 (skill, 是否為內建)。
+        """
+        found = {
+            name: (item, True) for name, item in self._builtin_skills.items()
+        }
+        found.update(
+            {name: (item, False) for name, item in self.project.skills.items()}
+        )
+        return dict(sorted(found.items()))
+
+    def _checked_options(
+        self, changes: Any, current: dict[str, Any], agent_name: str
+    ) -> dict[str, Any]:
+        """檢查要改的選項，回傳合併後完整的選項。"""
+        if not isinstance(changes, dict):
+            raise WebError(400, "options 必須是物件")
+        options = dict(current)
+        if "model" in changes:
+            model = changes["model"]
+            if model is not None and not isinstance(model, str):
+                raise WebError(400, "model 必須是字串或 null")
+            model = (model or "").strip() or None
+            names = [item["name"] for item in self._model_options()]
+            if model is not None and model not in names:
+                raise WebError(400, f"沒有 {model} 這個模型可以選")
+            options["model"] = model
+        if "tools" in changes:
+            tools = changes["tools"]
+            if tools is not None:
+                tools = _string_list(tools, "tools")
+                agent = self.project.agents[agent_name]
+                own = {item.name for item in agent.tools}
+                unknown = [name for name in tools if name not in own]
+                if unknown:
+                    raise WebError(
+                        400,
+                        f"agent {agent_name} 沒有這些工具："
+                        f"{'、'.join(unknown)}",
+                    )
+            options["tools"] = tools
+        if "skills" in changes:
+            chosen = _string_list(changes["skills"] or [], "skills")
+            available = self._available_skills()
+            unknown = [name for name in chosen if name not in available]
+            if unknown:
+                raise WebError(400, f"沒有這些 skill：{'、'.join(unknown)}")
+            options["skills"] = chosen
+        return options
+
+    def _active_agent(self, state: _State):
+        """目前負責這段對話的 agent（可能已經轉交給別的 agent）。"""
+        entry = self.project.agents[state.agent]
+        return delegation.active_agent(entry, state.session.messages)
+
+    def _run_agent(self, state: _State):
+        """這一輪要用的 agent：套用這段對話自己選的模型、工具與 skills。
+
+        改的是副本，專案共用的 agent 不受影響。
+        """
+        agent = self._active_agent(state)
+        options = state.options
+        changes: dict[str, Any] = {}
+        model = self._chosen_model(state)
+        if model is not None:
+            changes["model"] = model
+        if options["tools"] is not None:
+            allowed = set(options["tools"])
+            changes["tools"] = [t for t in agent.tools if t.name in allowed]
+        available = self._available_skills()
+        chosen = [available[n][0] for n in options["skills"] if n in available]
+        if chosen:
+            own = {item.name: item for item in agent.skills}
+            changes["skills"] = [
+                *agent.skills,
+                *(item for item in chosen if item.name not in own),
+            ]
+            names = "、".join(item.name for item in chosen)
+            hint = (
+                f"使用者指定這段對話要使用這些技能：{names}。處理工作前，"
+                f"還沒載入的先用 {skills_lib.LOAD_TOOL} 載入，照著它的指示做。"
+            )
+            changes["instructions"] = "\n\n".join(
+                part for part in (agent.instructions, hint) if part
+            )
+        return dataclasses.replace(agent, **changes) if changes else agent
+
+    def _chosen_model(self, state: _State) -> str | None:
+        """這段對話自己選的模型；已經不在可選清單裡時不使用。"""
+        model = state.options["model"]
+        if model is None:
+            return None
+        names = [item["name"] for item in self._model_options()]
+        return model if model in names else None
+
+    def _run_model(self, state: _State) -> str:
+        """這段對話下一輪實際會用的模型。"""
+        agent = self._active_agent(state)
+        return self._chosen_model(state) or agent.model or llm.default_model()
+
     def _create(self, agent: str) -> _State:
         if agent not in self.project.agents:
             raise WebError(400, f"沒有 {agent} 這個 agent")
         session = sessions_lib.create(self.project.sessions_dir)
-        self.project.sessions_dir.mkdir(parents=True, exist_ok=True)
-        _meta_path(self.project, session.id).write_text(
-            json.dumps({"agent": agent}), encoding="utf-8"
-        )
-        return self._track(session, agent, _now())
+        state = self._track(session, agent, _now())
+        self._save_meta(state)
+        return state
 
     def _find(self, session_id: str) -> _State | None:
         if session_id in self._states:
@@ -789,8 +1118,29 @@ class Workspace:
         if not _SESSION_ID.match(session_id) or not path.exists():
             return None
         session = sessions_lib.load(directory, session_id)
-        entry = _read_meta_agent(self.project, session_id)
-        return self._track(session, entry, path.stat().st_mtime * 1000)
+        meta = _read_meta(self.project, session_id)
+        agent = meta.get("agent")
+        state = self._track(
+            session,
+            agent if isinstance(agent, str) else None,
+            path.stat().st_mtime * 1000,
+        )
+        _restore_meta(state, meta)
+        return state
+
+    def _save_meta(self, state: _State) -> None:
+        """把起始 agent、改過的名稱、選項與評價寫進 .meta.json。"""
+        meta: dict[str, Any] = {"agent": state.agent}
+        if state.custom_title is not None:
+            meta["title"] = state.custom_title
+        if state.options != _default_options():
+            meta["options"] = state.options
+        if state.feedback:
+            meta["feedback"] = state.feedback
+        _write_meta(self.project, state.session.id, meta)
+
+    def _title(self, state: _State) -> str:
+        return state.custom_title or state.title
 
     def _require(self, session_id: str) -> _State:
         state = self._find(session_id)
@@ -838,8 +1188,9 @@ class Workspace:
         pending = next(iter(state.approvals.values()), None)
         summary = {
             "id": state.session.id,
-            "title": state.title,
+            "title": self._title(state),
             "agent": active.name,
+            "model": state.options["model"],
             "status": state.status,
             "updatedAt": state.updated_at,
             "toolErrors": state.tool_errors,
@@ -956,16 +1307,176 @@ def _meta_path(project: project_lib.Project, session_id: str):
     return project.sessions_dir / f"{session_id}.meta.json"
 
 
-def _read_meta_agent(
-    project: project_lib.Project, session_id: str
-) -> str | None:
-    """讀取對話的起始 agent（存在 session 旁邊的 .meta.json）。"""
+def _read_meta(project: project_lib.Project, session_id: str) -> dict[str, Any]:
+    """讀取存在 session 旁邊的 .meta.json；沒有或壞掉時為空 dict。
+
+    內容：agent（起始 agent）、title（使用者改過的名稱）、options、
+    feedback，除了 agent 都可能沒有。
+    """
     try:
         meta = json.loads(_meta_path(project, session_id).read_text("utf-8"))
     except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _write_meta(
+    project: project_lib.Project, session_id: str, meta: dict[str, Any]
+) -> None:
+    """先寫到暫存檔再換掉，寫到一半當掉也不會留下壞掉的檔案。"""
+    path = _meta_path(project, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
+    os.replace(temporary, path)
+
+
+def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
+    """把 .meta.json 裡的名稱、選項與評價放回對話狀態；格式不對的略過。"""
+    title = meta.get("title")
+    if isinstance(title, str) and title.strip():
+        state.custom_title = title
+    options = meta.get("options")
+    if isinstance(options, dict):
+        model = options.get("model")
+        tools = options.get("tools")
+        chosen = options.get("skills")
+        state.options = {
+            "model": model if isinstance(model, str) else None,
+            "tools": tools if _is_string_list(tools) else None,
+            "skills": chosen if _is_string_list(chosen) else [],
+        }
+    feedback = meta.get("feedback")
+    if isinstance(feedback, dict):
+        state.feedback = {
+            key: value
+            for key, value in feedback.items()
+            if isinstance(value, dict) and value.get("rating") in RATINGS
+        }
+
+
+def _default_options() -> dict[str, Any]:
+    return {"model": None, "tools": None, "skills": []}
+
+
+def _is_string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(i, str) for i in value)
+
+
+def _string_list(value: Any, key: str) -> list[str]:
+    """檢查是字串陣列，去掉重複的項目。"""
+    if not _is_string_list(value):
+        raise WebError(400, f"{key} 必須是字串陣列")
+    return list(dict.fromkeys(value))
+
+
+def _checked_feedback(feedback: Any) -> dict[str, Any]:
+    """檢查使用者送來的評價，只留認得的欄位。"""
+    if not isinstance(feedback, dict):
+        raise WebError(400, "feedback 必須是物件或 null")
+    rating = feedback.get("rating")
+    if rating not in RATINGS:
+        raise WebError(400, f"rating 必須是 {'、'.join(RATINGS)}")
+    cleaned: dict[str, Any] = {"rating": rating}
+    reasons = feedback.get("reasons")
+    if reasons is not None:
+        cleaned["reasons"] = _string_list(reasons, "reasons")
+    comment = feedback.get("comment")
+    if comment is not None:
+        if not isinstance(comment, str):
+            raise WebError(400, "comment 必須是字串")
+        if len(comment) > _COMMENT_LIMIT:
+            raise WebError(400, f"意見最多 {_COMMENT_LIMIT} 個字")
+        cleaned["comment"] = comment
+    return cleaned
+
+
+def _search_result(
+    state: _State, title: str, snippet: str | None = None
+) -> dict[str, Any]:
+    result = {
+        "id": state.session.id,
+        "title": title,
+        "updatedAt": state.updated_at,
+    }
+    if snippet is not None:
+        result["snippet"] = snippet
+    return result
+
+
+def _find_snippet(
+    messages: list[datatypes.Message], pattern: re.Pattern
+) -> str | None:
+    """在使用者與 agent 的訊息裡找關鍵字，回傳它附近的一小段文字。"""
+    for message in messages:
+        if message.get("role") not in ("user", "assistant"):
+            continue
+        text = _message_text(message)
+        match = pattern.search(text)
+        if match is None:
+            continue
+        # 讓關鍵字落在片段的中間。
+        room = max(_SNIPPET_LENGTH - len(match.group()), 0)
+        start = max(match.start() - room // 2, 0)
+        end = min(start + _SNIPPET_LENGTH, len(text))
+        start = max(min(start, end - _SNIPPET_LENGTH), 0)
+        snippet = " ".join(text[start:end].split())
+        if start > 0:
+            snippet = f"…{snippet}"
+        if end < len(text):
+            snippet = f"{snippet}…"
+        return snippet
+    return None
+
+
+def _message_text(message: datatypes.Message) -> str:
+    """訊息的文字內容，不含附件說明的那幾行。"""
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "\n".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    if not isinstance(content, str):
+        return ""
+    return "\n".join(
+        line
+        for line in content.split("\n")
+        if not line.startswith(uploads_lib.MARKER)
+    )
+
+
+def _model_label(name: str) -> str:
+    """顯示用的模型名稱：去掉開頭的供應商（anthropic/claude-… → claude-…）。"""
+    return name.split("/", 1)[-1]
+
+
+def _provider_label(name: str) -> str:
+    """模型的供應商名稱，給使用者看的。"""
+    if providers.uses_endpoint():
+        return ENDPOINT_PROVIDER
+    provider = providers.of_model(name)
+    if provider is not None:
+        return provider.label
+    prefix, slash, _ = name.partition("/")
+    return prefix if slash else "其他"
+
+
+@functools.cache
+def _vision(name: str) -> bool | None:
+    """litellm 知道這個模型看不看得懂圖片時回傳答案，不知道時為 None。"""
+    try:
+        # litellm 載入很慢，延後到真的要用時才 import。
+        import litellm
+
+        litellm.suppress_debug_info = True
+        info = litellm.get_model_info(model=name)
+    # 不認識的模型名稱會丟出各種錯誤，一律當成不知道。
+    except Exception:  # noqa: BLE001
         return None
-    agent = meta.get("agent") if isinstance(meta, dict) else None
-    return agent if isinstance(agent, str) else None
+    value = info.get("supports_vision")
+    return value if isinstance(value, bool) else None
 
 
 def _describe(error: BaseException) -> str:

@@ -25,6 +25,7 @@ from harness import sandbox as sandbox_lib
 from harness.web import config as config_lib
 from harness.web import server as server_lib
 from harness.web import uploads as uploads_lib
+from harness.web import workspace as workspace_lib
 from tests import conftest
 
 CONFIG = """# 測試專案
@@ -48,10 +49,10 @@ tools:
 WRITE_CALL = ("write_file", {"path": "reports/a.md", "content": "# 報告\n"})
 
 
-def make_project(root: pathlib.Path) -> pathlib.Path:
-    """建立只用內建檔案工具的專案。"""
+def make_project(root: pathlib.Path, extra: str = "") -> pathlib.Path:
+    """建立只用內建檔案工具的專案；extra 會接在 harness.yaml 後面。"""
     (root / "agents").mkdir(parents=True)
-    (root / "harness.yaml").write_text(CONFIG, encoding="utf-8")
+    (root / "harness.yaml").write_text(CONFIG + extra, encoding="utf-8")
     (root / "agents" / "main.md").write_text(AGENT, encoding="utf-8")
     return root
 
@@ -116,8 +117,8 @@ async def start(tmp_path, fake_model):
     """建立專案並啟動伺服器；回傳啟動用的函式。"""
     started = []
 
-    async def launch(script=None, model=None, static_dir=None):
-        root = make_project(tmp_path / f"p{len(started)}")
+    async def launch(script=None, model=None, static_dir=None, extra=""):
+        root = make_project(tmp_path / f"p{len(started)}", extra)
         loaded = project_lib.load_project(root)
         model = model or fake_model(script or [])
         app = server_lib.create_app(
@@ -1290,3 +1291,481 @@ async def _wait_idle(client, session_id):
             if detail["summary"]["status"] != "running":
                 return detail
             await asyncio.sleep(0.02)
+
+
+class TestProjectChoices:
+    """ProjectInfo 的 features、models 與 skills（Python 版才有）。"""
+
+    async def test_all_features_are_advertised(self, start):
+        h = await start()
+
+        _, info = await h.api("GET", "/project")
+
+        assert info["features"] == {
+            "files": True,
+            "sessionAdmin": True,
+            "search": True,
+            "sessionOptions": True,
+            "feedback": True,
+        }
+
+    async def test_models_start_with_default_and_include_config(
+        self, start, monkeypatch
+    ):
+        monkeypatch.delenv(providers.BASE_URL_VAR, raising=False)
+        h = await start(
+            extra=(
+                "model: anthropic/claude-opus-5-5\n"
+                "models:\n"
+                "  - openai/gpt-5\n"
+                "  - name: anthropic/claude-opus-5-5\n"
+                "  - name: my-local\n"
+                "    label: 公司模型\n"
+            )
+        )
+
+        _, info = await h.api("GET", "/project")
+
+        names = [item["name"] for item in info["models"]]
+        assert names == [
+            "anthropic/claude-opus-5-5",
+            "openai/gpt-5",
+            "my-local",
+        ]
+        first, gpt, local = info["models"]
+        assert first["isDefault"] is True
+        assert first["label"] == "claude-opus-5-5"
+        assert first["provider"] == "Anthropic（Claude）"
+        assert "isDefault" not in gpt
+        assert local["label"] == "公司模型"
+        assert local["provider"] == "其他"
+        assert "vision" not in local
+
+    async def test_endpoint_models_show_endpoint_provider(
+        self, start, monkeypatch
+    ):
+        monkeypatch.setenv(providers.BASE_URL_VAR, "http://127.0.0.1:9/v1")
+        h = await start(extra="model: my-model\n")
+
+        _, info = await h.api("GET", "/project")
+
+        assert info["models"][0]["provider"] == "OpenAI 相容端點"
+
+    async def test_skills_include_builtin(self, start):
+        h = await start()
+
+        _, info = await h.api("GET", "/project")
+
+        planning = next(s for s in info["skills"] if s["name"] == "planning")
+        assert planning["builtin"] is True
+        assert planning["description"]
+
+
+class TestSessionOptions:
+    """每段對話自己選的模型、工具與 skills。"""
+
+    async def test_options_on_create_apply_to_the_run(self, start):
+        h = await start(
+            [conftest.text_response("好")],
+            extra="model: base-model\nmodels: [other-model]\n",
+        )
+
+        status, created = await h.api(
+            "POST",
+            "/sessions",
+            {
+                "text": "嗨",
+                "options": {
+                    "model": "other-model",
+                    "tools": ["read_file"],
+                    "skills": ["planning"],
+                },
+            },
+        )
+        await h.wait_for("run_end")
+
+        assert status == 201
+        assert created["model"] == "other-model"
+        request = h.model.requests[0]
+        assert request["model"] == "other-model"
+        tools = [item["function"]["name"] for item in request["tools"]]
+        assert "read_file" in tools
+        assert "write_file" not in tools
+        assert "load_skill" in tools
+        system = request["messages"][0]["content"]
+        assert "planning" in system
+        assert "load_skill" in system
+        _, detail = await h.api("GET", f"/sessions/{created['id']}")
+        assert detail["options"] == {
+            "model": "other-model",
+            "tools": ["read_file"],
+            "skills": ["planning"],
+        }
+
+    async def test_shared_agent_is_not_changed(self, start):
+        h = await start(
+            [conftest.text_response("一"), conftest.text_response("二")],
+            extra="models: [other-model]\n",
+        )
+        _, first = await h.api(
+            "POST",
+            "/sessions",
+            {"text": "嗨", "options": {"model": "other-model", "tools": []}},
+        )
+        await h.wait_for("run_end")
+
+        await h.api("POST", "/sessions", {"text": "再一次"})
+        await h.wait_for("run_end", lambda _: len(h.model.requests) == 2)
+
+        assert h.model.requests[0]["tools"] == []
+        assert h.model.requests[1]["model"] != "other-model"
+        assert h.model.requests[1]["tools"]
+
+    async def test_put_options_changes_only_given_fields(self, start):
+        h = await start([conftest.text_response("好")], extra="models: [m2]\n")
+        _, created = await h.api("POST", "/sessions", {"text": "嗨"})
+        await h.wait_for("run_end")
+        path = f"/sessions/{created['id']}/options"
+
+        await h.api("PUT", path, {"model": "m2"})
+        status, options = await h.api("PUT", path, {"tools": ["read_file"]})
+
+        assert status == 200
+        assert options == {"model": "m2", "tools": ["read_file"], "skills": []}
+        _, listed = await h.api("GET", "/sessions")
+        assert listed[0]["model"] == "m2"
+
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            ({"model": "no-such-model"}, "模型"),
+            ({"tools": ["rm_rf"]}, "rm_rf"),
+            ({"tools": "read_file"}, "tools"),
+            ({"skills": ["no-such-skill"]}, "no-such-skill"),
+        ],
+    )
+    async def test_invalid_options_are_rejected(self, start, body, message):
+        h = await start([conftest.text_response("好")])
+        _, created = await h.api("POST", "/sessions", {"text": "嗨"})
+        await h.wait_for("run_end")
+
+        status, error = await h.api(
+            "PUT", f"/sessions/{created['id']}/options", body
+        )
+
+        assert status == 400
+        assert message in error["error"]
+
+    async def test_invalid_options_on_create_leave_no_session(self, start):
+        h = await start()
+
+        status, _ = await h.api(
+            "POST", "/sessions", {"text": "嗨", "options": {"model": "nope"}}
+        )
+
+        assert status == 400
+        _, listed = await h.api("GET", "/sessions")
+        assert listed == []
+
+    async def test_options_survive_restart(self, start):
+        h = await start([conftest.text_response("好")], extra="models: [m2]\n")
+        _, created = await h.api(
+            "POST", "/sessions", {"text": "嗨", "options": {"model": "m2"}}
+        )
+        await h.wait_for("run_end")
+
+        with project_lib.load_project(h.root) as loaded:
+            fresh = workspace_lib.Workspace(loaded)
+            detail = fresh.get_session(created["id"])
+
+        assert detail["options"]["model"] == "m2"
+        assert detail["summary"]["model"] == "m2"
+
+
+class TestSessionAdmin:
+    """對話改名、刪除與搜尋。"""
+
+    async def test_rename_persists_across_restart(self, start):
+        h = await start([conftest.text_response("好")])
+        _, created = await h.api("POST", "/sessions", {"text": "原本的問題"})
+        await h.wait_for("run_end")
+
+        status, summary = await h.api(
+            "PATCH", f"/sessions/{created['id']}", {"title": "  十月報表  "}
+        )
+
+        assert status == 200
+        assert summary["title"] == "十月報表"
+        with project_lib.load_project(h.root) as loaded:
+            fresh = workspace_lib.Workspace(loaded)
+            assert fresh.list_sessions()[0]["title"] == "十月報表"
+        jsonl = (loaded.sessions_dir / f"{created['id']}.jsonl").read_text()
+        assert [json.loads(line)["role"] for line in jsonl.splitlines()] == [
+            "user",
+            "assistant",
+        ]
+
+    @pytest.mark.parametrize("title", ["   ", "長" * 101])
+    async def test_rename_rejects_bad_titles(self, start, title):
+        h = await start([conftest.text_response("好")])
+        _, created = await h.api("POST", "/sessions", {"text": "嗨"})
+        await h.wait_for("run_end")
+
+        status, _ = await h.api(
+            "PATCH", f"/sessions/{created['id']}", {"title": title}
+        )
+
+        assert status == 400
+
+    async def test_delete_removes_session_and_tells_listeners(self, start):
+        h = await start([conftest.text_response("好")])
+        _, created = await h.api("POST", "/sessions", {"text": "嗨"})
+        await h.wait_for("run_end")
+        await h.api("PATCH", f"/sessions/{created['id']}", {"title": "x"})
+
+        # 前端送 DELETE 時沒有內容，也沒有 Content-Type。
+        response = await h.client.delete(f"/api/sessions/{created['id']}")
+
+        assert response.status == 200
+        assert await response.json() == {"ok": True}
+        await h.wait_for(
+            "session_deleted", lambda e: e["sessionId"] == created["id"]
+        )
+        sessions_dir = h.root / ".harness" / "sessions"
+        assert list(sessions_dir.iterdir()) == []
+        status, _ = await h.api("GET", f"/sessions/{created['id']}")
+        assert status == 404
+
+    async def test_delete_while_waiting_is_refused(self, start):
+        h = await start([conftest.tool_response(WRITE_CALL)])
+        _, created = await h.api("POST", "/sessions", {"text": "寫報告"})
+        await h.wait_for("approval")
+
+        response = await h.client.delete(f"/api/sessions/{created['id']}")
+
+        assert response.status == 409
+        await h.api("POST", f"/sessions/{created['id']}/stop", {})
+        await h.wait_for("run_stopped")
+
+    async def test_search_finds_message_text(self, start):
+        h = await start(
+            [
+                conftest.text_response("十月的營收是 192,000 元，比九月多"),
+                conftest.text_response("好"),
+            ]
+        )
+        _, first = await h.api("POST", "/sessions", {"text": "查營收"})
+        await h.wait_for("run_end")
+        _, second = await h.api("POST", "/sessions", {"text": "Hello World"})
+        await h.wait_for("run_end", lambda _: len(h.model.requests) == 2)
+
+        _, by_text = await h.api("GET", "/sessions/search?q=192,000")
+        _, by_title = await h.api("GET", "/sessions/search?q=hello")
+        _, recent = await h.api("GET", "/sessions/search?q=")
+
+        assert [item["id"] for item in by_text] == [first["id"]]
+        assert "192,000" in by_text[0]["snippet"]
+        assert by_title[0]["id"] == second["id"]
+        assert by_title[0]["snippet"] == "Hello World"
+        assert [item["id"] for item in recent] == [second["id"], first["id"]]
+        assert all("snippet" not in item for item in recent)
+
+    async def test_search_skips_attachment_lines(self, start):
+        h = await start([conftest.text_response("收到")])
+        uploads = h.root / "workspace" / "uploads"
+        uploads.mkdir(parents=True)
+        (uploads / "secret-plan.txt").write_text("x", encoding="utf-8")
+        await h.api(
+            "POST",
+            "/sessions",
+            {
+                "text": "看看",
+                "attachments": ["workspace/uploads/secret-plan.txt"],
+            },
+        )
+        await h.wait_for("run_end")
+
+        _, found = await h.api("GET", "/sessions/search?q=secret-plan")
+
+        assert found == []
+
+
+class TestFiles:
+    """預覽與下載工作資料夾裡的檔案。"""
+
+    async def test_lists_folder_dirs_first_without_hidden(self, start):
+        h = await start()
+        (h.root / "reports").mkdir()
+        (h.root / "reports" / "a.md").write_text("# A", encoding="utf-8")
+        (h.root / "b.txt").write_text("b", encoding="utf-8")
+        (h.root / ".env").write_text("KEY=1", encoding="utf-8")
+        (h.root / ".harness").mkdir(exist_ok=True)
+
+        status, entries = await h.api("GET", "/files/list?dir=")
+        _, inner = await h.api("GET", "/files/list?dir=reports")
+
+        assert status == 200
+        names = [item["name"] for item in entries]
+        assert names == ["agents", "reports", "b.txt", "harness.yaml"]
+        b = next(item for item in entries if item["name"] == "b.txt")
+        assert b["kind"] == "file"
+        assert b["size"] == 1
+        assert b["path"] == "b.txt"
+        assert "size" not in entries[0]
+        assert inner[0]["path"] == "reports/a.md"
+
+    async def test_serves_file_inline_or_as_download(self, start):
+        h = await start()
+        (h.root / "報告.md").write_text("# 十月", encoding="utf-8")
+
+        inline = await h.client.get("/api/files", params={"path": "報告.md"})
+        download = await h.client.get(
+            "/api/files", params={"path": "報告.md", "download": "1"}
+        )
+
+        assert inline.status == 200
+        assert await inline.text() == "# 十月"
+        assert inline.headers["Content-Type"].endswith("charset=utf-8")
+        assert inline.headers["Content-Disposition"].startswith("inline")
+        assert inline.headers["X-Content-Type-Options"] == "nosniff"
+        assert download.headers["Content-Disposition"].startswith("attachment")
+        assert "%E5%A0%B1" in download.headers["Content-Disposition"]
+
+    @pytest.mark.parametrize("name", ["page.html", "logo.svg", "app.js"])
+    async def test_runnable_files_are_served_as_text(self, start, name):
+        h = await start()
+        (h.root / name).write_text("<script>alert(1)</script>", "utf-8")
+
+        response = await h.client.get("/api/files", params={"path": name})
+
+        assert response.status == 200
+        assert response.headers["Content-Type"] == "text/plain; charset=utf-8"
+        assert response.headers["Content-Security-Policy"] == "sandbox"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "../outside.txt",
+            "reports/../../outside.txt",
+            "OUTSIDE",
+            ".harness/secrets/env.json",
+            ".harness/sessions/x.jsonl",
+            ".env",
+            "link-out.txt",
+        ],
+    )
+    async def test_refuses_paths_outside_or_hidden(self, start, path):
+        h = await start()
+        outside = h.root.parent / "outside.txt"
+        outside.write_text("TOP-SECRET", encoding="utf-8")
+        path = path.replace("OUTSIDE", str(outside))
+        secrets = h.root / ".harness" / "secrets"
+        secrets.mkdir(parents=True)
+        (secrets / "env.json").write_text("{}", encoding="utf-8")
+        sessions = h.root / ".harness" / "sessions"
+        sessions.mkdir()
+        (sessions / "x.jsonl").write_text("{}", encoding="utf-8")
+        (h.root / ".env").write_text("KEY=1", encoding="utf-8")
+        (h.root / "link-out.txt").symlink_to(outside)
+
+        response = await h.client.get("/api/files", params={"path": path})
+
+        assert response.status == 403
+        assert "TOP-SECRET" not in await response.text()
+
+    async def test_listing_hides_links_outside_and_refuses_hidden(self, start):
+        h = await start()
+        outside = h.root.parent / "elsewhere"
+        outside.mkdir()
+        (h.root / "out").symlink_to(outside)
+        (h.root / "inside").symlink_to(h.root / "agents")
+
+        _, entries = await h.api("GET", "/files/list")
+        status, _ = await h.api("GET", "/files/list?dir=.harness")
+        escaped, _ = await h.api("GET", "/files/list?dir=..")
+
+        names = [item["name"] for item in entries]
+        assert "out" not in names
+        assert "inside" in names
+        assert status == 403
+        assert escaped == 403
+
+    async def test_missing_file_is_not_found(self, start):
+        h = await start()
+
+        response = await h.client.get("/api/files", params={"path": "x.md"})
+        folder = await h.client.get("/api/files", params={"path": "agents"})
+
+        assert response.status == 404
+        assert folder.status == 404
+
+    async def test_files_need_login_when_password_is_set(self, tmp_path):
+        loaded = project_lib.load_project(make_project(tmp_path / "auth"))
+        (loaded.root / "a.txt").write_text("a", encoding="utf-8")
+        app = server_lib.create_app(loaded, password="s3cret")
+        async with TestClient(TestServer(app)) as client:
+            listed = await client.get("/api/files/list")
+            served = await client.get("/api/files", params={"path": "a.txt"})
+        loaded.close()
+
+        assert listed.status == 401
+        assert served.status == 401
+
+
+class TestFeedback:
+    """對回覆按讚或倒讚。"""
+
+    async def test_feedback_round_trip_and_log(self, start):
+        h = await start([conftest.text_response("答案")])
+        _, created = await h.api("POST", "/sessions", {"text": "問題"})
+        await h.wait_for("run_end")
+        path = f"/sessions/{created['id']}/feedback"
+        feedback = {"rating": "down", "reasons": ["不正確"], "comment": "錯了"}
+
+        status, _ = await h.api("PUT", path, {"index": 1, "feedback": feedback})
+        _, detail = await h.api("GET", f"/sessions/{created['id']}")
+
+        assert status == 200
+        assert detail["feedback"] == {"1": feedback}
+        log = (h.root / ".harness" / "feedback.jsonl").read_text("utf-8")
+        record = json.loads(log)
+        assert record["sessionId"] == created["id"]
+        assert record["index"] == 1
+        assert record["rating"] == "down"
+        assert record["reasons"] == ["不正確"]
+        assert record["comment"] == "錯了"
+        assert record["model"]
+        assert record["timestamp"]
+        with project_lib.load_project(h.root) as loaded:
+            fresh = workspace_lib.Workspace(loaded)
+            assert fresh.get_session(created["id"])["feedback"] == {
+                "1": feedback
+            }
+
+        await h.api("PUT", path, {"index": 1, "feedback": None})
+        _, cleared = await h.api("GET", f"/sessions/{created['id']}")
+        assert cleared["feedback"] == {}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"index": 0, "feedback": {"rating": "up"}},
+            {"index": 5, "feedback": {"rating": "up"}},
+            {"index": "1", "feedback": {"rating": "up"}},
+            {"index": 1, "feedback": {"rating": "meh"}},
+            {"index": 1, "feedback": {"rating": "up", "reasons": "x"}},
+            {"index": 1, "feedback": {"rating": "up", "comment": "長" * 2001}},
+            {"index": 1},
+        ],
+    )
+    async def test_invalid_feedback_is_rejected(self, start, body):
+        h = await start([conftest.text_response("答案")])
+        _, created = await h.api("POST", "/sessions", {"text": "問題"})
+        await h.wait_for("run_end")
+
+        status, _ = await h.api(
+            "PUT", f"/sessions/{created['id']}/feedback", body
+        )
+
+        assert status == 400

@@ -5,6 +5,16 @@
     /api/uploads   上傳檔案（Python 版才有，multipart/form-data）
     其他路徑        打包好的前端（static/）
 
+以下 API 只有 Python 版才有（ProjectInfo.features 列出支援哪些）：
+
+    PATCH  /api/sessions/{id}            改名，{"title": ...}
+    DELETE /api/sessions/{id}            刪除對話
+    GET    /api/sessions/search?q=       搜尋對話
+    PUT    /api/sessions/{id}/options    對話自己的模型、工具與 skills
+    PUT    /api/sessions/{id}/feedback   對回覆按讚或倒讚
+    GET    /api/files?path=&download=1   預覽或下載工作資料夾裡的檔案
+    GET    /api/files/list?dir=          列出工作資料夾裡的一個資料夾
+
 伺服器可以執行專案的工具，所以預設只聽 127.0.0.1，並檢查 Host 與
 Origin 標頭，避免其他網站透過瀏覽器呼叫這裡的 API。
 
@@ -17,6 +27,7 @@ import asyncio
 import base64
 import binascii
 import hmac
+import importlib
 import json
 import pathlib
 import urllib.parse
@@ -28,6 +39,7 @@ from aiohttp import web
 
 from harness import llm
 from harness import project as project_lib
+from harness.web import files as files_lib
 from harness.web import uploads as uploads_lib
 from harness.web import workspace as workspace_lib
 
@@ -107,6 +119,7 @@ def create_app(
             _string(body, "text"),
             agent=_optional_string(body, "agent"),
             attachments=_attachments(body),
+            options=body.get("options"),
         )
         return _json(summary, status=201)
 
@@ -114,9 +127,58 @@ def create_app(
     async def upload(request: web.Request) -> web.Response:
         return _json({"files": await _receive_uploads(request)}, status=201)
 
+    # 要在 /api/sessions/{id} 之前註冊，否則 search 會被當成對話 id。
+    @routes.get("/api/sessions/search")
+    async def search_sessions(request: web.Request) -> web.Response:
+        return _json(_ws(request).search(request.query.get("q", "")))
+
     @routes.get(f"/api/sessions/{session_id}")
     async def get_session(request: web.Request) -> web.Response:
         return _json(_ws(request).get_session(_id(request)))
+
+    @routes.patch(f"/api/sessions/{session_id}")
+    async def rename_session(request: web.Request) -> web.Response:
+        body = await _body(request)
+        return _json(_ws(request).rename(_id(request), _string(body, "title")))
+
+    @routes.delete(f"/api/sessions/{session_id}")
+    async def delete_session(request: web.Request) -> web.Response:
+        await _body(request)
+        _ws(request).delete(_id(request))
+        return _json({"ok": True})
+
+    @routes.put(f"/api/sessions/{session_id}/options")
+    async def set_options(request: web.Request) -> web.Response:
+        body = await _body(request)
+        return _json(_ws(request).set_options(_id(request), body))
+
+    @routes.put(f"/api/sessions/{session_id}/feedback")
+    async def set_feedback(request: web.Request) -> web.Response:
+        body = await _body(request)
+        if "feedback" not in body:
+            raise workspace_lib.WebError(400, "缺少 feedback")
+        _ws(request).set_feedback(
+            _id(request), body.get("index"), body["feedback"]
+        )
+        return _json({"ok": True})
+
+    @routes.get("/api/files")
+    async def get_file(request: web.Request) -> web.StreamResponse:
+        root = _ws(request).project.root
+        target = _checked_file(root, request.query.get("path", ""))
+        download = request.query.get("download") == "1"
+        return web.FileResponse(
+            target, headers=files_lib.response_headers(target, download)
+        )
+
+    @routes.get("/api/files/list")
+    async def list_files(request: web.Request) -> web.Response:
+        root = _ws(request).project.root
+        try:
+            entries = files_lib.list_dir(root, request.query.get("dir", ""))
+        except files_lib.FileError as error:
+            raise workspace_lib.WebError(error.status, str(error)) from error
+        return _json(entries)
 
     @routes.post(f"/api/sessions/{session_id}/messages")
     async def send(request: web.Request) -> web.Response:
@@ -247,6 +309,9 @@ async def serve(
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
+    # litellm 載入要好幾秒，先在背景載入；列出模型時要用它判斷模型看不
+    # 看得懂圖片，第一次打開網頁才不會卡住。
+    asyncio.get_running_loop().run_in_executor(None, _warm_up)
     actual = site._server.sockets[0].getsockname()[1]  # noqa: SLF001
     shown = f"[{host}]" if ":" in host else host
     if on_ready is not None:
@@ -255,6 +320,13 @@ async def serve(
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()
+
+
+def _warm_up() -> None:
+    try:
+        importlib.import_module("litellm")
+    except ImportError:
+        pass
 
 
 def _ws(request: web.Request) -> workspace_lib.Workspace:
@@ -298,6 +370,19 @@ def _string(body: dict[str, Any], key: str) -> str:
 def _optional_string(body: dict[str, Any], key: str) -> str | None:
     value = body.get(key)
     return value if isinstance(value, str) else None
+
+
+def _checked_file(root: pathlib.Path, path: str) -> pathlib.Path:
+    """確認是可以送出的檔案（規則見 files 模組）。"""
+    if not path:
+        raise workspace_lib.WebError(400, "缺少 path")
+    try:
+        target = files_lib.resolve(root, path)
+    except files_lib.FileError as error:
+        raise workspace_lib.WebError(error.status, str(error)) from error
+    if not target.is_file():
+        raise workspace_lib.WebError(404, f"找不到檔案：{path}")
+    return target
 
 
 def _attachments(body: dict[str, Any]) -> list[str]:
@@ -361,7 +446,10 @@ def _guard_middleware(host: str, allowed_hosts: list[str], has_password: bool):
             if origin and urllib.parse.urlsplit(origin).netloc != raw_host:
                 raise workspace_lib.WebError(403, "不接受其他網站送來的請求")
             content_type = request.headers.get("Content-Type", "")
-            if not content_type.startswith("application/json"):
+            # DELETE 沒有內容；其他網站要送 DELETE 一定得先經過 CORS 預檢，
+            # 不需要靠 Content-Type 擋。
+            bodiless = request.method == "DELETE" and not request.can_read_body
+            if not bodiless and not content_type.startswith("application/json"):
                 raise workspace_lib.WebError(415, "請求內容必須是 JSON")
         return await handler(request)
 

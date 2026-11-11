@@ -141,11 +141,12 @@ def active_agent(
 
     Returns:
         最後一次成功轉交的對象；沒有轉交過，或該 agent 已經不存在時，
-        回傳起始 agent。
+        回傳起始 agent。同名時以起始 agent 為準，所以傳入調整過設定的
+        副本（例如網頁版每段對話自己選的模型）時，接手的仍是這個副本。
     """
-    targets = {
-        handoff_tool_name(item): item for item in reachable_agents(entry)
-    }
+    targets: dict[str, agents.Agent] = {}
+    for item in reachable_agents(entry):
+        targets.setdefault(handoff_tool_name(item), item)
     for message in reversed(messages):
         if message.get("role") != "tool":
             continue
