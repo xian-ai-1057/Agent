@@ -1157,8 +1157,8 @@ pyharness run -c /compact    壓縮最新的對話（聊天時直接輸入 /comp
 pyharness memory             查看長期記憶（forget <識別碼> / clear）
 pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
                              （-l hr,sales 模擬受限的 agent）
-pyharness web                開啟網頁版（--port、--host、--allowed-host，
-                             見下一節）
+pyharness web                開啟網頁版（--port、--host、--allowed-host、
+                             --max-upload-mb，見下一節）
 pyharness sandbox            檢查沙盒（Docker）能不能正常執行程式
 
 chat 與 run 共用的選項：
@@ -1188,6 +1188,8 @@ pyharness web --port 8080   # 換埠號
 
 Python 版另外會處理：
 
+- **上傳檔案**：按輸入框左下角的迴紋針、把檔案拖進輸入框，或直接貼上，
+  就能把檔案附在訊息上（見下方的[上傳檔案](#上傳檔案)）。
 - **Handoff**：對話轉交後，網頁上顯示的 agent 會換成接手的那個。
 - **Subagent 的進度**：subagent 呼叫的工具即時列在交辦步驟底下，標出
   是哪個 subagent，「工作中」也會顯示它正在做什麼。subagent 的對話不
@@ -1196,6 +1198,31 @@ Python 版另外會處理：
 - **訊息防護**：使用者的訊息被擋下時，顯示被擋下的原因。
 - **金鑰**：沒有設定 `HARNESS_BASE_URL`（直接連供應商）時，設定頁會
   列出已設定的 `*_API_KEY` 環境變數名稱（不會顯示內容）。
+
+### 上傳檔案
+
+上傳的檔案存在[沙盒](#在沙盒裡執行程式)的工作目錄底下的 `uploads/`（沒有
+設定沙盒時是專案的 `workspace/uploads/`），所以 agent 可以直接用
+`run_python` 解析，也可以用 `files` 工具讀取。
+
+- 選好檔案就開始上傳，全部上傳完才能送出；只附檔案、不打字也可以送出。
+- 送出時，伺服器會在訊息後面加上每個附件的路徑，讓模型知道檔案在哪裡：
+
+  ```
+  幫我分析這份報表
+
+  [附件] workspace/uploads/十月_業績.xlsx（run_python 裡的路徑：/workspace/uploads/十月_業績.xlsx）
+  ```
+
+  網頁上這幾行會顯示成訊息底下的檔案標籤。
+- 檔名裡的空白與特殊字元會換成底線，同名的檔案會自動加上 `-2`、`-3`。
+- 單一檔案預設最多 50 MB，用 `pyharness web --max-upload-mb 200` 調整。
+  檔案邊收邊寫入磁碟，不會整個放進記憶體。
+- 上傳的檔案不會自動刪除，所有對話共用同一個 `uploads/` 資料夾。
+- 上傳只接受帶有特定標頭、來自同一個網站的請求，其他網站無法借用使用者
+  的登入狀態上傳檔案。
+
+TypeScript 版的 `harness web` 不支援上傳，網頁上不會出現迴紋針。
 
 設定頁修改 `harness.yaml` 時只改 `model`、`maxTurns` 與 `permissions`
 那幾行，其他內容和註解都保持不動。檔案用了錨點（`&`、`*`）等特殊
@@ -1297,8 +1324,8 @@ sudo systemctl enable --now harness
   同意工具執行、修改權限與模型設定。目前沒有分帳號，適合給同一個團隊
   使用；要依使用者區分資料，請把 agent 嵌進自己的網頁服務（見
   [嵌進既有的網頁服務](#嵌進既有的網頁服務)）。
-- **網頁上還不能上傳檔案。** 要分析的文件需要放進伺服器上的 `workspace`
-  資料夾（例如用共用資料夾或 `scp`）。
+- **上傳的檔案所有登入的人都拿得到**（agent 可以讀 `uploads/` 裡的任何
+  檔案），也不會自動刪除。敏感文件分析完請自行清理。
 
 ## 和 TypeScript 版的差異
 
@@ -1319,6 +1346,6 @@ sudo systemctl enable --now harness
 ## 目前還沒有的功能
 
 - Slack / Telegram 等訊息平台的接口
-- 網頁版的檔案上傳，以及依使用者分開的帳號與對話
+- 網頁版依使用者分開的帳號、對話與上傳檔案
 - 網頁版的「工作中」只列出這次啟動後跑過的對話；更早的對話仍然可以
   在列表裡打開、接著問

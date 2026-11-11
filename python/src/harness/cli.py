@@ -115,6 +115,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="瀏覽器網址上的主機名稱，例如反向代理的網域（可以重複）；"
         f"需要設定 {WEB_PASSWORD_ENV}",
     )
+    web.add_argument(
+        "--max-upload-mb",
+        type=int,
+        default=50,
+        help="上傳的單一檔案大小上限（MB，預設 50）",
+    )
 
     sandbox = commands.add_parser(
         "sandbox", help="檢查沙盒（Docker）能不能正常執行程式"
@@ -194,6 +200,7 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
                 on_ready=ready,
                 password=password,
                 allowed_hosts=args.allowed_host or [],
+                max_upload_bytes=args.max_upload_mb * 1024 * 1024,
             )
         )
     except KeyboardInterrupt:

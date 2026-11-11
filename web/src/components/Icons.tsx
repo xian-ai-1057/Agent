@@ -129,6 +129,12 @@ export const ShieldIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const PaperclipIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m21.4 11.6-8.9 8.9a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2" />
+  </Svg>
+);
+
 export const FileIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />

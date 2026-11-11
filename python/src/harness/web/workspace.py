@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import pathlib
 import re
 import time
 import uuid
@@ -32,6 +33,7 @@ from harness import sessions as sessions_lib
 from harness import tools as tools_lib
 from harness.builtin import files
 from harness.web import config as config_lib
+from harness.web import uploads as uploads_lib
 
 Event = dict[str, Any]
 Listener = Callable[[Event], None]
@@ -98,6 +100,7 @@ class Workspace:
 
     Attributes:
         project: 載入完成的專案。
+        uploads: 上傳檔案的資料夾。
     """
 
     def __init__(
@@ -105,8 +108,12 @@ class Workspace:
         project: project_lib.Project,
         *,
         model_fn: llm.ModelFn | None = None,
+        max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
     ) -> None:
         self.project = project
+        self.uploads = uploads_lib.Uploads.for_project(
+            project, max_upload_bytes
+        )
         self._model_fn = model_fn or llm.complete
         self._states: dict[str, _State] = {}
         self._listeners: set[Listener] = set()
@@ -138,6 +145,7 @@ class Workspace:
             "name": project.name,
             "root": str(project.root),
             "runtime": "python",
+            "uploads": {"maxBytes": self.uploads.max_bytes},
             "defaultAgent": project.default_agent,
             "agents": [self._agent_info(name) for name in project.agents],
             "toolsets": [
@@ -195,14 +203,26 @@ class Workspace:
         text: str,
         session_id: str | None = None,
         agent: str | None = None,
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """送出一則訊息並在背景開始執行。沒給 session_id 時建立新的對話。
 
+        Args:
+            text: 使用者的訊息。
+            session_id: 要接續的對話；None 表示建立新的對話。
+            agent: 新對話使用的 agent。
+            attachments: 上傳時回傳的檔案路徑，說明會接在訊息後面。
+
         Raises:
-            WebError: 訊息是空的、agent 不存在，或這段對話還在執行。
+            WebError: 訊息與附件都是空的、附件不是上傳的檔案、agent 不
+                存在，或這段對話還在執行。
         """
         text = text.strip()
-        if not text:
+        try:
+            notes = self.uploads.describe(attachments or [])
+        except uploads_lib.UploadError as error:
+            raise WebError(error.status, str(error)) from error
+        if not text and not notes:
             raise WebError(400, "訊息不可以是空的")
         if session_id:
             state = self._require(session_id)
@@ -210,8 +230,9 @@ class Workspace:
             state = self._create(agent or self.project.default_agent)
         self._assert_idle(state)
         if state.title == _UNTITLED:
-            state.title = _title(text)
-        self._start(state, text)
+            first = pathlib.PurePosixPath(attachments[0]).name if notes else ""
+            state.title = _title(text or first)
+        self._start(state, "\n\n".join(part for part in (text, notes) if part))
         return self._summary(state)
 
     def retry(self, session_id: str) -> dict[str, Any]:
