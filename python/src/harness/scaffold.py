@@ -50,6 +50,14 @@ permissions:
 #   thresholdRatio: 0.8    # 超過上限的 80% 時開始壓縮
 #   retainRatio: 0.15      # 原文保留最近約 15% 的對話
 
+# 沙盒：讓 agent 寫 Python 程式解析文件、分析資料，在 Docker 容器裡執行。
+# agent 要在 tools 列出 sandbox 才能使用；用 pyharness sandbox 檢查是否正常。
+# sandbox:
+#   image: python:3.12-slim   # 建議換成裝好 pandas 等套件的映像檔
+#   workspace: workspace      # 掛載到容器 /workspace 的資料夾
+#   timeoutSeconds: 60
+#   network: false
+
 # 訊息防護：在訊息交給模型前、回覆送出前檢查
 # guardrails:
 #   maskPii: true          # 遮蔽 Email、手機、身分證字號、信用卡號
@@ -68,9 +76,10 @@ _MAIN_AGENT = """\
 name: main
 description: 專案的主要助手
 # tools 可以寫 toolset 名稱（tools/ 底下的檔名、mcpServers 的伺服器名稱）
-# 或單一工具名稱；整個欄位不寫的話，可以使用專案裡所有的工具。
-# 內建的 toolset 要明確列出才會啟用：files（讀取、搜尋、修改檔案）、
-# shell（執行指令）、plan（列出計畫）、web（讀取網頁）。
+# 或單一工具名稱；整個欄位不寫的話，可以使用 tools/ 與 mcpServers 的所有
+# 工具。內建的 toolset 要明確列出才會啟用：files（讀取、搜尋、修改檔案）、
+# shell（執行指令）、plan（列出計畫）、web（讀取網頁）、sandbox（在
+# Docker 容器裡執行 Python，需要 harness.yaml 的 sandbox 設定）。
 tools:
   - example
 # 多個 agent 協作時（名稱是 agents/ 底下其他 agent 的 name）：
@@ -109,6 +118,7 @@ def word_count(text: str) -> dict[str, int]:
 _GITIGNORE = """\
 .harness/
 __pycache__/
+workspace/
 """
 
 _FILES = {

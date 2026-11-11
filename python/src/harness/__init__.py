@@ -38,6 +38,7 @@ from harness.permissions import Permissions
 from harness.project import Project
 from harness.project import builtin_skills
 from harness.project import load_project
+from harness.sandbox import Sandbox
 from harness.sessions import Session
 from harness.skills import Skill
 from harness.tools import Tool
@@ -60,6 +61,7 @@ __all__ = [
     "Project",
     "RunContext",
     "RunResult",
+    "Sandbox",
     "Session",
     "Skill",
     "SqliteVectorStore",

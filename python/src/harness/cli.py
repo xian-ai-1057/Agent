@@ -6,6 +6,7 @@ pyharness run "<訊息>"        執行一次後結束
 pyharness memory              查看、刪除或清空長期記憶
 pyharness knowledge [查詢]    檢查知識庫的索引，或試著搜尋
 pyharness web                 開啟網頁版
+pyharness sandbox             檢查沙盒（Docker）能不能正常執行程式
 
 指令名稱是 pyharness，避免和 TypeScript 版的 harness 指令衝突；也可以
 用 `python -m harness` 執行。
@@ -14,6 +15,7 @@ pyharness web                 開啟網頁版
 import argparse
 import asyncio
 import dataclasses
+import os
 import sys
 from collections.abc import Callable
 
@@ -24,10 +26,12 @@ from harness import knowledge as knowledge_lib
 from harness import loop
 from harness import permissions as permissions_lib
 from harness import project as project_lib
+from harness import sandbox as sandbox_lib
 from harness import scaffold
 from harness import sessions
 from harness import tools as tools_lib
 
+WEB_PASSWORD_ENV = "HARNESS_WEB_PASSWORD"
 _EXIT_COMMANDS = ("/exit", "/quit")
 _COMPACT_COMMAND = "/compact"
 
@@ -48,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         "memory": _command_memory,
         "knowledge": _command_knowledge,
         "web": _command_web,
+        "sandbox": _command_sandbox,
     }
     try:
         # with 確保專案啟動的 MCP 伺服器在結束時關閉。
@@ -103,6 +108,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default="127.0.0.1",
         help="要聽的位址（預設 127.0.0.1，只有本機能連）",
     )
+    web.add_argument(
+        "--allowed-host",
+        action="append",
+        metavar="主機名稱",
+        help="瀏覽器網址上的主機名稱，例如反向代理的網域（可以重複）；"
+        f"需要設定 {WEB_PASSWORD_ENV}",
+    )
+
+    sandbox = commands.add_parser(
+        "sandbox", help="檢查沙盒（Docker）能不能正常執行程式"
+    )
+    sandbox.add_argument("-p", "--project", default=".", help="專案資料夾")
 
     knowledge = commands.add_parser("knowledge", help="檢查知識庫")
     knowledge.add_argument("-p", "--project", default=".", help="專案資料夾")
@@ -160,13 +177,24 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
     # aiohttp 只有網頁版用得到，延後到這裡才載入。
     from harness import web
 
+    password = os.environ.get(WEB_PASSWORD_ENV) or None
+
     def ready(url: str) -> None:
         print(f"{loaded.name} 的網頁版已啟動：{url}")
+        if password:
+            print(f"需要登入：使用者名稱不限，密碼是 {WEB_PASSWORD_ENV}。")
         print("按 Ctrl-C 結束。")
 
     try:
         asyncio.run(
-            web.serve(loaded, host=args.host, port=args.port, on_ready=ready)
+            web.serve(
+                loaded,
+                host=args.host,
+                port=args.port,
+                on_ready=ready,
+                password=password,
+                allowed_hosts=args.allowed_host or [],
+            )
         )
     except KeyboardInterrupt:
         print()
@@ -175,6 +203,62 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
             f"無法在 {args.host}:{args.port} 啟動：{error}"
         ) from error
     return 0
+
+
+def _command_sandbox(
+    args: argparse.Namespace, loaded: project_lib.Project
+) -> int:
+    """在沙盒裡跑一段檢查程式，確認 Docker、映像檔與限制都正常。"""
+    box = loaded.sandbox
+    if box is None:
+        print(
+            "這個專案沒有設定沙盒。要使用的話，在 harness.yaml 加上 "
+            "sandbox 區塊。"
+        )
+        return 1
+    network = "允許" if box.network else "關閉"
+    print(f"映像檔：{box.image}")
+    print(f"掛載：{box.workspace} → {sandbox_lib.CONTAINER_WORKDIR}")
+    print(
+        f"限制：{box.timeout_seconds:g} 秒、記憶體 {box.memory}、"
+        f"CPU {box.cpus:g}、網路{network}"
+    )
+    if hasattr(os, "getuid") and os.getuid() == 0:
+        print(
+            "  ⚠ 目前以 root 執行，容器裡的程式也會是 root。建議用一般使用者"
+            "執行 pyharness。"
+        )
+    print("\n執行檢查程式…")
+    result = asyncio.run(box.run(_SANDBOX_CHECK))
+    if result.timed_out:
+        print(f"✗ 超過 {box.timeout_seconds:g} 秒沒有結束")
+        return 1
+    if result.exit_code != 0:
+        print(f"✗ 執行失敗（結束代碼 {result.exit_code}）")
+        print(sandbox_lib.format_output(result))
+        return 1
+    print(result.stdout.rstrip())
+    print("\n✓ 沙盒可以正常使用")
+    return 0
+
+
+# 在沙盒裡印出 Python 版本、可用的常見套件，並確認網路與寫入的限制。
+_SANDBOX_CHECK = """
+import importlib.util, os, socket, sys
+print("Python", sys.version.split()[0])
+names = ["pandas", "numpy", "openpyxl", "pdfplumber", "docx", "matplotlib"]
+found = [n for n in names if importlib.util.find_spec(n)]
+missing = [n for n in names if n not in found]
+print("已安裝：", "、".join(found) or "（無）")
+if missing:
+    print("未安裝：", "、".join(missing))
+try:
+    socket.create_connection(("pypi.org", 443), timeout=3).close()
+    print("網路：可以連線")
+except OSError:
+    print("網路：無法連線")
+print("工作目錄可寫入：", "是" if os.access(".", os.W_OK) else "否")
+"""
 
 
 def _command_knowledge(

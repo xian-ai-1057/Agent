@@ -20,6 +20,9 @@ Python 版的特點：
 - **正式上線的 agent 常用的能力**：[知識庫（RAG）](#知識庫rag)、
   [Skills](#skills)、[長期記憶](#長期記憶)、[訊息防護](#訊息防護)。
 - **長時間的對話不會塞爆上下文**：[對話壓縮](#對話壓縮)。
+- **agent 可以自己寫程式解析文件、分析資料**，程式在隔離的 Docker 容器
+  裡執行：[在沙盒裡執行程式](#在沙盒裡執行程式)。可以
+  [架在伺服器上](#部署到伺服器)給大家用瀏覽器使用。
 - **參考 Claude Code 與 Codex 的[內建工具](#內建工具)與
   [內建 skills](#內建-skills)**：讀取、搜尋與修改檔案、執行指令、追蹤
   計畫、讀取網頁，以及 code-review、debugging 等現成的 skill。
@@ -83,6 +86,7 @@ my_bot/
 │   └── refund/
 │       └── SKILL.md
 ├── knowledge/        知識庫文件（可省略）
+├── workspace/        沙盒掛載的資料夾：要分析的檔案與產生的結果（可省略）
 └── .harness/         對話紀錄、記憶、索引快取（自動產生，不用進版控）
 ```
 
@@ -229,6 +233,8 @@ skills: [code-review, debugging]
   原本的換行字元。
 - `run_command` 沒有標準輸入、有逾時（預設 120 秒，最多 600 秒），
   逾時或使用者中斷時會連同子行程一起終止。
+  它直接在這台電腦上執行；要讓 agent 執行自己寫的程式、又需要隔離時，
+  改用 [`sandbox`](#在沙盒裡執行程式)（在 Docker 容器裡執行）。
 - `update_plan` 不存任何狀態：最新一次呼叫的參數就是目前的計畫。
 - `web_fetch` 會把網址送到外部，所以預設需要同意；信任的話加上
   `permissions.allow: [web_fetch]`。它會使用 `HTTPS_PROXY` 等代理設定。
@@ -920,6 +926,98 @@ result = await harness.compact(agent, session, settings=settings)  # 手動壓�
 `session.messages` 與 `RunResult.messages` 是完整紀錄（含壓縮紀錄）；
 模型實際看到的歷史用 `harness.compaction.model_history(messages)` 取得。
 
+## 在沙盒裡執行程式
+
+解析文件、計算與分析資料時，固定的做法可以寫成工具（見[寫工具](#寫工具)），
+但事先無法預期的分析需要 agent 自己寫程式。這些程式由模型產生，所以
+不會直接在主機上執行，而是每次放進一個拋棄式的 Docker 容器。
+
+需要先安裝 [Docker](https://docs.docker.com/engine/install/)（或 Podman）。
+執行 pyharness 的使用者要能使用 docker 指令。
+
+`harness.yaml`：
+
+```yaml
+sandbox:
+  image: harness-sandbox        # 容器映像檔，預設 python:3.12-slim
+  workspace: workspace          # 掛載到容器 /workspace 的資料夾，預設 workspace
+  timeoutSeconds: 60            # 單次執行的時間上限，預設 60
+  memory: 1g                    # 記憶體上限，預設 1g
+  cpus: 1                       # 可用的 CPU 數，預設 1
+  network: false                # 是否允許連網，預設 false
+  command: docker               # 或 podman
+  notes: 已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、matplotlib。
+```
+
+全部用預設值的話寫 `sandbox: true`。和內建的 `files` 一樣，agent 要在
+`tools` 明確列出才能使用：
+
+```markdown
+---
+name: analyst
+description: 解析文件並分析資料
+tools: [sandbox, files]
+---
+你是資料分析師。需要計算或解析檔案時，寫 Python 程式用 run_python 執行，
+不要自己心算。圖表存成 PNG 放在工作目錄。
+```
+
+agent 會得到 `run_python` 工具：傳入一段 Python 程式，回傳它印出的內容；
+程式出錯時，模型會看到錯誤訊息並自己修正。`notes` 會附在工具說明後面，
+讓模型知道有哪些套件可以用。
+
+**隔離方式**
+
+- 每次執行都是全新的容器，執行完就刪除，變數不會保留到下一次（要沿用
+  的結果寫成檔案）。
+- 預設**沒有網路**：文件內容不會被送出去，也無法下載東西或安裝套件。
+- 限制執行時間、記憶體、CPU 與行程數。超過時間會停止容器，使用者在
+  網頁上按停止時也一樣。
+- 容器的系統目錄唯讀，拿掉所有 Linux capabilities，並以執行 pyharness
+  的使用者身分（不是 root）執行，產生的檔案也屬於這個使用者。
+- **只掛載 `workspace` 一個資料夾**，可讀寫。要分析的文件放在這裡，
+  程式產生的圖表、CSV 也存在這裡。`workspace` 不能設成專案根目錄，也
+  不能放在 `tools/`、`agents/`、`skills/`、`.harness/` 裡，否則容器裡的
+  程式可以改寫這些檔案，進而在主機上執行程式。
+- stdout、stderr 各自最多保留 20,000 字，太長時只留開頭與結尾。
+
+**準備分析用的映像檔**
+
+預設的 `python:3.12-slim` 只有標準函式庫，通常要另外做一個裝好套件的
+映像檔。例如 `sandbox.Dockerfile`：
+
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fonts-noto-cjk \
+ && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir \
+      pandas numpy openpyxl pdfplumber python-docx matplotlib
+# 圖表預設用中文字型，否則中文會變成方框
+RUN printf 'font.family: Noto Sans CJK JP\naxes.unicode_minus: False\n' \
+      > /etc/matplotlibrc
+ENV MATPLOTLIBRC=/etc/matplotlibrc
+```
+
+```bash
+docker build -t harness-sandbox -f sandbox.Dockerfile .
+pyharness sandbox     # 檢查 Docker、映像檔與限制是否正常
+```
+
+`pyharness sandbox` 會在沙盒裡跑一段檢查程式，列出 Python 版本、裝了
+哪些常用套件、網路是否關閉、工作目錄能不能寫入。
+
+在程式裡使用：
+
+```python
+box = harness.Sandbox(
+    workspace=pathlib.Path("data/analysis"),
+    image="harness-sandbox",
+    notes="已安裝 pandas。",
+)
+agent = harness.Agent(name="analyst", instructions="...", tools=box.tools())
+```
+
 ## 權限
 
 `harness.yaml`：
@@ -1059,7 +1157,9 @@ pyharness run -c /compact    壓縮最新的對話（聊天時直接輸入 /comp
 pyharness memory             查看長期記憶（forget <識別碼> / clear）
 pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
                              （-l hr,sales 模擬受限的 agent）
-pyharness web                開啟網頁版（--port、--host，見下一節）
+pyharness web                開啟網頁版（--port、--host、--allowed-host，
+                             見下一節）
+pyharness sandbox            檢查沙盒（Docker）能不能正常執行程式
 
 chat 與 run 共用的選項：
   -p, --project <資料夾>     專案位置（預設為目前資料夾）
@@ -1102,23 +1202,123 @@ Python 版另外會處理：
 寫法、無法安全修改時，會請你直接編輯檔案。
 
 伺服器可以執行專案的工具，所以預設只接受本機連線，並拒絕其他網站
-送來的請求。
+送來的請求。要給其他電腦使用，見下一節。
+
+## 部署到伺服器
+
+把 pyharness 架在一台伺服器上，使用者用瀏覽器連線，自己的電腦不需要
+安裝 Python。agent 寫的程式在伺服器的[沙盒](#在沙盒裡執行程式)裡執行。
+
+**1. 安裝**（伺服器需要 Python 3.11 以上與 Docker）
+
+```bash
+sudo useradd --create-home harness      # 專用的帳號，不要用 root 執行
+sudo usermod -aG docker harness         # 讓它能使用 docker（見下方的安全說明）
+sudo -iu harness
+python3 -m venv ~/venv
+~/venv/bin/pip install "git+https://github.com/xian-ai-1057/AgentHarness.git#subdirectory=python"
+```
+
+接著把專案放到伺服器上，依上一節建立沙盒的映像檔，並執行
+`pyharness sandbox` 確認可以使用。
+
+**2. 設定登入密碼並啟動**
+
+```bash
+export HARNESS_WEB_PASSWORD='一組夠長的隨機密碼'
+export HARNESS_BASE_URL=http://litellm:4000      # 模型設定，見「模型設定」
+export HARNESS_API_KEY=sk-...
+export HARNESS_MODEL=claude
+~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com
+```
+
+- **讓其他電腦連線時一定要設定 `HARNESS_WEB_PASSWORD`**，否則伺服器會
+  拒絕啟動。瀏覽器會跳出登入視窗：使用者名稱不限，密碼要正確。
+- `--allowed-host` 是使用者在瀏覽器網址列輸入的主機名稱（可以重複）。
+  沒有指定時，只要密碼正確，用任何網址連線都接受。
+- 密碼會以 HTTP Basic Auth 傳送，**一定要放在 HTTPS 後面**，不要讓瀏覽器
+  直接用 http 連到伺服器。
+
+**3. 用反向代理加上 HTTPS**
+
+pyharness 只聽本機，由 nginx（或 Caddy 等）負責 HTTPS。以 nginx 為例：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ai.example.com;
+    # ssl_certificate ... 依你的憑證設定
+
+    location / {
+        proxy_pass http://127.0.0.1:4321;
+        proxy_set_header Host $http_host;  # 一定要傳瀏覽器送來的 Host
+        proxy_http_version 1.1;
+        proxy_buffering off;               # 即時串流回覆（SSE）需要
+        proxy_read_timeout 1h;
+        client_max_body_size 1m;
+    }
+}
+```
+
+**4. 用 systemd 讓它常駐**
+
+`/etc/systemd/system/harness.service`：
+
+```ini
+[Unit]
+Description=Agent Harness
+After=network-online.target docker.service
+
+[Service]
+User=harness
+WorkingDirectory=/srv/my_bot
+EnvironmentFile=/etc/harness.env
+ExecStart=/home/harness/venv/bin/pyharness web --allowed-host ai.example.com
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/harness.env` 放 `HARNESS_WEB_PASSWORD`、模型設定等環境變數，權限設成
+只有 root 與 harness 能讀（`chmod 640`）。
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now harness
+```
+
+**安全上要知道的事**
+
+- **能使用 docker 指令，等於擁有主機的 root 權限。** 請用專用帳號執行
+  pyharness，不要在這個帳號放其他服務。要更嚴格的話可以改用 rootless
+  Docker 或 Podman（`sandbox.command: podman`）。
+- **所有登入的人共用同一組密碼、看得到同樣的對話**，也都可以在網頁上
+  同意工具執行、修改權限與模型設定。目前沒有分帳號，適合給同一個團隊
+  使用；要依使用者區分資料，請把 agent 嵌進自己的網頁服務（見
+  [嵌進既有的網頁服務](#嵌進既有的網頁服務)）。
+- **網頁上還不能上傳檔案。** 要分析的文件需要放進伺服器上的 `workspace`
+  資料夾（例如用共用資料夾或 `scp`）。
 
 ## 和 TypeScript 版的差異
 
 - **`tools/` 裡有與 `mcpServers` 伺服器同名的 Python 檔時，不啟動那個
   伺服器**，改為直接載入該檔案（見[連接 MCP 伺服器](#連接-mcp-伺服器)）。
 - **不會載入 `tools/*.ts`。**
-- **Subagents、handoffs、知識庫、skills、長期記憶、訊息防護與對話壓縮
-  只有 Python 版支援。** TypeScript 版會忽略 agent 檔案裡的 `subagents`、
-  `handoffs`、`skills`、`knowledge` 欄位，以及 `harness.yaml` 的
-  `knowledge`、`memory`、`guardrails`、`compaction` 區塊，所以同一個
-  專案仍然可以用 TypeScript 版執行（只是沒有這些功能）。Python 版壓縮
+- **Subagents、handoffs、知識庫、skills、長期記憶、訊息防護、對話壓縮與
+  沙盒只有 Python 版支援。** TypeScript 版會忽略 agent 檔案裡的
+  `subagents`、`handoffs`、`skills`、`knowledge` 欄位，以及 `harness.yaml`
+  的 `knowledge`、`memory`、`guardrails`、`compaction`、`sandbox` 區塊，
+  所以同一個專案仍然可以用 TypeScript 版執行（只是沒有這些功能；agent
+  的 `tools` 列了 `sandbox` 的話，TypeScript 版會因為找不到它而無法載入）。
+- **網頁版的登入密碼（`HARNESS_WEB_PASSWORD`）與 `--allowed-host` 只有
+  Python 版支援。**Python 版壓縮
   過的對話，TypeScript 版會讀取壓縮後的歷史接續。
 - 對話紀錄的格式相同，同一個專案的對話可以用任一個版本接續。
 
 ## 目前還沒有的功能
 
 - Slack / Telegram 等訊息平台的接口
+- 網頁版的檔案上傳，以及依使用者分開的帳號與對話
 - 網頁版的「工作中」只列出這次啟動後跑過的對話；更早的對話仍然可以
   在列表裡打開、接著問

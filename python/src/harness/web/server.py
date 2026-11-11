@@ -6,11 +6,20 @@
 
 伺服器可以執行專案的工具，所以預設只聽 127.0.0.1，並檢查 Host 與
 Origin 標頭，避免其他網站透過瀏覽器呼叫這裡的 API。
+
+架在伺服器上給別人用時（聽 127.0.0.1 以外的位址，或用 allowed_hosts 接受
+反向代理轉來的網址），一定要設定密碼：瀏覽器會跳出登入視窗（HTTP Basic
+Auth），使用者名稱不限，密碼要正確才能使用。
 """
 
 import asyncio
+import base64
+import binascii
+import hmac
 import json
 import pathlib
+import urllib.parse
+from collections.abc import Iterable
 from typing import Any
 
 from aiohttp import web
@@ -25,6 +34,9 @@ STATIC_DIR = pathlib.Path(__file__).parent / "static"
 _MAX_BODY = 1_000_000
 _HEARTBEAT = 25
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
+# 密碼錯誤時多等一下，拖慢暴力猜密碼。
+_FAILED_LOGIN_DELAY = 1.0
+_REALM = 'Basic realm="Harness", charset="UTF-8"'
 _WORKSPACE = web.AppKey("workspace", workspace_lib.Workspace)
 _STREAMS = web.AppKey("streams", set)
 
@@ -35,6 +47,8 @@ def create_app(
     host: str = DEFAULT_HOST,
     model_fn: llm.ModelFn | None = None,
     static_dir: pathlib.Path | None = None,
+    password: str | None = None,
+    allowed_hosts: Iterable[str] = (),
 ) -> web.Application:
     """建立網頁版的 aiohttp 應用程式。
 
@@ -43,14 +57,23 @@ def create_app(
         host: 伺服器聽的位址，用來檢查 Host 標頭。
         model_fn: 模型函式，預設透過 litellm 呼叫；測試時可換成假的。
         static_dir: 前端檔案所在的資料夾，預設為套件裡的 static/。
+        password: 登入密碼；None 表示不需要登入（只適合本機使用）。
+        allowed_hosts: 另外接受的 Host（瀏覽器網址上的主機名稱，例如
+            反向代理的網域）。有密碼且沒有指定時接受任何 Host。
 
     Returns:
         aiohttp 的 Application。
     """
+    middlewares = [_error_middleware]
+    if password:
+        middlewares.append(_auth_middleware(password))
+    middlewares.append(
+        _guard_middleware(host, list(allowed_hosts), bool(password))
+    )
     app = web.Application(
         client_max_size=_MAX_BODY,
         # 第一個 middleware 在最外層，安全檢查丟出的錯誤也要轉成 JSON。
-        middlewares=[_error_middleware, _guard_middleware(host)],
+        middlewares=middlewares,
     )
     app[_WORKSPACE] = workspace_lib.Workspace(project, model_fn=model_fn)
     app[_STREAMS] = set()
@@ -161,6 +184,8 @@ async def serve(
     port: int = DEFAULT_PORT,
     model_fn: llm.ModelFn | None = None,
     on_ready=None,
+    password: str | None = None,
+    allowed_hosts: Iterable[str] = (),
 ) -> None:
     """啟動伺服器，直到被取消（例如使用者按 Ctrl-C）。
 
@@ -170,8 +195,26 @@ async def serve(
         port: 要聽的埠號，0 表示讓系統挑一個空的。
         model_fn: 模型函式，預設透過 litellm 呼叫。
         on_ready: 啟動後呼叫，參數是實際的網址。
+        password: 登入密碼，見 create_app。
+        allowed_hosts: 另外接受的 Host，見 create_app。
+
+    Raises:
+        ValueError: 要讓其他電腦連線，卻沒有設定密碼。
     """
-    app = create_app(project, host=host, model_fn=model_fn)
+    allowed_hosts = list(allowed_hosts)
+    if not password and (host not in _LOCAL_HOSTS or allowed_hosts):
+        raise ValueError(
+            "讓其他電腦連線時一定要設定登入密碼：請設定環境變數 "
+            "HARNESS_WEB_PASSWORD。伺服器可以執行專案的工具，不能沒有保護"
+            "就開放。"
+        )
+    app = create_app(
+        project,
+        host=host,
+        model_fn=model_fn,
+        password=password,
+        allowed_hosts=allowed_hosts,
+    )
     runner = web.AppRunner(app, handle_signals=False)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
@@ -229,19 +272,28 @@ def _optional_string(body: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _guard_middleware(host: str):
-    """只接受本機（或指定的 host）的請求，並擋掉其他網站送來的請求。"""
+def _guard_middleware(host: str, allowed_hosts: list[str], has_password: bool):
+    """只接受本機（或指定的 host）的請求，並擋掉其他網站送來的請求。
+
+    有密碼且沒有指定 allowed_hosts 時接受任何 Host：Host 檢查是為了擋
+    DNS rebinding，而那種請求拿不到登入密碼。
+    """
+    accepted = {*_LOCAL_HOSTS, host, *(item.lower() for item in allowed_hosts)}
+    any_host = has_password and not allowed_hosts
 
     @web.middleware
     async def guard(request: web.Request, handler):
-        hostname = (request.headers.get("Host") or "").rsplit(":", 1)[0]
-        if request.headers.get("Host", "").startswith("["):
-            hostname = request.headers["Host"].split("]")[0] + "]"
-        if hostname not in _LOCAL_HOSTS and hostname != host:
+        raw_host = request.headers.get("Host") or ""
+        hostname = raw_host.rsplit(":", 1)[0]
+        if raw_host.startswith("["):
+            hostname = raw_host.split("]")[0] + "]"
+        if not any_host and hostname.lower() not in accepted:
             raise workspace_lib.WebError(403, "不接受這個 Host 的請求")
         if request.path.startswith("/api/") and request.method != "GET":
             origin = request.headers.get("Origin")
-            if origin and origin != f"http://{request.headers.get('Host')}":
+            # 只比對主機與埠號：放在 HTTPS 反向代理後面時，Origin 是
+            # https://，伺服器收到的卻是 http。
+            if origin and urllib.parse.urlsplit(origin).netloc != raw_host:
                 raise workspace_lib.WebError(403, "不接受其他網站送來的請求")
             content_type = request.headers.get("Content-Type", "")
             if not content_type.startswith("application/json"):
@@ -249,6 +301,39 @@ def _guard_middleware(host: str):
         return await handler(request)
 
     return guard
+
+
+def _auth_middleware(password: str):
+    """要求 HTTP Basic Auth 登入；使用者名稱不限，只檢查密碼。"""
+    expected = password.encode()
+
+    @web.middleware
+    async def auth(request: web.Request, handler):
+        given = _basic_password(request.headers.get("Authorization", ""))
+        if given is not None and hmac.compare_digest(given, expected):
+            return await handler(request)
+        if given is not None:
+            await asyncio.sleep(_FAILED_LOGIN_DELAY)
+        return web.Response(
+            status=401,
+            text="需要登入",
+            headers={"WWW-Authenticate": _REALM, "Cache-Control": "no-store"},
+        )
+
+    return auth
+
+
+def _basic_password(header: str) -> bytes | None:
+    """從 Authorization 標頭取出 Basic Auth 的密碼。"""
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic" or not value:
+        return None
+    try:
+        decoded = base64.b64decode(value.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    _, separator, secret = decoded.partition(b":")
+    return secret if separator else None
 
 
 @web.middleware
