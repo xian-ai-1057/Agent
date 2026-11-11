@@ -1,0 +1,98 @@
+/* 品牌色沿用舊版文件頁的藍色 */
+:root {
+  --vp-c-brand-1: #2f4fe0;
+  --vp-c-brand-2: #4a66ea;
+  --vp-c-brand-3: #2f4fe0;
+  --vp-c-brand-soft: rgba(47, 79, 224, 0.12);
+  --vp-home-hero-name-color: var(--vp-c-text-1);
+}
+
+.dark {
+  --vp-c-brand-1: #8ea2ff;
+  --vp-c-brand-2: #a6b5ff;
+  --vp-c-brand-3: #4a66ea;
+  --vp-c-brand-soft: rgba(142, 162, 255, 0.16);
+}
+
+/* 標示只有 Python 版才有的功能 */
+.badge-py {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid #b9dcc3;
+  background: #eef8f1;
+  color: #2f6f3e;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  vertical-align: 3px;
+}
+
+.dark .badge-py {
+  border-color: #2c4a35;
+  background: #18261c;
+  color: #8fd6a4;
+}
+
+/* 運作方式的示意圖 */
+.diagram {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background: var(--vp-c-bg-soft);
+}
+
+.diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.diagram text {
+  fill: var(--vp-c-text-1);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.diagram .sub {
+  fill: var(--vp-c-text-2);
+  font-size: 12px;
+}
+
+.diagram .box {
+  fill: var(--vp-c-bg);
+  stroke: var(--vp-c-divider);
+}
+
+.diagram .core {
+  fill: var(--vp-c-brand-soft);
+  stroke: var(--vp-c-brand-1);
+}
+
+.diagram .arrow {
+  fill: none;
+  stroke: var(--vp-c-text-2);
+  stroke-width: 1.5;
+}
+
+.diagram .ah {
+  fill: var(--vp-c-text-2);
+}
+
+/* 截圖 */
+.vp-doc figure {
+  margin: 20px 0;
+}
+
+.vp-doc figure img {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+}
+
+.vp-doc figcaption {
+  margin-top: 8px;
+  color: var(--vp-c-text-2);
+  font-size: 14px;
+}

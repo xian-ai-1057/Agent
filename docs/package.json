@@ -1,0 +1,14 @@
+{
+  "name": "agent-harness-docs",
+  "private": true,
+  "type": "module",
+  "description": "Agent Harness 的文件網站（VitePress）",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

@@ -9,8 +9,9 @@ MCP 伺服器給它工具，再從命令列、網頁或自己的程式裡和它�
 
 提供 TypeScript 與 Python 兩個實作，共用同一種專案格式。
 
-想先快速瀏覽所有功能：打開 [`docs/index.html`](docs/index.html)（單一
-靜態網頁，附網頁版截圖，也可以直接用 GitHub Pages 發佈 `docs/` 資料夾）。
+完整的說明文件是 `docs/` 裡的多頁網站（VitePress），在本機預覽：
+`cd docs && npm install && npm run dev`。部署到 Vercel 的方式見
+[docs/README.md](docs/README.md)。
 
 ## 快速部署
 
@@ -638,7 +639,7 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 ## 為既有專案加上 agent
 
 已經有一套程式碼，想讓 agent 透過工具使用它的功能：見
-[docs/MIGRATION.md](docs/MIGRATION.md)。
+[docs/guide/migration.md](docs/guide/migration.md)。
 
 ## 閱讀原始碼
 

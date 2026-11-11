@@ -16,3 +16,6 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+
+# 文件網站（docs/）的建置快取
+.vitepress/cache/
