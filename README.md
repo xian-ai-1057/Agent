@@ -9,6 +9,9 @@ MCP 伺服器給它工具，再從命令列、網頁或自己的程式裡和它�
 
 提供 TypeScript 與 Python 兩個實作，共用同一種專案格式。
 
+想先快速瀏覽所有功能：打開 [`docs/index.html`](docs/index.html)（單一
+靜態網頁，附網頁版截圖，也可以直接用 GitHub Pages 發佈 `docs/` 資料夾）。
+
 ## 為誰而做
 
 Agent Harness 和 [Hermes Agent](https://github.com/NousResearch/hermes-agent)、
