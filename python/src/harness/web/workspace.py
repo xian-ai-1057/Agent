@@ -142,7 +142,7 @@ class Workspace:
             "toolsets": [
                 {
                     "name": name,
-                    "builtin": name in builtin.TOOLSETS,
+                    "builtin": builtin.is_builtin_toolset(name, items),
                     "tools": [_tool_info(item) for item in items],
                 }
                 for name, items in project.toolsets.items()

@@ -244,6 +244,63 @@ class TestSkillsInProject:
         with pytest.raises(ValueError, match="缺少 description"):
             harness.load_project(project_dir)
 
+    def test_builtin_skills_are_opt_in(self, project_dir):
+        self._write_agent(project_dir, "open", "name: open")
+
+        agent = harness.load_project(project_dir).agents["open"]
+
+        assert "code-review" not in [item.name for item in agent.skills]
+
+    def test_agent_can_use_builtin_skill_by_name(self, project_dir):
+        self._write_agent(
+            project_dir, "dev", "name: dev\nskills: [refund, code-review]"
+        )
+
+        agent = harness.load_project(project_dir).agents["dev"]
+
+        assert [item.name for item in agent.skills] == ["refund", "code-review"]
+        review = agent.skills[1]
+        assert "checklist.md" in review.resource_files()
+        # 內建 skill 的專屬工具來自內建 toolsets，載入前不會給 agent。
+        assert "run_command" in [item.name for item in review.tools]
+        assert "run_command" not in [item.name for item in agent.tools]
+
+    def test_project_skill_overrides_builtin_with_same_name(self, project_dir):
+        folder = project_dir / "skills" / "planning"
+        folder.mkdir()
+        (folder / "SKILL.md").write_text(
+            "---\ndescription: 我們自己的規劃方式\n---\n照公司流程。",
+            encoding="utf-8",
+        )
+        self._write_agent(project_dir, "dev", "name: dev\nskills: [planning]")
+
+        agent = harness.load_project(project_dir).agents["dev"]
+
+        assert agent.skills[0].description == "我們自己的規劃方式"
+
+    def test_unknown_skill_error_lists_builtin_skills(self, project_dir):
+        self._write_agent(project_dir, "bad", "name: bad\nskills: [nope]")
+
+        with pytest.raises(ValueError, match="內建的有：.*code-review"):
+            harness.load_project(project_dir)
+
+
+def test_builtin_skills_are_complete():
+    loaded = harness.builtin_skills()
+
+    assert sorted(loaded) == [
+        "code-review",
+        "debugging",
+        "git-commit",
+        "planning",
+        "skill-creator",
+        "web-research",
+    ]
+    for skill in loaded.values():
+        assert skill.description
+        assert skill.instructions
+        assert skill.tools, f"{skill.name} 沒有專屬工具"
+
 
 def test_resource_files_work_under_hidden_parent_folder(tmp_path):
     folder = tmp_path / ".config" / "skills" / "tone"

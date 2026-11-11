@@ -60,6 +60,9 @@ def test_report_bot_loads_native_tools_not_the_mcp_server(report_bot):
         "read_file",
         "list_dir",
         "write_file",
+        "edit_file",
+        "find_files",
+        "search_files",
     ]
 
 

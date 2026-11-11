@@ -44,9 +44,10 @@ const AGENTS_MD = `# {name}
 const MAIN_AGENT = `---
 name: main
 description: 專案的主要助手
-# tools 可以寫 toolset 名稱（MCP 伺服器名稱、tools/ 底下的 .ts 檔名、
-# 內建的 files）或單一工具名稱；整個欄位不寫的話，可以使用專案裡所有
-# 的工具。
+# tools 可以寫 toolset 名稱（MCP 伺服器名稱、tools/ 底下的 .ts 檔名）
+# 或單一工具名稱；整個欄位不寫的話，可以使用專案裡所有的工具。
+# 內建的 toolset 要明確列出才會啟用：files（讀取、搜尋、修改檔案）、
+# shell（執行指令）、plan（列出計畫）、web（讀取網頁）。
 tools:
   - {toolset}
 ---

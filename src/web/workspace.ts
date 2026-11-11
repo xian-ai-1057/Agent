@@ -16,7 +16,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { type Agent, DEFAULT_MAX_TURNS } from "../agent.ts";
-import { fileTools, resolvePath } from "../builtin/files.ts";
+import { resolvePath } from "../builtin/files.ts";
+import { isBuiltinToolset } from "../builtin/index.ts";
 import { lastMessage } from "../compaction.ts";
 import { runStream } from "../loop.ts";
 import { complete, defaultModel, type ModelFn } from "../model.ts";
@@ -135,7 +136,7 @@ export class Workspace {
       agents: Object.keys(project.agents).map((name) => this.agentInfo(name)),
       toolsets: Object.entries(project.toolsets).map(([name, tools]) => ({
         name,
-        builtin: tools === fileTools,
+        builtin: isBuiltinToolset(name, tools),
         tools: tools.map((item) => ({
           name: item.name,
           description: item.description,

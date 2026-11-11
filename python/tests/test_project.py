@@ -79,6 +79,9 @@ class TestLoadProject:
             "read_file",
             "list_dir",
             "write_file",
+            "edit_file",
+            "find_files",
+            "search_files",
             "word_count",
         ]
 
@@ -130,6 +133,21 @@ class TestLoadProject:
         assert picky == ["add"]
         with pytest.raises(harness.ToolError, match="已經斷線"):
             asyncio.run(loaded.tools["add"].func(a=1, b=2))
+
+    def test_mcp_server_named_like_builtin_toolset_is_started(
+        self, project_dir
+    ):
+        pytest.importorskip("mcp")
+        _write_server(project_dir)
+        _write_mcp_config(project_dir, "web", "server.py")
+        _write_agent(project_dir, "remote", "tools: [web]")
+
+        with harness.load_project(project_dir) as loaded:
+            remote = [item.name for item in loaded.agents["remote"].tools]
+            assert [c.name for c in loaded.mcp_connections] == ["web"]
+
+        assert "add" in remote
+        assert "web_fetch" not in remote
 
     def test_load_project_does_not_import_server_scripts_as_tools(
         self, project_dir
