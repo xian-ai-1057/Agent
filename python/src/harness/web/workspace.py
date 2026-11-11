@@ -22,11 +22,13 @@ import json
 import os
 import pathlib
 import re
+import sys
 import time
 import uuid
 from collections.abc import Callable
 from typing import Any
 
+from harness import agents as agents_lib
 from harness import builtin
 from harness import compaction as compaction_lib
 from harness import credentials
@@ -111,15 +113,23 @@ class _State:
     subagent_steps: dict[str, list[dict[str, Any]]] = dataclasses.field(
         default_factory=dict
     )
+    # 執行中各個 agent（套用過對話選項）用的模型，以及目前負責回覆的
+    # agent，用來記下每則回覆是哪個模型寫的。
+    run_models: dict[str, str] = dataclasses.field(default_factory=dict)
+    replying: str | None = None
     # 以下存在 .meta.json，伺服器重新啟動後仍然保留。
     custom_title: str | None = None
     options: dict[str, Any] = dataclasses.field(
         default_factory=lambda: _default_options()
     )
+    # options["tools"] 是依哪個 agent 的工具檢查的；只套用在這個 agent。
+    tools_agent: str | None = None
     # 以 assistant 訊息的索引（字串）為鍵。
     feedback: dict[str, dict[str, Any]] = dataclasses.field(
         default_factory=dict
     )
+    # 產生每則回覆的模型，以 assistant 訊息的索引（字串）為鍵。
+    reply_models: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 class Workspace:
@@ -167,6 +177,10 @@ class Workspace:
         """
         self._listeners.add(listener)
         return lambda: self._listeners.discard(listener)
+
+    def refresh_project(self) -> None:
+        """通知瀏覽器重新讀取專案資訊（例如 litellm 在背景載入完成後）。"""
+        self._emit({"type": "project"})
 
     def project_info(self) -> dict[str, Any]:
         """專案資訊、agent、toolset、權限與模型設定。"""
@@ -230,7 +244,7 @@ class Workspace:
         return sorted(summaries, key=lambda item: -item["updatedAt"])
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        """一段對話的完整內容，含選項與使用者對回覆的評價。
+        """一段對話的完整內容，含選項、使用者對回覆的評價與回覆的模型。
 
         Raises:
             WebError: 找不到這段對話。
@@ -243,8 +257,9 @@ class Workspace:
             "approvals": [item.approval for item in state.approvals.values()],
             "mode": state.mode,
             "subagentSteps": state.subagent_steps,
-            "options": dict(state.options),
+            "options": self._visible_options(state),
             "feedback": state.feedback,
+            "replyModels": state.reply_models,
         }
 
     def start_run(
@@ -288,6 +303,8 @@ class Workspace:
             state = self._create(agent)
             if checked != state.options:
                 state.options = checked
+                if checked["tools"] is not None:
+                    state.tools_agent = agent
                 self._save_meta(state)
         self._assert_idle(state)
         if state.title == _UNTITLED:
@@ -401,9 +418,24 @@ class Workspace:
         state = self._require(session_id)
         agent = self._active_agent(state).name
         state.options = self._checked_options(changes, state.options, agent)
+        if "tools" in changes:
+            # 工具清單只對檢查時負責的 agent 有意義（見 _with_options）。
+            tools = state.options["tools"]
+            state.tools_agent = agent if tools is not None else None
         self._save_meta(state)
         self._emit({"type": "session", "summary": self._summary(state)})
-        return dict(state.options)
+        return self._visible_options(state)
+
+    def _visible_options(self, state: _State) -> dict[str, Any]:
+        """給網頁看的選項：工具清單只在設定它的 agent 負責對話時才回傳。
+
+        轉交給其他 agent 之後，那個 agent 用的是自己全部的工具（見
+        _with_options），所以回傳 None，畫面才不會顯示不存在的限制。
+        """
+        options = dict(state.options)
+        if state.tools_agent != self._active_agent(state).name:
+            options["tools"] = None
+        return options
 
     def set_feedback(self, session_id: str, index: Any, feedback: Any) -> None:
         """記下使用者對一則回覆的評價；None 表示取消。
@@ -444,8 +476,11 @@ class Workspace:
             "rating": cleaned["rating"],
             "reasons": cleaned.get("reasons", []),
             "comment": cleaned.get("comment", ""),
-            "model": self._run_model(state),
         }
+        # 只記實際寫出這則回覆的模型；這個功能加入前的回覆不知道，就不記。
+        model = state.reply_models.get(key)
+        if model is not None:
+            record["model"] = model
         log = self.project.root / FEEDBACK_LOG
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as file:
@@ -622,8 +657,14 @@ class Workspace:
         session_id = state.session.id
         project = self.project
         try:
+            agent = self._run_agent(state)
+            state.run_models = {
+                item.name: item.model or llm.default_model()
+                for item in delegation.reachable_agents(agent)
+            }
+            state.replying = agent.name
             events = loop.run_stream(
-                self._run_agent(state),
+                agent,
                 text,
                 session=state.session,
                 permissions=self._permissions_for(state),
@@ -676,6 +717,7 @@ class Workspace:
             self._set_activity(state, {"kind": "writing"})
         elif event.type == "message":
             state.partial = ""
+            self._record_reply_model(state, data["message"])
             self._emit(
                 {
                     "type": "message",
@@ -707,6 +749,7 @@ class Workspace:
             )
             self._set_activity(state, {"kind": "thinking"})
         elif event.type == "handoff":
+            state.replying = data["to"]
             # 摘要裡的 agent 由對話紀錄推算，轉交後自然換成接手的 agent。
             self._touch(state)
         elif event.type == "compaction":
@@ -728,6 +771,20 @@ class Workspace:
                     "stopReason": result.stop_reason,
                 }
             )
+
+    def _record_reply_model(
+        self, state: _State, message: datatypes.Message
+    ) -> None:
+        """記下這則 assistant 訊息是哪個模型寫的，並存進 .meta.json。"""
+        messages = state.session.messages
+        model = state.run_models.get(state.replying or "")
+        if message.get("role") != "assistant" or model is None:
+            return
+        # 主迴圈先把訊息存進紀錄才產生事件，所以最後一則就是它。
+        if not messages or messages[-1] is not message:
+            return
+        state.reply_models[str(len(messages) - 1)] = model
+        self._save_meta(state)
 
     def _handle_subagent(self, state: _State, data: dict[str, Any]) -> None:
         """subagent 的進度：記下它呼叫的工具，並更新「正在做什麼」。"""
@@ -1057,37 +1114,79 @@ class Workspace:
         entry = self.project.agents[state.agent]
         return delegation.active_agent(entry, state.session.messages)
 
-    def _run_agent(self, state: _State):
+    def _run_agent(self, state: _State) -> agents_lib.Agent:
         """這一輪要用的 agent：套用這段對話自己選的模型、工具與 skills。
 
-        改的是副本，專案共用的 agent 不受影響。
+        改的是副本，專案共用的 agent 不受影響。轉交（handoff）的對象也
+        換成套用過選項的副本，執行到一半轉交時仍然用這段對話選的模型與
+        skills。
         """
-        agent = self._active_agent(state)
+        return self._with_options(
+            state, self._active_agent(state), self._chosen_model(state), {}
+        )
+
+    def _with_options(
+        self,
+        state: _State,
+        agent: agents_lib.Agent,
+        model: str | None,
+        applied: dict[str, agents_lib.Agent],
+    ) -> agents_lib.Agent:
+        """agent 套用對話選項後的副本，轉交對象也一併換成副本。
+
+        Args:
+            state: 對話狀態。
+            agent: 專案裡的 agent。
+            model: 這段對話選的模型；None 表示用 agent 自己的。
+            applied: 已經建立的副本，以 agent 名稱為鍵；agent 之間互相
+                轉交形成循環時，靠它避免無限遞迴。
+
+        Returns:
+            套用過選項的副本。
+        """
+        if agent.name in applied:
+            return applied[agent.name]
+        copy = dataclasses.replace(agent)
+        applied[agent.name] = copy
         options = state.options
-        changes: dict[str, Any] = {}
-        model = self._chosen_model(state)
         if model is not None:
-            changes["model"] = model
-        if options["tools"] is not None:
+            copy.model = model
+        # 工具清單是依某個 agent 的工具檢查的，只套用在那個 agent；轉交
+        # 給其他 agent 後用它自己的工具。
+        allowed: set[str] | None = None
+        if options["tools"] is not None and agent.name == state.tools_agent:
             allowed = set(options["tools"])
-            changes["tools"] = [t for t in agent.tools if t.name in allowed]
+            copy.tools = [t for t in agent.tools if t.name in allowed]
+            # skill 載入後才開放的工具也要在清單裡，不然載入 skill 就能
+            # 繞過使用者關掉的工具。
+            copy.skills = [_limit_tools(item, allowed) for item in agent.skills]
         available = self._available_skills()
         chosen = [available[n][0] for n in options["skills"] if n in available]
         if chosen:
-            own = {item.name: item for item in agent.skills}
-            changes["skills"] = [
-                *agent.skills,
-                *(item for item in chosen if item.name not in own),
+            own = {item.name for item in agent.skills}
+            # 使用者挑的 skill 不能帶進 agent 原本沒有的工具。
+            tools = {item.name for item in copy.tools}
+            copy.skills = [
+                *copy.skills,
+                *(
+                    _limit_tools(item, tools)
+                    for item in chosen
+                    if item.name not in own
+                ),
             ]
             names = "、".join(item.name for item in chosen)
             hint = (
                 f"使用者指定這段對話要使用這些技能：{names}。處理工作前，"
                 f"還沒載入的先用 {skills_lib.LOAD_TOOL} 載入，照著它的指示做。"
             )
-            changes["instructions"] = "\n\n".join(
+            copy.instructions = "\n\n".join(
                 part for part in (agent.instructions, hint) if part
             )
-        return dataclasses.replace(agent, **changes) if changes else agent
+        copy.handoffs = [
+            self._with_options(state, target, model, applied)
+            for target in agent.handoffs
+        ]
+        return copy
 
     def _chosen_model(self, state: _State) -> str | None:
         """這段對話自己選的模型；已經不在可選清單裡時不使用。"""
@@ -1096,11 +1195,6 @@ class Workspace:
             return None
         names = [item["name"] for item in self._model_options()]
         return model if model in names else None
-
-    def _run_model(self, state: _State) -> str:
-        """這段對話下一輪實際會用的模型。"""
-        agent = self._active_agent(state)
-        return self._chosen_model(state) or agent.model or llm.default_model()
 
     def _create(self, agent: str) -> _State:
         if agent not in self.project.agents:
@@ -1129,14 +1223,18 @@ class Workspace:
         return state
 
     def _save_meta(self, state: _State) -> None:
-        """把起始 agent、改過的名稱、選項與評價寫進 .meta.json。"""
+        """把起始 agent、改過的名稱、選項、評價與回覆的模型寫進 .meta.json。"""
         meta: dict[str, Any] = {"agent": state.agent}
         if state.custom_title is not None:
             meta["title"] = state.custom_title
         if state.options != _default_options():
             meta["options"] = state.options
+        if state.options["tools"] is not None and state.tools_agent:
+            meta["toolsAgent"] = state.tools_agent
         if state.feedback:
             meta["feedback"] = state.feedback
+        if state.reply_models:
+            meta["replyModels"] = state.reply_models
         _write_meta(self.project, state.session.id, meta)
 
     def _title(self, state: _State) -> str:
@@ -1311,7 +1409,8 @@ def _read_meta(project: project_lib.Project, session_id: str) -> dict[str, Any]:
     """讀取存在 session 旁邊的 .meta.json；沒有或壞掉時為空 dict。
 
     內容：agent（起始 agent）、title（使用者改過的名稱）、options、
-    feedback，除了 agent 都可能沒有。
+    toolsAgent（options.tools 是依哪個 agent 檢查的）、feedback、
+    replyModels（產生每則回覆的模型），除了 agent 都可能沒有。
     """
     try:
         meta = json.loads(_meta_path(project, session_id).read_text("utf-8"))
@@ -1332,7 +1431,10 @@ def _write_meta(
 
 
 def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
-    """把 .meta.json 裡的名稱、選項與評價放回對話狀態；格式不對的略過。"""
+    """把 .meta.json 裡的名稱、選項、評價與回覆的模型放回對話狀態。
+
+    格式不對的部分略過。
+    """
     title = meta.get("title")
     if isinstance(title, str) and title.strip():
         state.custom_title = title
@@ -1346,6 +1448,12 @@ def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
             "tools": tools if _is_string_list(tools) else None,
             "skills": chosen if _is_string_list(chosen) else [],
         }
+    if state.options["tools"] is not None:
+        # 沒有記錄的舊檔案：當時只能在起始 agent 上設定。
+        tools_agent = meta.get("toolsAgent")
+        state.tools_agent = (
+            tools_agent if isinstance(tools_agent, str) else state.agent
+        )
     feedback = meta.get("feedback")
     if isinstance(feedback, dict):
         state.feedback = {
@@ -1353,6 +1461,23 @@ def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
             for key, value in feedback.items()
             if isinstance(value, dict) and value.get("rating") in RATINGS
         }
+    reply_models = meta.get("replyModels")
+    if isinstance(reply_models, dict):
+        state.reply_models = {
+            key: value
+            for key, value in reply_models.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+
+
+def _limit_tools(
+    skill: skills_lib.Skill, allowed: set[str]
+) -> skills_lib.Skill:
+    """只留下 allowed 裡的 skill 專屬工具；都在清單裡時回傳原本的 skill。"""
+    if all(item.name in allowed for item in skill.tools):
+        return skill
+    tools = [item for item in skill.tools if item.name in allowed]
+    return dataclasses.replace(skill, tools=tools)
 
 
 def _default_options() -> dict[str, Any]:
@@ -1463,11 +1588,23 @@ def _provider_label(name: str) -> str:
     return prefix if slash else "其他"
 
 
-@functools.cache
 def _vision(name: str) -> bool | None:
-    """litellm 知道這個模型看不看得懂圖片時回傳答案，不知道時為 None。"""
+    """litellm 知道這個模型看不看得懂圖片時回傳答案，不知道時為 None。
+
+    litellm 載入要好幾秒，這裡在伺服器的事件迴圈上執行，不能等它載入；
+    還沒載入完成（伺服器啟動時在背景載入）就先當成不知道，載入完成後
+    伺服器會通知瀏覽器重新讀取。
+    """
+    module = sys.modules.get("litellm")
+    spec = getattr(module, "__spec__", None)
+    if module is None or getattr(spec, "_initializing", False):
+        return None
+    return _lookup_vision(name)
+
+
+@functools.cache
+def _lookup_vision(name: str) -> bool | None:
     try:
-        # litellm 載入很慢，延後到真的要用時才 import。
         import litellm
 
         litellm.suppress_debug_info = True

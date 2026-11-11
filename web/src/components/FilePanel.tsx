@@ -67,11 +67,20 @@ export function FilePanel({
   const previewPath = selected ?? files[0]?.path ?? attachments[0];
   const total = new Set([...files.map((f) => f.path), ...attachments]).size;
 
-  // 全螢幕時按 Esc 回到原本的大小。
+  // 全螢幕時按 Esc 回到原本的大小。對話框、彈出框或選單開著時，Esc
+  // 是關掉那一層，不能連全螢幕一起退出。
   useEffect(() => {
     if (!full) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.querySelector("dialog[open]")) return;
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("dialog, [role='dialog'], [role='menu']")
+      ) {
+        return;
+      }
       setFull(false);
     };
     window.addEventListener("keydown", onKey);

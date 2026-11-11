@@ -187,9 +187,15 @@ export function buildTurns(
   return turns;
 }
 
+/** 附件那一行路徑後面給模型的說明（uploads.py 的 describe）。 */
+const SANDBOX_NOTE = /（run_python 裡的路徑：[^\n]*）$/;
+
 /**
  * 把使用者訊息拆成文字與附件。伺服器把附件接在訊息最後，每個一行，
  * 以 ATTACHMENT_MARKER 開頭，路徑之後可能還有給模型的說明。
+ *
+ * 檔名可以有括號（例如 report_(1).pdf），所以只去掉已知的說明，不在
+ * 第一個括號或空白就切斷。
  */
 export function splitAttachments(content: string): {
   text: string;
@@ -199,7 +205,10 @@ export function splitAttachments(content: string): {
   const attachments: string[] = [];
   while (lines.at(-1)?.startsWith(ATTACHMENT_MARKER)) {
     const line = lines.pop() ?? "";
-    const path = line.slice(ATTACHMENT_MARKER.length).split(/[\s（(]/)[0];
+    const path = line
+      .slice(ATTACHMENT_MARKER.length)
+      .replace(SANDBOX_NOTE, "")
+      .trim();
     if (path) attachments.unshift(path);
   }
   return { text: lines.join("\n").trimEnd(), attachments };

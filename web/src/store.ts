@@ -239,7 +239,7 @@ export function setDetailMode(id: string, mode: SessionDetail["mode"]): void {
 
 /**
  * 把一段對話從畫面上拿掉；正在看這段對話時回到新對話。
- * 刪除時先呼叫，伺服器的 session_deleted 事件也會呼叫，重複呼叫沒關係。
+ * 刪除成功後呼叫，伺服器的 session_deleted 事件也會呼叫，重複呼叫沒關係。
  */
 function forget(id: string): void {
   if (location.pathname === `/s/${id}`) navigate("/");
@@ -270,21 +270,11 @@ export async function renameSession(id: string, title: string): Promise<void> {
 }
 
 /**
- * 刪除對話（Python 版）：先從畫面拿掉，伺服器回報失敗時放回去並丟出錯誤。
- * 正在看這段對話時會回到新對話。
+ * 刪除對話（Python 版）：伺服器確認刪除後才從畫面拿掉，失敗時丟出錯誤、
+ * 畫面不動。不先拿掉：伺服器可能拒絕（例如對話還在執行），先換頁會讓
+ * 使用者離開一段其實沒被刪掉的對話。正在看這段對話時會回到新對話。
  */
 export async function deleteSession(id: string): Promise<void> {
-  const summary = state.sessions[id];
-  const detail = state.details[id];
+  await api.deleteSession(id);
   forget(id);
-  try {
-    await api.deleteSession(id);
-  } catch (error) {
-    setState((s) => ({
-      ...s,
-      sessions: summary ? { ...s.sessions, [id]: summary } : s.sessions,
-      details: detail ? { ...s.details, [id]: detail } : s.details,
-    }));
-    throw error;
-  }
 }

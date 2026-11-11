@@ -80,6 +80,7 @@ export function ConfirmDialog({
   children,
   confirmLabel,
   danger = false,
+  disabled = false,
   onConfirm,
   onClose,
 }: {
@@ -88,6 +89,8 @@ export function ConfirmDialog({
   confirmLabel: string;
   /** 刪除這類無法復原的動作：按鈕用危險色並加上垃圾桶圖示。 */
   danger?: boolean;
+  /** 現在不能確認（原因寫在 children 裡）：確認按鈕停用。 */
+  disabled?: boolean;
   onConfirm: () => Promise<void> | void;
   onClose: () => void;
 }) {
@@ -136,7 +139,7 @@ export function ConfirmDialog({
         <button
           type="button"
           className={`btn ${danger ? "btn-danger" : "btn-accent"}`}
-          disabled={busy}
+          disabled={busy || disabled}
           onClick={confirm}
         >
           {danger && <TrashIcon size={15} />}

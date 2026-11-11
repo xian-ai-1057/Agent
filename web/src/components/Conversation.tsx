@@ -250,19 +250,14 @@ export function Conversation({ id }: { id: string }) {
     ? (index: number, feedback: Feedback | null) =>
         api.setFeedback(id, index, feedback).then(() => undefined)
     : undefined;
-  const lastModel = modelLabel(
-    runModel ??
-      effectiveModel(
-        stored?.options ?? {
-          model: summary.model ?? null,
-          tools: null,
-          skills: [],
-        },
-        agentInfo?.model,
-        models,
-      ),
-    models,
-  );
+  // 回覆底下顯示產生它的模型（伺服器記下的 replyModels）。這次開著畫面
+  // 時剛跑完、紀錄還沒讀回來的最後一輪，用開始跑時記下的模型。舊的回覆
+  // 沒有紀錄就不顯示，不拿現在選的模型充數。
+  const replyModel = (index: number | undefined, latest: boolean) => {
+    const recorded =
+      index === undefined ? undefined : detail.replyModels?.[String(index)];
+    return modelLabel(recorded ?? (latest ? runModel : undefined), models);
+  };
 
   const projectMode = project?.permissions.mode ?? "ask";
   const modeLabel = detail.mode
@@ -338,10 +333,10 @@ export function Conversation({ id }: { id: string }) {
                               ? undefined
                               : detail.feedback?.[String(reply.index)],
                           onFeedback: rate,
-                          model:
-                            last && !pendingShown && !busy
-                              ? lastModel
-                              : undefined,
+                          model: replyModel(
+                            reply.index,
+                            last && !pendingShown && !busy,
+                          ),
                         }
                       : undefined
                   }

@@ -2,25 +2,93 @@
  * 顯示 agent 的回覆。react-markdown 預設不會執行內容裡的 HTML，
  * 模型或工具輸出的文字不會變成可以執行的程式。
  *
- * 程式碼區塊會上色並加上「複製」按鈕；$…$ 與 $$…$$ 用 KaTeX 排版。
+ * 程式碼區塊會上色並加上「複製」按鈕；只有 $$…$$ 用 KaTeX 排版。
+ * 單一個 $ 不算數學式：回覆裡常有 NT$1,000 到 NT$2,000 這種金額，
+ * 兩個 $ 之間的文字不能被當成數學式。
+ *
+ * KaTeX 與上色的程式比較大，內容裡真的有 $$ 或程式碼區塊時才載入。
+ * 還在串流的回覆每來一段字就重畫一次，所以先不排版、不上色，等回覆
+ * 完成後再做一次。
  */
 
-import "katex/dist/katex.min.css";
-import { memo } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
-import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "./chat/chat.css";
 import { CodeBlock } from "./chat/CodeBlock.tsx";
 
-const remarkPlugins = [remarkGfm, remarkMath];
-// KaTeX 要排在上色前面，數學式才不會被當成程式碼。
-const rehypePlugins = [
-  [rehypeKatex, { throwOnError: false, errorColor: "var(--danger)" }],
-  rehypeHighlight,
-] as NonNullable<Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]>;
+type Plugins = NonNullable<
+  Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
+>;
+
+const remarkPlugins = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
+] as NonNullable<Parameters<typeof ReactMarkdown>[0]["remarkPlugins"]>;
+
+const MATH = /\$\$/;
+// 縮排在清單或引用（>）底下的程式碼區塊也要算進去。
+const FENCE = /^[ \t>]*(`{3,}|~{3,})/m;
+
+// 載入過就留著，之後的訊息直接用。
+let katexPlugin: Plugins[number] | undefined;
+let highlightPlugin: Plugins[number] | undefined;
+let mathLoading: Promise<void> | undefined;
+let highlightLoading: Promise<void> | undefined;
+
+function loadMath(): Promise<void> {
+  mathLoading ??= Promise.all([
+    import("rehype-katex"),
+    import("katex/dist/katex.min.css"),
+  ]).then(([module]) => {
+    // 打錯的數學式用警告色顯示原文，不用紅色。
+    katexPlugin = [
+      module.default,
+      { throwOnError: false, errorColor: "var(--warn-ink)" },
+    ];
+  });
+  return mathLoading;
+}
+
+function loadHighlight(): Promise<void> {
+  highlightLoading ??= import("rehype-highlight").then((module) => {
+    highlightPlugin = module.default;
+  });
+  return highlightLoading;
+}
+
+/** 這段文字需要的 rehype 外掛；還沒載入的先載入，好了再重畫。 */
+function useRehypePlugins(text: string, streaming: boolean): Plugins {
+  const wantMath = !streaming && MATH.test(text);
+  const wantCode = !streaming && FENCE.test(text);
+  const [, setLoaded] = useState(0);
+
+  useEffect(() => {
+    const loads: Promise<void>[] = [];
+    if (wantMath && !katexPlugin) loads.push(loadMath());
+    if (wantCode && !highlightPlugin) loads.push(loadHighlight());
+    if (loads.length === 0) return;
+    let alive = true;
+    Promise.all(loads).then(
+      () => alive && setLoaded((count) => count + 1),
+      () => undefined,
+    );
+    return () => {
+      alive = false;
+    };
+  }, [wantMath, wantCode]);
+
+  const math = wantMath ? katexPlugin : undefined;
+  const code = wantCode ? highlightPlugin : undefined;
+  return useMemo(() => {
+    // KaTeX 要排在上色前面，數學式才不會被當成程式碼。
+    const plugins: Plugins = [];
+    if (math) plugins.push(math);
+    if (code) plugins.push(code);
+    return plugins;
+  }, [math, code]);
+}
 
 const components: Components = {
   a: ({ href, children }) => (
@@ -42,6 +110,7 @@ export const Markdown = memo(function Markdown({
   text: string;
   streaming?: boolean;
 }) {
+  const rehypePlugins = useRehypePlugins(text, streaming);
   return (
     <div className="md">
       <ReactMarkdown

@@ -128,7 +128,12 @@ export function Settings({ section }: { section: SettingsSection }) {
           </nav>
           <div className="settings-body anim-in" key={section}>
             {section === "model" && (
-              <ModelSection project={project} draft={current} edit={edit} />
+              <ModelSection
+                project={project}
+                draft={current}
+                edit={edit}
+                saveBarShown={dirty}
+              />
             )}
             {section === "permissions" && (
               <PermissionSection
@@ -224,7 +229,15 @@ type EditProps = {
   edit: (change: (value: Draft) => Draft) => void;
 };
 
-function ModelSection({ project, draft, edit }: EditProps) {
+function ModelSection({
+  project,
+  draft,
+  edit,
+  saveBarShown,
+}: EditProps & {
+  /** 下方的儲存列出現時，連線表單的按鈕改成次要樣式，畫面上只留一個紅色按鈕。 */
+  saveBarShown: boolean;
+}) {
   const [test, setTest] = useState<ModelTestResult | "testing">();
   const agent = project.agents.find((a) => a.name === project.defaultAgent);
   const { env, connection } = project.model;
@@ -274,7 +287,11 @@ function ModelSection({ project, draft, edit }: EditProps) {
       </div>
 
       {connection ? (
-        <ConnectionForm project={project} connection={connection} />
+        <ConnectionForm
+          project={project}
+          connection={connection}
+          secondary={saveBarShown}
+        />
       ) : (
         <>
           <div className="form-row">

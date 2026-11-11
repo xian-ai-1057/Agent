@@ -310,8 +310,10 @@ async def serve(
     site = web.TCPSite(runner, host, port)
     await site.start()
     # litellm 載入要好幾秒，先在背景載入；列出模型時要用它判斷模型看不
-    # 看得懂圖片，第一次打開網頁才不會卡住。
-    asyncio.get_running_loop().run_in_executor(None, _warm_up)
+    # 看得懂圖片。載入完成前先不判斷，完成後通知瀏覽器重新讀取專案資訊。
+    workspace = app[_WORKSPACE]
+    warm_up = asyncio.get_running_loop().run_in_executor(None, _warm_up)
+    warm_up.add_done_callback(lambda _: workspace.refresh_project())
     actual = site._server.sockets[0].getsockname()[1]  # noqa: SLF001
     shown = f"[{host}]" if ":" in host else host
     if on_ready is not None:

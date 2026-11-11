@@ -194,6 +194,11 @@ h3 {
   border-top: 3px solid var(--accent);
 }
 
+/* 包住主畫面只為了在抽屜打開時設 inert，本身不產生方框。 */
+.app-content {
+  display: contents;
+}
+
 /* 換頁時主畫面淡入並上移 4px（App 依網址換 key，讓它重新播放）。 */
 .main {
   flex: 1 1 480px;
@@ -386,7 +391,7 @@ h3 {
   padding: 0 10px;
   font-size: 12px;
   font-weight: 500;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .side-list {
@@ -495,7 +500,7 @@ h3 {
   margin: 0;
   padding: 4px 10px;
   font-size: 12px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* ── 小元件 ───────────────────────────────────────── */
@@ -2383,7 +2388,7 @@ h3 {
   grid-column: 2;
   grid-row: 1;
   font: 400 11px var(--mono);
-  color: var(--faint);
+  color: var(--muted);
   align-self: center;
 }
 

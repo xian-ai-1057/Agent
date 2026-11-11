@@ -2,7 +2,8 @@
  * 對話畫面（對話、新對話、輸入框、檔案面板）自己的樣式。
  *
  * 顏色、圓角、陰影都用 styles.css 的變數，深色模式跟著變。只有程式碼
- * 上色與檔案類型標籤在這裡定義自己的顏色。動畫只動 transform 與
+ * 上色與檔案類型標籤在這裡定義自己的顏色（淺色、深色各一組，文字與底色
+ * 的對比都在 4.5:1 以上）。動畫只動 transform 與
  * opacity（收合用 grid-template-rows），減少動態效果時全部關掉。
  */
 
@@ -12,12 +13,24 @@
   --hl-keyword: #6f42c1;
   --hl-string: #1a7f37;
   --hl-number: #0550ae;
-  --hl-comment: #6e7781;
+  --hl-comment: #5f6873;
   --hl-title: #0b6e99;
   --hl-attr: #8a5a00;
   --hl-type: #7d5800;
   --hl-meta: #57606a;
   --hl-builtin: #0a5b8f;
+  --badge-doc: #1f5fae;
+  --badge-doc-bg: rgba(31, 95, 174, 0.12);
+  --badge-sheet: #1b6b3a;
+  --badge-sheet-bg: rgba(27, 107, 58, 0.12);
+  --badge-slide: #9a3f1b;
+  --badge-slide-bg: rgba(154, 63, 27, 0.12);
+  --badge-pdf: #4a4a4a;
+  --badge-pdf-bg: rgba(74, 74, 74, 0.1);
+  --badge-image: #6a45c2;
+  --badge-image-bg: rgba(106, 69, 194, 0.12);
+  --badge-archive: #7a5a00;
+  --badge-archive-bg: rgba(122, 90, 0, 0.14);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -31,6 +44,18 @@
     --hl-type: #e3c46a;
     --hl-meta: #a0a8b0;
     --hl-builtin: #8ecbf5;
+    --badge-doc: #8fb8f0;
+    --badge-doc-bg: rgba(143, 184, 240, 0.16);
+    --badge-sheet: #7fd3a0;
+    --badge-sheet-bg: rgba(127, 211, 160, 0.16);
+    --badge-slide: #f0a47f;
+    --badge-slide-bg: rgba(240, 164, 127, 0.16);
+    --badge-pdf: #d0d0d0;
+    --badge-pdf-bg: rgba(208, 208, 208, 0.12);
+    --badge-image: #c4a7ff;
+    --badge-image-bg: rgba(196, 167, 255, 0.16);
+    --badge-archive: #e3c46a;
+    --badge-archive-bg: rgba(227, 196, 106, 0.16);
   }
 }
 
@@ -44,6 +69,18 @@
   --hl-type: #e3c46a;
   --hl-meta: #a0a8b0;
   --hl-builtin: #8ecbf5;
+  --badge-doc: #8fb8f0;
+  --badge-doc-bg: rgba(143, 184, 240, 0.16);
+  --badge-sheet: #7fd3a0;
+  --badge-sheet-bg: rgba(127, 211, 160, 0.16);
+  --badge-slide: #f0a47f;
+  --badge-slide-bg: rgba(240, 164, 127, 0.16);
+  --badge-pdf: #d0d0d0;
+  --badge-pdf-bg: rgba(208, 208, 208, 0.12);
+  --badge-image: #c4a7ff;
+  --badge-image-bg: rgba(196, 167, 255, 0.16);
+  --badge-archive: #e3c46a;
+  --badge-archive-bg: rgba(227, 196, 106, 0.16);
 }
 
 .hljs-keyword,
@@ -101,8 +138,10 @@
   color: var(--hl-builtin);
 }
 
+/* 刪除的行用警告色加刪除線，不用紅色。 */
 .hljs-deletion {
-  color: var(--danger);
+  color: var(--warn);
+  text-decoration: line-through;
 }
 
 .hljs-emphasis {
@@ -279,16 +318,6 @@
     transform var(--dur-1, 120ms) var(--ease-out, ease);
 }
 
-.ch-actions .ch-action {
-  opacity: 0.6;
-}
-
-.ch-actions:hover .ch-action,
-.ch-actions .ch-action:focus-visible,
-.ch-actions .ch-action[aria-pressed="true"] {
-  opacity: 1;
-}
-
 .ch-action:hover {
   background: var(--hover);
   color: var(--ink);
@@ -330,8 +359,7 @@
 
 /* 觸控裝置沒有滑過的狀態，動作一直顯示。 */
 @media (hover: none) {
-  .ch-user-copy,
-  .ch-actions .ch-action {
+  .ch-user-copy {
     opacity: 1;
   }
 }
@@ -425,7 +453,7 @@
   color: var(--warn-ink, var(--warn));
 }
 
-/* 檔案類型標籤（這裡可以用自己的顏色） */
+/* 檔案類型標籤（顏色定義在檔案開頭；PDF 不用紅色） */
 
 .ch-badge {
   width: 36px;
@@ -441,33 +469,33 @@
 }
 
 .ch-badge[data-kind="doc"] {
-  color: #3f74c9;
-  background: rgba(63, 116, 201, 0.14);
+  color: var(--badge-doc);
+  background: var(--badge-doc-bg);
 }
 
 .ch-badge[data-kind="sheet"] {
-  color: #2e9a5e;
-  background: rgba(46, 154, 94, 0.14);
+  color: var(--badge-sheet);
+  background: var(--badge-sheet-bg);
 }
 
 .ch-badge[data-kind="slide"] {
-  color: #d0663f;
-  background: rgba(208, 102, 63, 0.14);
+  color: var(--badge-slide);
+  background: var(--badge-slide-bg);
 }
 
 .ch-badge[data-kind="pdf"] {
-  color: #d23b33;
-  background: rgba(210, 59, 51, 0.13);
+  color: var(--badge-pdf);
+  background: var(--badge-pdf-bg);
 }
 
 .ch-badge[data-kind="image"] {
-  color: #8f6ae0;
-  background: rgba(143, 106, 224, 0.14);
+  color: var(--badge-image);
+  background: var(--badge-image-bg);
 }
 
 .ch-badge[data-kind="archive"] {
-  color: #b08a2a;
-  background: rgba(176, 138, 42, 0.15);
+  color: var(--badge-archive);
+  background: var(--badge-archive-bg);
 }
 
 .ch-thread .file-card {
@@ -711,7 +739,7 @@
   position: absolute;
   inset: -1px;
   border-radius: inherit;
-  box-shadow: 0 0 0 3px var(--hover);
+  box-shadow: 0 0 0 3px var(--line-3);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-2, 200ms) var(--ease-out, ease);
@@ -727,6 +755,16 @@
 
 .ch-send {
   animation: ch-swap-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+/* 停止鈕用中性色：等確認時，權限卡片的「允許」才是唯一的紅色按鈕。 */
+.ch-composer .send-btn.stop {
+  background: var(--ink);
+  color: var(--panel);
+}
+
+.ch-composer .send-btn.stop:hover:not(:disabled) {
+  background: var(--ink-2);
 }
 
 .ch-send:active:not(:disabled) {
@@ -1246,6 +1284,10 @@
   margin: 0;
 }
 
+.ch-preview-plain {
+  font-family: var(--mono);
+}
+
 .ch-csv {
   padding: 12px 16px 24px;
 }
@@ -1448,8 +1490,9 @@
 }
 
 .ch-dialog-field textarea:focus {
-  outline: none;
-  border-color: var(--line-3);
+  border-color: var(--accent);
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 0;
 }
 
 .dialog-actions.ch-dialog-actions {

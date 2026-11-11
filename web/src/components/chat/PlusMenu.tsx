@@ -15,7 +15,7 @@ import {
   UploadIcon,
 } from "./icons.tsx";
 import type { ComposerOptions } from "./options.ts";
-import { Popover } from "./Popover.tsx";
+import { focusTrigger, Popover } from "./Popover.tsx";
 
 type View = "main" | "skills" | "tools";
 
@@ -30,10 +30,23 @@ export function PlusMenu({
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<View>("main");
   const anchor = useRef<HTMLDivElement>(null);
+  // 從子頁按「回上一層」時，記下是哪一頁，回到主選單後焦點放在那一項。
+  const returnTo = useRef<View>(undefined);
   const close = useCallback(() => {
     setOpen(false);
     setView("main");
   }, []);
+  const back = (from: View) => {
+    returnTo.current = from;
+    setView("main");
+  };
+  useEffect(() => {
+    if (view !== "main" || !returnTo.current) return;
+    anchor.current
+      ?.querySelector<HTMLElement>(`[data-view="${returnTo.current}"]`)
+      ?.focus();
+    returnTo.current = undefined;
+  }, [view]);
 
   const { skills, tools, value } = options;
   const enabledTools = value.tools ?? tools.map((tool) => tool.name);
@@ -81,6 +94,7 @@ export function PlusMenu({
                 role="menuitem"
                 className="ch-pop-item"
                 onClick={() => {
+                  focusTrigger(anchor);
                   close();
                   onUpload();
                 }}
@@ -96,6 +110,7 @@ export function PlusMenu({
                 type="button"
                 role="menuitem"
                 className="ch-pop-item"
+                data-view="skills"
                 onClick={() => setView("skills")}
               >
                 <SparkIcon />
@@ -113,6 +128,7 @@ export function PlusMenu({
                 type="button"
                 role="menuitem"
                 className="ch-pop-item"
+                data-view="tools"
                 onClick={() => setView("tools")}
               >
                 <ToolIcon />
@@ -137,7 +153,7 @@ export function PlusMenu({
               checked: value.skills.includes(skill.name),
             }))}
             onToggle={toggleSkill}
-            onBack={() => setView("main")}
+            onBack={() => back("skills")}
           />
         )}
         {view === "tools" && (
@@ -150,7 +166,7 @@ export function PlusMenu({
               checked: enabledTools.includes(tool.name),
             }))}
             onToggle={toggleTool}
-            onBack={() => setView("main")}
+            onBack={() => back("tools")}
           />
         )}
         {view !== "main" && options.nextTurn && (

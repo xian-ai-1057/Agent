@@ -9,17 +9,8 @@ export type PreviewKind =
   | "text"
   | "binary";
 
-const IMAGE = [
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "svg",
-  "bmp",
-  "ico",
-  "avif",
-];
+// SVG 不在這裡：伺服器把它當純文字送（裡面可以有程式），所以顯示原始碼。
+const IMAGE = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"];
 
 /** 副檔名對應到 highlight.js 的語言；空字串表示純文字。 */
 const TEXT_LANGUAGES: Record<string, string> = {
@@ -46,6 +37,7 @@ const TEXT_LANGUAGES: Record<string, string> = {
   scss: "scss",
   sql: "sql",
   xml: "xml",
+  svg: "xml",
   sh: "bash",
   bash: "bash",
   zsh: "bash",

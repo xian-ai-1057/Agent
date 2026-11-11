@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { CheckIcon, ChevronDownIcon } from "../Icons.tsx";
 import { SearchIcon } from "./icons.tsx";
 import { type ComposerOptions, effectiveModel, modelLabel } from "./options.ts";
-import { Popover } from "./Popover.tsx";
+import { focusTrigger, Popover } from "./Popover.tsx";
 
 export function ModelMenu({ options }: { options: ComposerOptions }) {
   const [open, setOpen] = useState(false);
@@ -71,6 +71,7 @@ export function ModelMenu({ options }: { options: ComposerOptions }) {
                 className="ch-pop-item"
                 onClick={() => {
                   if (!checked) options.onChange({ model: model.name });
+                  focusTrigger(anchor);
                   close();
                 }}
               >

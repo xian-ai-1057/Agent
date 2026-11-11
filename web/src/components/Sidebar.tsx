@@ -113,6 +113,12 @@ export function Sidebar({
   ).length;
   const currentId = route.page === "session" ? route.id : undefined;
   const admin = project?.features?.sessionAdmin === true;
+  // 用最新的狀態判斷：對話框開著時對話可能剛開始或停止執行。
+  const deletingStatus = deleting
+    ? (sessions[deleting.id] ?? deleting).status
+    : undefined;
+  const deleteBlocked =
+    deletingStatus === "running" || deletingStatus === "waiting";
 
   // 抽屜打開時把焦點移進來，鍵盤使用者才不會留在後面的畫面。
   useEffect(() => {
@@ -222,13 +228,22 @@ export function Sidebar({
             title="刪除這段對話？"
             confirmLabel="刪除對話"
             danger
+            disabled={deleteBlocked}
             onConfirm={() => deleteSession(deleting.id)}
             onClose={() => setDeleting(undefined)}
           >
-            <p>
-              「{deleting.title}」的訊息與紀錄會一起刪除，
-              <strong>無法復原</strong>。
-            </p>
+            {deleteBlocked ? (
+              <p>
+                「{deleting.title}」
+                {deletingStatus === "waiting" ? "正在等你確認" : "還在執行"}
+                ，要先停止才能刪除。
+              </p>
+            ) : (
+              <p>
+                「{deleting.title}」的訊息與紀錄會一起刪除，
+                <strong>無法復原</strong>。
+              </p>
+            )}
           </ConfirmDialog>,
           document.body,
         )}
@@ -286,6 +301,9 @@ function SessionRow({
   );
 }
 
+/** 對話名稱的長度上限，和伺服器的 _CUSTOM_TITLE_LIMIT 一致。 */
+const TITLE_LIMIT = 100;
+
 /** 就地改名：Enter 或離開輸入框時儲存，Esc 取消。 */
 function RenameInput({
   summary,
@@ -306,7 +324,8 @@ function RenameInput({
   const finish = (save: boolean) => {
     if (finished.current) return;
     finished.current = true;
-    const title = ref.current?.value ?? "";
+    // 伺服器只收 1 到 100 個字（去掉前後空白後）；renameSession 也會去空白。
+    const title = (ref.current?.value ?? "").trim().slice(0, TITLE_LIMIT);
     onDone();
     if (!save) return;
     renameSession(summary.id, title).catch((error: Error) =>
@@ -332,7 +351,7 @@ function RenameInput({
       className="side-rename"
       aria-label="對話名稱"
       defaultValue={summary.title}
-      maxLength={200}
+      maxLength={TITLE_LIMIT}
       onKeyDown={onKeyDown}
       onBlur={() => finish(true)}
     />

@@ -46,6 +46,30 @@ export function App() {
     menuRef.current?.focus();
   }, []);
 
+  // 抽屜收起時（換頁、點背景、Esc），焦點還留在抽屜裡就移回選單按鈕，
+  // 不然鍵盤使用者會停在看不到的抽屜裡。焦點已經移到別處（例如搜尋
+  // 對話框）時不動它。
+  useEffect(() => {
+    if (!drawer) return;
+    return () => {
+      const focused = document.activeElement;
+      const sidebar = document.getElementById("sidebar");
+      if (!focused || focused === document.body || sidebar?.contains(focused))
+        menuRef.current?.focus();
+    };
+  }, [drawer]);
+
+  // 視窗拉寬後抽屜變回一般側欄，主畫面不能還停在 inert。
+  useEffect(() => {
+    if (!drawer) return;
+    const narrow = window.matchMedia("(max-width: 760px)");
+    const onChange = () => {
+      if (!narrow.matches) setDrawer(false);
+    };
+    narrow.addEventListener("change", onChange);
+    return () => narrow.removeEventListener("change", onChange);
+  }, [drawer]);
+
   useEffect(() => {
     if (!drawer) return;
     const onKey = (event: KeyboardEvent) => {
@@ -76,7 +100,8 @@ export function App() {
 
   return (
     <div className={`app ${drawer ? "drawer-open" : ""}`}>
-      <header className="topbar">
+      {/* 抽屜打開時頂端列和主畫面都設成 inert：Tab 與螢幕閱讀器只會停在抽屜裡。 */}
+      <header className="topbar" inert={drawer}>
         <button
           ref={menuRef}
           type="button"
@@ -115,13 +140,16 @@ export function App() {
           onClick={closeDrawer}
         />
       )}
-      {route.page === "new" && <NewChat />}
-      {route.page === "session" && (
-        // 換對話時重新掛載，主畫面的淡入動畫才會重播。
-        <Conversation key={route.id} id={route.id} />
-      )}
-      {route.page === "work" && <WorkView />}
-      {route.page === "settings" && <Settings section={route.section} />}
+      {/* display: contents，不影響版面，只用來一次把主畫面設成 inert。 */}
+      <div className="app-content" inert={drawer}>
+        {route.page === "new" && <NewChat />}
+        {route.page === "session" && (
+          // 換對話時重新掛載，主畫面的淡入動畫才會重播。
+          <Conversation key={route.id} id={route.id} />
+        )}
+        {route.page === "work" && <WorkView />}
+        {route.page === "settings" && <Settings section={route.section} />}
+      </div>
       {searching && <SearchDialog onClose={() => setSearching(false)} />}
       <Toaster />
       {(!connected || loadError) && (

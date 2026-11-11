@@ -1,11 +1,26 @@
 /** 工具呼叫的權限確認：允許一次、以後都允許、拒絕。按 1、2、3 也可以。 */
 
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import type { Approval, ApprovalDecision } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
 import "./chat/chat.css";
 import { describeStep, sentenceText } from "./chat/steps.ts";
 import { lineStats } from "./FilePanel.tsx";
+
+/** 正在打字、或對話框與選單開著時，1、2、3 不當成快速鍵。 */
+const TYPING =
+  "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
+const LAYERS = "dialog, [role='dialog'], [role='menu']";
+/** 開著的對話框（<dialog>）、彈出框與選單；關著時不在畫面上。 */
+const OPEN_LAYERS = "dialog[open], [role='dialog'], [role='menu']";
+
+function hotkeysAllowed(target: EventTarget | null): boolean {
+  if (target instanceof Element && target.closest(`${TYPING}, ${LAYERS}`)) {
+    return false;
+  }
+  // 焦點不在裡面，但還有對話框或選單開著（例如剛點開還沒移入焦點）。
+  return !document.querySelector(OPEN_LAYERS);
+}
 
 export function ApprovalCard({
   approval,
@@ -21,6 +36,7 @@ export function ApprovalCard({
   const [error, setError] = useState<string>();
   // 決定後先收起來，等伺服器的事件到了才真的移除。
   const [leaving, setLeaving] = useState(false);
+  const card = useRef<HTMLElement>(null);
 
   const decide = async (decision: ApprovalDecision) => {
     if (sending) return;
@@ -37,8 +53,9 @@ export function ApprovalCard({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest("input, textarea, select, [contenteditable]")) return;
+      if (event.defaultPrevented || !hotkeysAllowed(event.target)) return;
+      // 手機抽屜打開時主畫面是 inert，卡片看不到也不能按。
+      if (card.current?.closest("[inert]")) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const choice = { "1": "once", "2": "always", "3": "deny" }[event.key];
       if (!choice) return;
@@ -75,7 +92,11 @@ export function ApprovalCard({
   return (
     <div className={`ch-approval-wrap${leaving ? " leaving" : ""}`}>
       <div>
-        <section className="approval-card ch-approval" aria-label="權限確認">
+        <section
+          ref={card}
+          className="approval-card ch-approval"
+          aria-label="權限確認"
+        >
           <div className="approval-head">
             <div style={{ minWidth: 0 }}>
               <div className="title">

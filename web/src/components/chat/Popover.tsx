@@ -63,7 +63,7 @@ export function Popover({
       if (event.key !== "Escape") return;
       event.stopPropagation();
       onClose();
-      anchor.current?.querySelector<HTMLElement>("[aria-haspopup]")?.focus();
+      focusTrigger(anchor);
     };
     document.addEventListener("pointerdown", onPointer);
     document.addEventListener("keydown", onKey);
@@ -95,6 +95,14 @@ export function Popover({
       {children}
     </div>
   );
+}
+
+/**
+ * 把焦點放回打開選單的按鈕。選了項目、選單關起來時呼叫，焦點才不會
+ * 掉到頁面最前面。
+ */
+export function focusTrigger(anchor: RefObject<HTMLElement | null>) {
+  anchor.current?.querySelector<HTMLElement>("[aria-haspopup]")?.focus();
 }
 
 /** 上下鍵在選項之間移動焦點。 */

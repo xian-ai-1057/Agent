@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import pathlib
+import sys
 
 import aiohttp
 import pytest
@@ -23,6 +24,7 @@ from harness import project as project_lib
 from harness import providers
 from harness import sandbox as sandbox_lib
 from harness.web import config as config_lib
+from harness.web import files as files_lib
 from harness.web import server as server_lib
 from harness.web import uploads as uploads_lib
 from harness.web import workspace as workspace_lib
@@ -110,6 +112,74 @@ class Harness:
             {"decision": decision},
         )
         return status
+
+
+BILLING = """---
+name: billing
+description: 處理帳單
+tools:
+  - plan
+---
+你處理帳單。
+"""
+
+HELPER_SKILL = """---
+name: helper
+description: 需要列計畫時使用
+tools:
+  - plan
+---
+照步驟列出計畫。
+"""
+
+
+def make_handoff_project(
+    root: pathlib.Path, extra: str = "", main_skills: bool = False
+) -> pathlib.Path:
+    """main 可以轉交給 billing（有 plan 工具）；skills/helper 帶 plan 工具。"""
+    make_project(root, extra)
+    skills = "skills:\n  - helper\n" if main_skills else "skills: []\n"
+    (root / "agents" / "main.md").write_text(
+        AGENT.replace("tools:", f"handoffs:\n  - billing\n{skills}tools:"),
+        encoding="utf-8",
+    )
+    (root / "agents" / "billing.md").write_text(BILLING, encoding="utf-8")
+    (root / "skills" / "helper").mkdir(parents=True)
+    (root / "skills" / "helper" / "SKILL.md").write_text(
+        HELPER_SKILL, encoding="utf-8"
+    )
+    return root
+
+
+def tool_names(request: dict) -> list[str]:
+    return [item["function"]["name"] for item in request["tools"]]
+
+
+@pytest.fixture
+async def start_handoff(tmp_path, fake_model):
+    """啟動 make_handoff_project 建立的專案；回傳啟動用的函式。"""
+    started = []
+
+    async def launch(script, extra="", main_skills=False):
+        root = make_handoff_project(
+            tmp_path / f"h{len(started)}", extra, main_skills
+        )
+        loaded = project_lib.load_project(root)
+        model = fake_model(script)
+        app = server_lib.create_app(loaded, model_fn=model)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        harness = Harness(client, root, model)
+        started.append((harness, loaded))
+        await harness.listen()
+        return harness
+
+    yield launch
+    for harness, loaded in started:
+        if harness._reader is not None:
+            harness._reader.cancel()
+        await harness.client.close()
+        loaded.close()
 
 
 @pytest.fixture
@@ -512,9 +582,22 @@ def test_packaged_frontend_is_present():
 
     assert index.exists(), "請在 repo 根目錄執行 npm run build"
     assets = server_lib.STATIC_DIR / "assets"
-    referenced = [p.name for p in assets.iterdir()]
-    html = index.read_text(encoding="utf-8")
-    assert all(name in html for name in referenced)
+    files = list(assets.iterdir())
+    # 字型等檔案由打包後的 CSS 引用，不會出現在 index.html 裡。
+    sources = {index: index.read_text(encoding="utf-8")}
+    sources.update(
+        (p, p.read_text(encoding="utf-8"))
+        for p in files
+        if p.suffix in (".css", ".js")
+    )
+    unused = [
+        p.name
+        for p in files
+        if not any(
+            p.name in text for source, text in sources.items() if source != p
+        )
+    ]
+    assert unused == []
 
 
 def test_cli_web_reports_port_in_use(tmp_path, capsys, monkeypatch):
@@ -1421,6 +1504,107 @@ class TestSessionOptions:
         assert h.model.requests[1]["model"] != "other-model"
         assert h.model.requests[1]["tools"]
 
+    async def test_tools_filter_stays_with_the_agent_it_was_set_for(
+        self, start_handoff
+    ):
+        h = await start_handoff(
+            [
+                conftest.tool_response(("transfer_to_billing", {})),
+                conftest.text_response("我是帳單助手"),
+                conftest.text_response("再回一次"),
+            ]
+        )
+        _, created = await h.api(
+            "POST",
+            "/sessions",
+            {"text": "帳單", "options": {"tools": ["read_file"]}},
+        )
+        await h.wait_for("run_end")
+        await h.api(
+            "POST", f"/sessions/{created['id']}/messages", {"text": "還有"}
+        )
+        await h.wait_for("run_end", lambda _: len(h.model.requests) == 3)
+
+        first, after_handoff, next_run = h.model.requests
+        assert "read_file" in tool_names(first)
+        assert "write_file" not in tool_names(first)
+        # 轉交後 billing 用自己的工具，不會因為 main 的清單變成沒有工具。
+        assert "update_plan" in tool_names(after_handoff)
+        assert "update_plan" in tool_names(next_run)
+        # main 的工具清單不適用 billing，網頁上不該顯示成限制。
+        _, detail = await h.api("GET", f"/sessions/{created['id']}")
+        assert detail["options"]["tools"] is None
+        # 轉交後設定的清單依 billing 的工具檢查，也套用在 billing。
+        status, options = await h.api(
+            "PUT",
+            f"/sessions/{created['id']}/options",
+            {"tools": ["update_plan"]},
+        )
+        assert status == 200
+        assert options["tools"] == ["update_plan"]
+
+    async def test_handoff_mid_run_keeps_model_and_skills(self, start_handoff):
+        h = await start_handoff(
+            [
+                conftest.tool_response(("transfer_to_billing", {})),
+                conftest.text_response("我是帳單助手"),
+            ],
+            extra="model: base-model\nmodels: [other-model]\n",
+        )
+
+        await h.api(
+            "POST",
+            "/sessions",
+            {
+                "text": "帳單",
+                "options": {"model": "other-model", "skills": ["planning"]},
+            },
+        )
+        await h.wait_for("run_end")
+
+        after_handoff = h.model.requests[1]
+        assert after_handoff["model"] == "other-model"
+        assert "load_skill" in tool_names(after_handoff)
+        assert "planning" in after_handoff["messages"][0]["content"]
+
+    async def test_chosen_skill_does_not_add_tools(self, start_handoff):
+        h = await start_handoff(
+            [
+                conftest.tool_response(("load_skill", {"name": "helper"})),
+                conftest.text_response("好"),
+            ]
+        )
+
+        await h.api(
+            "POST",
+            "/sessions",
+            {"text": "列計畫", "options": {"skills": ["helper"]}},
+        )
+        await h.wait_for("run_end")
+
+        assert "update_plan" not in tool_names(h.model.requests[1])
+
+    @pytest.mark.parametrize(
+        ("tools", "expected"), [(None, True), (["read_file"], False)]
+    )
+    async def test_loading_own_skill_respects_tools_filter(
+        self, start_handoff, tools, expected
+    ):
+        h = await start_handoff(
+            [
+                conftest.tool_response(("load_skill", {"name": "helper"})),
+                conftest.text_response("好"),
+            ],
+            main_skills=True,
+        )
+
+        await h.api(
+            "POST", "/sessions", {"text": "列計畫", "options": {"tools": tools}}
+        )
+        await h.wait_for("run_end")
+
+        assert ("update_plan" in tool_names(h.model.requests[1])) is expected
+
     async def test_put_options_changes_only_given_fields(self, start):
         h = await start([conftest.text_response("好")], extra="models: [m2]\n")
         _, created = await h.api("POST", "/sessions", {"text": "嗨"})
@@ -1691,6 +1875,39 @@ class TestFiles:
         assert status == 403
         assert escaped == 403
 
+    async def test_symlink_loop_is_not_a_server_error(self, start):
+        h = await start()
+        (h.root / "loop").symlink_to(h.root / "loop")
+        (h.root / "a.txt").write_text("a", encoding="utf-8")
+
+        status, entries = await h.api("GET", "/files/list")
+        served = await h.client.get("/api/files", params={"path": "loop"})
+        listed, _ = await h.api("GET", "/files/list?dir=loop")
+
+        assert status == 200
+        names = [item["name"] for item in entries]
+        assert "a.txt" in names
+        assert "loop" not in names
+        assert served.status == 404
+        assert listed == 404
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/etc/passwd", "\\\\host\\share\\x", "C:\\x", "C:x", "//host/x"],
+    )
+    def test_absolute_paths_are_refused_before_touching_disk(
+        self, tmp_path, monkeypatch, path
+    ):
+        def fail(*args):
+            raise AssertionError("不應該碰到檔案系統")
+
+        monkeypatch.setattr(files_lib.paths, "resolve_path", fail)
+
+        with pytest.raises(files_lib.FileError) as error:
+            files_lib.resolve(tmp_path, path)
+
+        assert error.value.status == 403
+
     async def test_missing_file_is_not_found(self, start):
         h = await start()
 
@@ -1747,6 +1964,55 @@ class TestFeedback:
         _, cleared = await h.api("GET", f"/sessions/{created['id']}")
         assert cleared["feedback"] == {}
 
+    async def test_reply_models_record_the_model_that_wrote_each_reply(
+        self, start
+    ):
+        h = await start(
+            [conftest.text_response("答案")], extra="models: [m2]\n"
+        )
+        _, created = await h.api(
+            "POST", "/sessions", {"text": "問題", "options": {"model": "m2"}}
+        )
+        await h.wait_for("run_end")
+        session = f"/sessions/{created['id']}"
+
+        # 之後換模型，不影響已經寫好的回覆記錄的模型。
+        await h.api("PUT", f"{session}/options", {"model": None})
+        await h.api(
+            "PUT",
+            f"{session}/feedback",
+            {"index": 1, "feedback": {"rating": "up"}},
+        )
+        _, detail = await h.api("GET", session)
+
+        assert detail["replyModels"] == {"1": "m2"}
+        log = (h.root / ".harness" / "feedback.jsonl").read_text("utf-8")
+        assert json.loads(log)["model"] == "m2"
+        with project_lib.load_project(h.root) as loaded:
+            fresh = workspace_lib.Workspace(loaded)
+            assert fresh.get_session(created["id"])["replyModels"] == {
+                "1": "m2"
+            }
+
+    async def test_feedback_log_omits_unknown_model(self, start):
+        h = await start([conftest.text_response("答案")])
+        _, created = await h.api("POST", "/sessions", {"text": "問題"})
+        await h.wait_for("run_end")
+        # 這個功能加入之前的對話沒有 replyModels。
+        meta_path = (
+            h.root / ".harness" / "sessions" / f"{created['id']}.meta.json"
+        )
+        meta = json.loads(meta_path.read_text("utf-8"))
+        meta.pop("replyModels")
+        meta_path.write_text(json.dumps(meta), "utf-8")
+
+        with project_lib.load_project(h.root) as loaded:
+            fresh = workspace_lib.Workspace(loaded)
+            fresh.set_feedback(created["id"], 1, {"rating": "down"})
+
+        log = (h.root / ".harness" / "feedback.jsonl").read_text("utf-8")
+        assert "model" not in json.loads(log)
+
     @pytest.mark.parametrize(
         "body",
         [
@@ -1769,3 +2035,22 @@ class TestFeedback:
         )
 
         assert status == 400
+
+
+def test_vision_lookup_never_imports_litellm(monkeypatch):
+    # litellm 還沒載入時，事件迴圈上不能自己 import（要好幾秒）。
+    monkeypatch.delitem(sys.modules, "litellm", raising=False)
+
+    assert workspace_lib._vision("openai/gpt-4o") is None
+    assert "litellm" not in sys.modules
+
+
+def test_refresh_project_tells_the_browser(tmp_path):
+    with project_lib.load_project(make_project(tmp_path / "r")) as loaded:
+        ws = workspace_lib.Workspace(loaded)
+        events = []
+        ws.subscribe(events.append)
+
+        ws.refresh_project()
+
+    assert events == [{"type": "project"}]

@@ -53,16 +53,25 @@ def resolve(root: pathlib.Path, path: str) -> pathlib.Path:
         解析過 symlink 的絕對路徑。
 
     Raises:
-        FileError: 路徑超出專案資料夾、指向金鑰資料夾，或含有以點開頭
-            的部分（隱藏檔、.harness/）。
+        FileError: 路徑是絕對路徑、超出專案資料夾、指向金鑰資料夾，或含
+            有以點開頭的部分（隱藏檔、.harness/）；或是解析不了（例如
+            symlink 互相指來指去）。
     """
     if "\x00" in path:
         raise FileError(400, "路徑不合法")
+    # 絕對路徑、磁碟代號與網路路徑（\\host\share）在碰到檔案系統之前就
+    # 擋下，避免網頁讓伺服器去讀專案外面或其他電腦上的位置。
+    if _absolute(path):
+        raise FileError(403, f"只能使用專案資料夾裡的相對路徑：{path}")
     context = datatypes.RunContext("", root, "")
     try:
         target = paths.resolve_path(context, path or ".")
     except ValueError as error:
         raise FileError(403, str(error)) from error
+    # symlink 形成循環時 resolve 會丟出 RuntimeError（Python 3.12 及更早）
+    # 或 OSError。
+    except (RuntimeError, OSError) as error:
+        raise FileError(404, f"找不到檔案或資料夾：{path}") from error
     relative = target.relative_to(root.resolve())
     requested = pathlib.PurePosixPath(path.replace("\\", "/"))
     if _hidden(relative.parts) or _hidden(requested.parts):
@@ -88,8 +97,12 @@ def list_dir(root: pathlib.Path, directory: str) -> list[dict[str, Any]]:
     if not target.is_dir():
         raise FileError(404, f"找不到資料夾：{directory}")
     base = target.relative_to(root.resolve())
+    try:
+        children = list(target.iterdir())
+    except OSError as error:
+        raise FileError(403, f"不能讀取資料夾：{directory}") from error
     entries = []
-    for child in target.iterdir():
+    for child in children:
         relative = (base / child.name).as_posix()
         try:
             resolve(root, relative)
@@ -154,6 +167,16 @@ def content_type_of(name: str) -> str:
     if guessed.startswith("text/"):
         return f"{guessed}; charset=utf-8"
     return guessed
+
+
+def _absolute(path: str) -> bool:
+    """路徑是否為絕對路徑，或帶有磁碟代號、網路路徑等開頭。"""
+    windows = pathlib.PureWindowsPath(path)
+    return (
+        pathlib.PurePosixPath(path).is_absolute()
+        or bool(windows.drive or windows.anchor)
+        or path.startswith(("\\", "//"))
+    )
 
 
 def _hidden(parts: tuple[str, ...]) -> bool:

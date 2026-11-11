@@ -311,32 +311,54 @@ export function Composer({
 
 /** 移除標籤前先播完淡出（減少動態效果時直接移除）。 */
 const CHIP_EXIT_MS = 140;
+/** 「已停用 N 個工具」標籤的 key（skill 名稱不會以冒號開頭）。 */
+const TOOLS_CHIP = ":tools";
 
 /** 選了的 skills 與停用的工具，顯示成可以移除的小標籤。 */
 function OptionChips({ options }: { options: ComposerOptions }) {
   const [leaving, setLeaving] = useState<string[]>([]);
+  // 淡出後才真的移除。連續移除好幾個時，每次都要從最新的選項算起，
+  // 而且要扣掉所有已經移除的 skill，前一個才不會又跑回來。
+  const latest = useRef(options);
+  latest.current = options;
+  const removed = useRef(new Set<string>());
   const { value, tools } = options;
+  useEffect(() => {
+    // 選項裡已經沒有的就不用再記；之後重新加回來也不會被擋掉。
+    for (const name of removed.current) {
+      if (!value.skills.includes(name)) removed.current.delete(name);
+    }
+  }, [value.skills]);
   const disabled =
     value.tools === null
       ? 0
       : tools.filter((tool) => !value.tools?.includes(tool.name)).length;
   if (value.skills.length === 0 && disabled === 0) return null;
 
-  const remove = (
-    key: string,
-    change: Parameters<typeof options.onChange>[0],
-  ) => {
+  const apply = (key: string) => {
+    const current = latest.current;
+    if (key === TOOLS_CHIP) {
+      current.onChange({ tools: null });
+      return;
+    }
+    current.onChange({
+      skills: current.value.skills.filter((item) => !removed.current.has(item)),
+    });
+  };
+
+  const remove = (key: string) => {
+    if (key !== TOOLS_CHIP) removed.current.add(key);
     const reduce = window.matchMedia?.(
       "(prefers-reduced-motion: reduce)",
     ).matches;
     if (reduce) {
-      options.onChange(change);
+      apply(key);
       return;
     }
     setLeaving((items) => [...items, key]);
     setTimeout(() => {
       setLeaving((items) => items.filter((item) => item !== key));
-      options.onChange(change);
+      apply(key);
     }, CHIP_EXIT_MS);
   };
 
@@ -352,11 +374,7 @@ function OptionChips({ options }: { options: ComposerOptions }) {
           <button
             type="button"
             aria-label={`移除 skill ${name}`}
-            onClick={() =>
-              remove(name, {
-                skills: value.skills.filter((item) => item !== name),
-              })
-            }
+            onClick={() => remove(name)}
           >
             <CloseIcon size={12} />
           </button>
@@ -364,13 +382,13 @@ function OptionChips({ options }: { options: ComposerOptions }) {
       ))}
       {disabled > 0 && (
         <li
-          className={`ch-chip${leaving.includes(":tools") ? " leaving" : ""}`}
+          className={`ch-chip${leaving.includes(TOOLS_CHIP) ? " leaving" : ""}`}
         >
           <span className="ch-chip-name">已停用 {disabled} 個工具</span>
           <button
             type="button"
             aria-label="恢復使用全部工具"
-            onClick={() => remove(":tools", { tools: null })}
+            onClick={() => remove(TOOLS_CHIP)}
           >
             <CloseIcon size={12} />
           </button>

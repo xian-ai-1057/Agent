@@ -33,6 +33,8 @@ const LANGUAGE_NAMES: Record<string, string> = {
   sql: "SQL",
   md: "Markdown",
   markdown: "Markdown",
+  // KaTeX 還沒載入（或回覆還在串流）時，$$…$$ 先顯示成原文。
+  math: "數學式",
 };
 
 export function CodeBlock({

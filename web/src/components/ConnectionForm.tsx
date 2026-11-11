@@ -18,9 +18,12 @@ import { CheckIcon } from "./Icons.tsx";
 export function ConnectionForm({
   project,
   connection,
+  secondary = false,
 }: {
   project: ProjectInfo;
   connection: ConnectionInfo;
+  /** 畫面上已經有另一個主要（紅色）按鈕時，送出按鈕改用外框樣式。 */
+  secondary?: boolean;
 }) {
   const { env } = project.model;
   const agent = project.agents.find((a) => a.name === project.defaultAgent);
@@ -169,7 +172,7 @@ export function ConnectionForm({
       <div className="connection-actions">
         <button
           type="submit"
-          className="btn btn-accent"
+          className={`btn ${secondary ? "btn-outline" : "btn-accent"}`}
           disabled={state === "saving"}
         >
           {state === "saving" ? "正在測試連線…" : "測試連線並儲存"}
