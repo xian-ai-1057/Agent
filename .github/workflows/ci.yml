@@ -1,0 +1,65 @@
+# 每次開 PR、更新 PR，以及推到 main 時自動檢查。
+# 任何一個 job 失敗，PR 頁面就會顯示紅色叉叉。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一個 PR 連續推送時，取消舊的那次，只跑最新的。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    name: TypeScript（lint、型別、測試、建置）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # 打包好的前端要跟著 Python 原始碼進版控（見 web/sync-python.mjs）。
+      # 改了前端卻忘了重新建置並提交時，這一步會失敗。
+      - name: 確認 python/src/harness/web/static 是最新的
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "建置後有檔案變動，請在本機執行 npm run build 並提交："
+            git status --porcelain
+            exit 1
+          fi
+
+  python:
+    name: Python ${{ matrix.python-version }}（ruff、pytest）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 是 pyproject.toml 的最低版本；3.12 是 Dockerfile 用的版本。
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: python/pyproject.toml
+      - run: pip install -e ".[dev,pdf,vectors]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest
