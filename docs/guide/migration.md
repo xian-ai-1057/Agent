@@ -4,16 +4,16 @@
 agent 透過工具使用它的功能的情況。目標：原本的程式碼幾乎不動，只在
 外面加一層。
 
-從零開始建立新的 agent，請直接看 [README 的快速開始](../README.md#快速開始)。
+從零開始建立新的 agent，請直接看 [快速開始](/guide/quickstart)。
 
-完整的例子在 [`examples/report_bot`](../examples/report_bot)：
+完整的例子在 [`examples/report_bot`](https://github.com/xian-ai-1057/AgentHarness/tree/main/examples/report_bot)：
 `legacy/` 是「原本就存在」的 Python 程式碼，`tools/` 是新加的那一層。
 
 ## 先選版本
 
 | 你的專案 | 建議 | 工具怎麼寫 |
 |---|---|---|
-| Python | [Python 版](../python/README.md)（`pyharness`） | `tools/*.py`，函式加 `@harness.tool` |
+| Python | [Python 版](/guide/introduction#兩個版本)（`pyharness`） | `tools/*.py`，函式加 `@harness.tool` |
 | Python，但要和 TypeScript 專案共用同一套 agent | TypeScript 版（`harness`） | Python 端寫 MCP 伺服器 |
 | TypeScript / Node.js | TypeScript 版（`harness`） | `tools/*.ts` |
 
@@ -47,7 +47,7 @@ cd my_project
 pyharness new .
 ```
 
-TypeScript 版：先依[根目錄 README 的「安裝」](../README.md#安裝)裝好
+TypeScript 版：先依[安裝](/guide/install)裝好
 `harness` 指令，然後：
 
 ```bash
@@ -179,7 +179,7 @@ tools: [reports]
 原本的專案如果有好幾個各司其職的流程（例如先分類問題、再交給不同的
 處理程式），可以拆成多個 agent，用 subagents 或 handoffs 串起來。目前
 只有 Python 版支援，寫法見
-[Python 版 README](../python/README.md#多個-agent-協作)。
+[多個 agent 協作](/advanced/multi-agent)。
 
 ### 5. 測試
 
@@ -189,7 +189,7 @@ pyharness chat      # 或 harness chat
 
 工具本身是普通的 Python 函式，可以直接用 pytest 測試。Python 版要測試
 「agent 加工具」的整體行為而不花錢呼叫模型，可以用假的模型函式，寫法見
-[`python/tests/test_example_report_bot.py`](../python/tests/test_example_report_bot.py)。
+[`python/tests/test_example_report_bot.py`](https://github.com/xian-ai-1057/AgentHarness/blob/main/python/tests/test_example_report_bot.py)。
 
 TypeScript 版的工具伺服器啟動失敗時，harness 會顯示它的錯誤訊息（通常
 是 import 錯誤或少裝套件）。要看伺服器執行期間的完整 log：
@@ -235,7 +235,7 @@ mcpServers:
 
 既有專案已經有 Python 網頁介面（FastAPI、Streamlit、Flask）時，用
 Python 版直接在請求處理函式裡呼叫 `harness.run_stream(...)`，寫法見
-[Python 版 README](../python/README.md#嵌進既有的網頁服務)。Node.js 服務
+[嵌進既有的網頁服務](/guide/embed#嵌進既有的網頁服務)。Node.js 服務
 則用 TypeScript 版的 `runStream`。
 
 ## 其他語言的專案

@@ -9,8 +9,9 @@ MCP 伺服器給它工具，再從命令列、網頁或自己的程式裡和它�
 
 提供 TypeScript 與 Python 兩個實作，共用同一種專案格式。
 
-想先快速瀏覽所有功能：打開 [`docs/index.html`](docs/index.html)（單一
-靜態網頁，附網頁版截圖，也可以直接用 GitHub Pages 發佈 `docs/` 資料夾）。
+完整的說明文件是 `docs/` 裡的多頁網站（VitePress），在本機預覽：
+`cd docs && npm install && npm run dev`。部署到 Vercel 的方式見
+[docs/README.md](docs/README.md)。
 
 ## 快速部署
 
@@ -69,6 +70,10 @@ litellm 直接連各家供應商。換模型只要改設定，不用改程式。
 
 **進階能力（Python 版）。** 多個 agent 協作、知識庫（RAG）、skills、
 長期記憶、訊息防護、對話壓縮。
+
+**部署後就能用（Python 版）。** `docker compose up -d` 啟動後在網頁上
+填模型金鑰即可；agent 寫的 Python 程式在隔離的 Docker 沙盒裡執行，可以
+上傳 Excel、PDF 請它分析；有登入密碼，能架在伺服器上給團隊使用。
 
 ## 兩個版本
 
@@ -303,6 +308,7 @@ tools:
 | `shell` | `run_command` | 在專案資料夾執行指令（測試、建置、git…），回傳結束代碼與輸出 | ✓ |
 | `plan` | `update_plan` | 列出多步驟工作的計畫並更新每一步的狀態 | |
 | `web` | `web_fetch` | 讀取網址，HTML 轉成保留標題、清單與連結的純文字 | ✓ |
+| `sandbox`（僅 Python 版） | `run_python` | 在拋棄式 Docker 容器裡執行 agent 寫的 Python 程式，預設沒有網路；`harness.yaml` 要有 `sandbox` 設定，見[在沙盒裡執行程式](python/README.md#在沙盒裡執行程式) | |
 
 ```markdown
 ---
@@ -606,12 +612,20 @@ harness web --port 8080     # 換埠號
 - **出錯與重試**：連不上模型時顯示原因，修好後按重試，從原本的訊息
   接著跑，不會重複送出。
 - **設定**：修改模型名稱、`maxTurns`、權限模式與規則，儲存時寫回
-  `harness.yaml` 並保留原本的註解。端點網址與金鑰來自環境變數，網頁
-  上只顯示狀態。
+  `harness.yaml` 並保留原本的註解。TypeScript 版的端點網址與金鑰來自
+  環境變數，網頁上只顯示狀態；Python 版可以直接在網頁上選供應商、填
+  金鑰，測試連線成功才儲存（見
+  [在網頁上連接模型](python/README.md#在網頁上連接模型)）。
+
+Python 版的 `pyharness web` 另外支援：
+[上傳檔案](python/README.md#上傳檔案)（迴紋針、拖曳或貼上）、在空資料夾
+執行時自動建立可以直接使用的助手，以及登入密碼與 `--allowed-host`
+（見[部署到伺服器](python/README.md#部署到伺服器)）。
 
 伺服器可以執行專案的工具，所以預設只接受本機連線，並拒絕其他網站
-送來的請求。要讓別台電腦連線時，用 `--host 0.0.0.0` 並自行加上防火牆
-或反向代理的保護。
+送來的請求。TypeScript 版沒有登入機制，要讓別台電腦連線時，用
+`--host 0.0.0.0` 並自行加上防火牆或反向代理的保護；要架給團隊使用，
+建議用 Python 版的[快速部署](#快速部署)。
 
 修改網頁時，先在專案資料夾執行 `harness web`（或 `pyharness web`），
 再在這個 repo 執行 `npm run dev:web`，Vite 會把 `/api` 轉給它。原始碼
@@ -625,7 +639,7 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 ## 為既有專案加上 agent
 
 已經有一套程式碼，想讓 agent 透過工具使用它的功能：見
-[docs/MIGRATION.md](docs/MIGRATION.md)。
+[docs/guide/migration.md](docs/guide/migration.md)。
 
 ## 閱讀原始碼
 
@@ -644,8 +658,9 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 
 Python 版（`python/src/harness/`）的結構相同（`loop.py`、`llm.py`、
 `tools.py`…），另外多了多個 agent 協作（`delegation.py`）、知識庫
-（`knowledge.py`）、對話壓縮（`compaction.py`）等進階功能，可以在讀懂
-主迴圈之後再看。
+（`knowledge.py`）、對話壓縮（`compaction.py`）、沙盒（`sandbox.py`）、
+網頁上設定的模型金鑰（`credentials.py`、`providers.py`）等進階功能，
+可以在讀懂主迴圈之後再看。
 
 ## 設計來源
 
@@ -674,6 +689,12 @@ Python 版（`python/src/harness/`）的結構相同（`loop.py`、`llm.py`、
   - 訊息防護（個資遮蔽、提示注入偵測）
   - 對話過長時的自動壓縮（Python 版壓縮過的對話，TypeScript 版可以
     接著用）
+  - 在 Docker 沙盒裡執行 agent 寫的程式（agent 的 `tools` 列了
+    `sandbox` 時，TypeScript 版會因為找不到它而無法載入）
+  - 網頁版的登入密碼、上傳檔案、在網頁上連接模型、自動建立助手專案、
+    Docker Compose 部署
 - Slack / Telegram 等訊息平台的接口（兩個版本都還沒有）
+- 網頁版沒有分帳號：所有登入的人共用同一組密碼、看得到同樣的對話與
+  上傳的檔案
 - 網頁上的對話在伺服器重新啟動後可以繼續看與接著問，但「工作中」只
   列出這次啟動後跑過的對話（兩個版本的網頁版都一樣）

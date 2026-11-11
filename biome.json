@@ -7,7 +7,9 @@
       "!node_modules",
       "!package-lock.json",
       "!**/*.md",
-      "!python/src/harness/web/static"
+      "!python/src/harness/web/static",
+      "!docs/.vitepress/dist",
+      "!docs/.vitepress/cache"
     ]
   },
   "formatter": {
