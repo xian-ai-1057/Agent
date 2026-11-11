@@ -27,6 +27,7 @@ from harness import llm
 from harness import loop
 from harness import permissions as permissions_lib
 from harness import project as project_lib
+from harness import sandbox as sandbox_lib
 from harness import sessions as sessions_lib
 from harness import tools as tools_lib
 from harness.builtin import files
@@ -142,7 +143,8 @@ class Workspace:
             "toolsets": [
                 {
                     "name": name,
-                    "builtin": name in builtin.TOOLSETS,
+                    "builtin": name in builtin.TOOLSETS
+                    or name == sandbox_lib.TOOLSET,
                     "tools": [_tool_info(item) for item in items],
                 }
                 for name, items in project.toolsets.items()

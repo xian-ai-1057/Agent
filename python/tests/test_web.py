@@ -5,6 +5,7 @@ API 與事件格式要和 TypeScript 版完全相同，兩個版本共用同一�
 """
 
 import asyncio
+import base64
 import json
 import pathlib
 
@@ -631,3 +632,122 @@ async def test_blocked_message_keeps_notice_in_summary(tmp_path, fake_model):
     assert end["stopReason"] == "blocked"
     assert detail["summary"]["notice"]
     assert model.requests == []
+
+
+class TestServerDeployment:
+    """架在伺服器上：登入密碼、允許的主機名稱與反向代理。"""
+
+    @pytest.fixture
+    async def client(self, tmp_path):
+        """依參數建立伺服器的函式，回傳 TestClient。"""
+        made = []
+
+        async def make(**options):
+            loaded = project_lib.load_project(make_project(tmp_path / "srv"))
+            app = server_lib.create_app(loaded, **options)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            made.append((client, loaded))
+            return client
+
+        yield make
+        for client, loaded in made:
+            await client.close()
+            loaded.close()
+
+    @staticmethod
+    def _login(password, user="anyone"):
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        return {"Authorization": f"Basic {token}"}
+
+    async def test_password_is_required_for_every_path(self, client):
+        c = await client(password="s3cret")
+
+        for path in ("/", "/api/project", "/api/events"):
+            response = await c.get(path)
+            assert response.status == 401
+            assert response.headers["WWW-Authenticate"].startswith("Basic ")
+
+    async def test_wrong_password_is_rejected(self, client, monkeypatch):
+        monkeypatch.setattr(server_lib, "_FAILED_LOGIN_DELAY", 0)
+        c = await client(password="s3cret")
+
+        response = await c.get("/api/project", headers=self._login("nope"))
+
+        assert response.status == 401
+
+    async def test_any_user_name_with_right_password_gets_in(self, client):
+        c = await client(password="s3cret")
+
+        response = await c.get(
+            "/api/project", headers=self._login("s3cret", user="王小明")
+        )
+
+        assert response.status == 200
+        assert (await response.json())["name"] == "web_demo"
+
+    async def test_with_password_any_host_is_accepted(self, client):
+        c = await client(password="s3cret", host="0.0.0.0")
+
+        response = await c.get(
+            "/api/project",
+            headers={**self._login("s3cret"), "Host": "10.0.0.5:4321"},
+        )
+
+        assert response.status == 200
+
+    async def test_allowed_hosts_limit_the_host_header(self, client):
+        c = await client(password="s3cret", allowed_hosts=["ai.example.com"])
+        login = self._login("s3cret")
+
+        allowed = await c.get(
+            "/api/project", headers={**login, "Host": "AI.example.com"}
+        )
+        other = await c.get(
+            "/api/project", headers={**login, "Host": "evil.example"}
+        )
+
+        assert allowed.status == 200
+        assert other.status == 403
+
+    async def test_https_reverse_proxy_origin_is_accepted(self, client):
+        c = await client(password="s3cret", allowed_hosts=["ai.example.com"])
+        headers = {
+            **self._login("s3cret"),
+            "Host": "ai.example.com",
+            "Origin": "https://ai.example.com",
+        }
+
+        # 不存在的對話：通過安全檢查後才會得到 404。
+        path = "/api/sessions/missing/stop"
+        response = await c.post(path, json={}, headers=headers)
+        foreign = await c.post(
+            path, json={}, headers={**headers, "Origin": "https://evil.example"}
+        )
+
+        assert response.status == 404
+        assert foreign.status == 403
+
+    @pytest.mark.parametrize(
+        "options",
+        [{"host": "0.0.0.0"}, {"allowed_hosts": ["ai.example.com"]}],
+    )
+    async def test_serving_to_others_requires_a_password(
+        self, tmp_path, options
+    ):
+        loaded = project_lib.load_project(make_project(tmp_path / "open"))
+
+        with pytest.raises(ValueError, match="HARNESS_WEB_PASSWORD"):
+            await server_lib.serve(loaded, port=0, **options)
+        loaded.close()
+
+    def test_cli_refuses_public_host_without_password(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.delenv("HARNESS_WEB_PASSWORD", raising=False)
+        root = make_project(tmp_path / "cli")
+
+        code = cli.main(["web", "-p", str(root), "--host", "0.0.0.0"])
+
+        assert code == 1
+        assert "HARNESS_WEB_PASSWORD" in capsys.readouterr().err

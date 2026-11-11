@@ -7,14 +7,19 @@
     ├── agents/*.md     一個檔案一個 agent：frontmatter 是設定，內文是指示
     ├── tools/*.py      用 @tool 包裝的函式，檔名就是 toolset 名稱
     ├── skills/*/       一個資料夾一個 skill（SKILL.md 加參考檔案）
-    └── knowledge/      知識庫文件（.md、.txt、.pdf）
+    ├── knowledge/      知識庫文件（.md、.txt、.pdf）
+    └── workspace/      沙盒（sandbox）掛載的資料夾，名稱可以設定
 
 agent 的 frontmatter 可以用 subagents 與 handoffs 列出其他 agent 的名稱，
 讓它把工作交出去或把對話轉交出去（見 delegation 模組）；用 skills 列出
 可用的 skill；用 knowledge 掛上知識庫。
 
-skills、knowledge、memory、guardrails、compaction 只有 Python 版支援，
-TypeScript 版會忽略這些設定。
+skills、knowledge、memory、guardrails、compaction、sandbox 只有 Python 版
+支援，TypeScript 版會忽略這些設定。
+
+harness.yaml 有 sandbox 區塊時，提供內建的 sandbox toolset（在 Docker
+容器裡執行 Python 程式）。它和 files 一樣，agent 要在 tools 明確列出才能
+使用。
 
 harness.yaml 的 mcpServers 會在載入時啟動並連線，伺服器名稱就是 toolset
 名稱；用完專案要呼叫 Project.close()（或用 with）。被 mcpServers 當成伺服器
@@ -40,6 +45,7 @@ from harness import knowledge as knowledge_lib
 from harness import mcp_servers
 from harness import memory as memory_lib
 from harness import permissions as permissions_lib
+from harness import sandbox as sandbox_lib
 from harness import skills as skills_lib
 from harness import tools as tools_lib
 
@@ -67,6 +73,8 @@ class Project:
         memory: 長期記憶，harness.yaml 沒有開啟 memory 時為 None。
         hooks: 依 guardrails 設定建立的 hooks，執行時傳給 run；也可以
             再加上自己的處理函式。
+        sandbox: 執行 Python 程式的 Docker 沙盒，harness.yaml 沒有設定
+            sandbox 時為 None。
         compaction: 對話壓縮的設定，預設開啟；harness.yaml 寫
             compaction: false 時為 None。
         mcp_connections: 依 mcpServers 建立的 MCP 連線。
@@ -87,6 +95,7 @@ class Project:
     memory: memory_lib.MemoryStore | None = None
     hooks: hooks_lib.Hooks = dataclasses.field(default_factory=hooks_lib.Hooks)
     compaction: compaction_lib.Compaction | None = None
+    sandbox: sandbox_lib.Sandbox | None = None
     mcp_connections: list[mcp_servers.McpConnection] = dataclasses.field(
         default_factory=list
     )
@@ -160,6 +169,15 @@ def _assemble(
         if set_name not in builtin.TOOLSETS
         for item in items
     }
+    # 沙盒和內建的 files 一樣不算專案工具：agent 要明確列出才能使用。
+    sandbox = sandbox_lib.from_config(root, config.get("sandbox"))
+    if sandbox is not None:
+        if sandbox_lib.TOOLSET in toolsets:
+            raise ValueError(
+                f"toolset 名稱 {sandbox_lib.TOOLSET} 保留給沙盒，請改掉 "
+                f"tools/{sandbox_lib.TOOLSET}.py 或 mcpServers 裡同名的伺服器"
+            )
+        toolsets[sandbox_lib.TOOLSET] = sandbox.tools()
 
     project_skills = _load_skills(root, toolsets, project_tools)
     knowledge = _load_knowledge(root, config.get("knowledge"))
@@ -193,6 +211,7 @@ def _assemble(
         else None,
         hooks=_load_guardrails(config.get("guardrails") or {}),
         compaction=_load_compaction(config.get("compaction")),
+        sandbox=sandbox,
         mcp_connections=connections,
         toolsets=toolsets,
     )
@@ -252,6 +271,10 @@ def resolve_tools(
             found = toolsets[name]
         elif name in project_tools:
             found = [project_tools[name]]
+        elif name == sandbox_lib.TOOLSET:
+            raise ValueError(
+                f"要使用 {name}，請先在 {CONFIG_FILE} 加上 sandbox 設定"
+            )
         else:
             known = sorted({*toolsets, *project_tools})
             raise ValueError(f"找不到工具或 toolset：{name}，可用的有：{known}")
