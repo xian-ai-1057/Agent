@@ -155,7 +155,7 @@ export function NewChat() {
 
           <div className="anim-in" style={{ animationDelay: "0.06s" }}>
             <Composer
-              placeholder={`要 ${agent.name} 做什麼？`}
+              placeholder="問點什麼，或交代一件工作"
               busy={Boolean(sending)}
               rows={3}
               autoFocus
