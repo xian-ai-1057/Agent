@@ -5,12 +5,13 @@
  * 文字段落與「步驟群組」（連續的工具呼叫收在一起，可以展開收合）。
  */
 
-import type {
-  Approval,
-  FilePreview,
-  Message,
-  SessionDetail,
-  SubagentStep,
+import {
+  type Approval,
+  ATTACHMENT_MARKER,
+  type FilePreview,
+  type Message,
+  type SessionDetail,
+  type SubagentStep,
 } from "../../src/web/protocol.ts";
 
 export type StepStatus =
@@ -44,6 +45,8 @@ export interface Turn {
   key: string;
   /** 使用者訊息；從紀錄中間開始（例如重試）時可能沒有。 */
   user?: string;
+  /** 使用者訊息附上的檔案路徑。 */
+  attachments: string[];
   blocks: Block[];
   files: FileChange[];
 }
@@ -82,7 +85,7 @@ export function buildTurns(
 
   const current = (): Turn => {
     if (!turn) {
-      turn = { key: "t0", blocks: [], files: [] };
+      turn = { key: "t0", blocks: [], files: [], attachments: [] };
       turns.push(turn);
     }
     return turn;
@@ -102,9 +105,11 @@ export function buildTurns(
       return;
     }
     if (message.role === "user") {
+      const { text, attachments } = splitAttachments(message.content ?? "");
       turn = {
         key: `t${index}`,
-        user: message.content ?? "",
+        user: text,
+        attachments,
         blocks: [],
         files: [],
       };
@@ -172,6 +177,24 @@ export function buildTurns(
     }
   }
   return turns;
+}
+
+/**
+ * 把使用者訊息拆成文字與附件。伺服器把附件接在訊息最後，每個一行，
+ * 以 ATTACHMENT_MARKER 開頭，路徑之後可能還有給模型的說明。
+ */
+export function splitAttachments(content: string): {
+  text: string;
+  attachments: string[];
+} {
+  const lines = content.split("\n");
+  const attachments: string[] = [];
+  while (lines.at(-1)?.startsWith(ATTACHMENT_MARKER)) {
+    const line = lines.pop() ?? "";
+    const path = line.slice(ATTACHMENT_MARKER.length).split(/[\s（(]/)[0];
+    if (path) attachments.unshift(path);
+  }
+  return { text: lines.join("\n").trimEnd(), attachments };
 }
 
 /** 一段對話裡所有的檔案變更，同一個路徑只留最新的一次。 */

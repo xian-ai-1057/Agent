@@ -9,6 +9,7 @@ import base64
 import json
 import pathlib
 
+import aiohttp
 import pytest
 import yaml
 from aiohttp.test_utils import TestClient
@@ -18,6 +19,7 @@ from harness import cli
 from harness import project as project_lib
 from harness.web import config as config_lib
 from harness.web import server as server_lib
+from harness.web import uploads as uploads_lib
 from tests import conftest
 
 CONFIG = """# 測試專案
@@ -751,3 +753,197 @@ class TestServerDeployment:
 
         assert code == 1
         assert "HARNESS_WEB_PASSWORD" in capsys.readouterr().err
+
+
+class TestUploads:
+    """網頁上傳檔案與訊息附件。"""
+
+    @pytest.fixture
+    async def server(self, tmp_path, fake_model):
+        """啟動伺服器；回傳 (TestClient, 專案根目錄, 假模型) 的建立函式。"""
+        made = []
+
+        async def make(script=None, config="", **options):
+            root = make_project(tmp_path / f"up{len(made)}")
+            if config:
+                (root / "harness.yaml").write_text(CONFIG + config)
+            loaded = project_lib.load_project(root)
+            model = fake_model(script or [])
+            app = server_lib.create_app(loaded, model_fn=model, **options)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            made.append((client, loaded))
+            return client, root, model
+
+        yield make
+        for client, loaded in made:
+            await client.close()
+            loaded.close()
+
+    @staticmethod
+    async def _upload(client, *files, headers=None):
+        form = aiohttp.FormData()
+        for name, content in files:
+            form.add_field("file", content, filename=name)
+        response = await client.post(
+            "/api/uploads",
+            data=form,
+            headers={"X-Harness-Upload": "1"} if headers is None else headers,
+        )
+        return response.status, await response.json()
+
+    async def test_upload_saves_files_under_workspace(self, server):
+        client, root, _ = await server()
+
+        status, body = await self._upload(
+            client, ("十月 業績.xlsx", b"excel"), ("notes.txt", b"hi")
+        )
+
+        assert status == 201
+        assert body["files"] == [
+            {
+                "name": "十月_業績.xlsx",
+                "path": "workspace/uploads/十月_業績.xlsx",
+                "size": 5,
+            },
+            {
+                "name": "notes.txt",
+                "path": "workspace/uploads/notes.txt",
+                "size": 2,
+            },
+        ]
+        assert (
+            root / "workspace/uploads/十月_業績.xlsx"
+        ).read_bytes() == b"excel"
+
+    async def test_same_name_gets_a_number(self, server):
+        client, _, _ = await server()
+
+        await self._upload(client, ("a.csv", b"1"))
+        _, body = await self._upload(client, ("a.csv", b"2"))
+
+        assert body["files"][0]["path"] == "workspace/uploads/a-2.csv"
+
+    async def test_large_file_streams_past_json_body_limit(self, server):
+        client, root, _ = await server(max_upload_bytes=3 * 1024 * 1024)
+        content = b"x" * (2 * 1024 * 1024)
+
+        status, _ = await self._upload(client, ("big.bin", content))
+
+        assert status == 201
+        assert (root / "workspace/uploads/big.bin").stat().st_size == len(
+            content
+        )
+
+    async def test_file_over_limit_is_rejected_and_removed(self, server):
+        client, root, _ = await server(max_upload_bytes=1024)
+
+        status, body = await self._upload(client, ("big.bin", b"x" * 2048))
+
+        assert status == 413
+        assert "超過上限" in body["error"]
+        assert list((root / "workspace/uploads").iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "headers",
+        [{}, {"X-Harness-Upload": "1", "Origin": "https://evil.example"}],
+    )
+    async def test_cross_site_uploads_are_rejected(self, server, headers):
+        client, root, _ = await server()
+
+        status, _ = await self._upload(client, ("a.txt", b"x"), headers=headers)
+
+        assert status == 403
+        assert not (root / "workspace/uploads").exists()
+
+    async def test_attachments_are_described_in_the_message(self, server):
+        client, root, model = await server(
+            [conftest.text_response("收到")],
+            config="sandbox:\n  workspace: data\n",
+        )
+        _, body = await self._upload(client, ("sales.csv", b"a,b"))
+
+        status, created = await _post(
+            client,
+            "/api/sessions",
+            {"text": "幫我分析", "attachments": [body["files"][0]["path"]]},
+        )
+        await _wait_idle(client, created["id"])
+
+        assert status == 201
+        user = model.requests[0]["messages"][-1]["content"]
+        assert user == (
+            "幫我分析\n\n[附件] data/uploads/sales.csv"
+            "（run_python 裡的路徑：/workspace/uploads/sales.csv）"
+        )
+
+    async def test_attachments_alone_are_enough(self, server):
+        client, _, model = await server([conftest.text_response("收到")])
+        _, body = await self._upload(client, ("報告.pdf", b"%PDF"))
+
+        status, created = await _post(
+            client,
+            "/api/sessions",
+            {"text": "", "attachments": [body["files"][0]["path"]]},
+        )
+        await _wait_idle(client, created["id"])
+
+        assert status == 201
+        assert created["title"] == "報告.pdf"
+        user = model.requests[0]["messages"][-1]["content"]
+        assert user == "[附件] workspace/uploads/報告.pdf"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "harness.yaml",
+            "workspace/uploads/../../harness.yaml",
+            "workspace/uploads/none.txt",
+        ],
+    )
+    async def test_only_uploaded_files_can_be_attached(self, server, path):
+        client, _, _ = await server()
+
+        status, body = await _post(
+            client, "/api/sessions", {"text": "看看", "attachments": [path]}
+        )
+
+        assert status == 400
+        assert "上傳的檔案" in body["error"]
+
+    async def test_project_info_advertises_uploads(self, server):
+        client, _, _ = await server(max_upload_bytes=1234)
+
+        response = await client.get("/api/project")
+
+        assert (await response.json())["uploads"] == {"maxBytes": 1234}
+
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            ("../../etc/passwd", "passwd"),
+            ("C:\\Users\\me\\報表 (1).xlsx", "報表_(1).xlsx"),
+            (".env", "env"),
+            ("", "file"),
+            ("%E5%A0%B1%E5%91%8A.pdf", "報告.pdf"),
+            ("a" * 200 + ".csv", "a" * 96 + ".csv"),
+        ],
+    )
+    def test_safe_name(self, given, expected):
+        assert uploads_lib.safe_name(given) == expected
+
+
+async def _post(client, path, body):
+    response = await client.post(path, json=body)
+    return response.status, await response.json()
+
+
+async def _wait_idle(client, session_id):
+    """等這段對話跑完。"""
+    async with asyncio.timeout(3):
+        while True:
+            response = await client.get(f"/api/sessions/{session_id}")
+            detail = await response.json()
+            if detail["summary"]["status"] != "running":
+                return detail
+            await asyncio.sleep(0.02)

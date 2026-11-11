@@ -2,6 +2,7 @@
 
     /api/...       JSON API，和 TypeScript 版完全相同
     /api/events    SSE，推送 Workspace 的所有事件
+    /api/uploads   上傳檔案（Python 版才有，multipart/form-data）
     其他路徑        打包好的前端（static/）
 
 伺服器可以執行專案的工具，所以預設只聽 127.0.0.1，並檢查 Host 與
@@ -22,10 +23,12 @@ import urllib.parse
 from collections.abc import Iterable
 from typing import Any
 
+from aiohttp import BodyPartReader
 from aiohttp import web
 
 from harness import llm
 from harness import project as project_lib
+from harness.web import uploads as uploads_lib
 from harness.web import workspace as workspace_lib
 
 DEFAULT_PORT = 4321
@@ -37,6 +40,11 @@ _LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
 # 密碼錯誤時多等一下，拖慢暴力猜密碼。
 _FAILED_LOGIN_DELAY = 1.0
 _REALM = 'Basic realm="Harness", charset="UTF-8"'
+UPLOAD_PATH = "/api/uploads"
+# 上傳必須帶這個標頭：自訂標頭會觸發 CORS 預檢，其他網站的表單或
+# 腳本因此無法借用使用者的登入狀態上傳檔案。
+UPLOAD_HEADER = "X-Harness-Upload"
+_UPLOAD_CHUNK = 256 * 1024
 _WORKSPACE = web.AppKey("workspace", workspace_lib.Workspace)
 _STREAMS = web.AppKey("streams", set)
 
@@ -49,6 +57,7 @@ def create_app(
     static_dir: pathlib.Path | None = None,
     password: str | None = None,
     allowed_hosts: Iterable[str] = (),
+    max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
 ) -> web.Application:
     """建立網頁版的 aiohttp 應用程式。
 
@@ -60,6 +69,7 @@ def create_app(
         password: 登入密碼；None 表示不需要登入（只適合本機使用）。
         allowed_hosts: 另外接受的 Host（瀏覽器網址上的主機名稱，例如
             反向代理的網域）。有密碼且沒有指定時接受任何 Host。
+        max_upload_bytes: 上傳的單一檔案大小上限。
 
     Returns:
         aiohttp 的 Application。
@@ -75,7 +85,9 @@ def create_app(
         # 第一個 middleware 在最外層，安全檢查丟出的錯誤也要轉成 JSON。
         middlewares=middlewares,
     )
-    app[_WORKSPACE] = workspace_lib.Workspace(project, model_fn=model_fn)
+    app[_WORKSPACE] = workspace_lib.Workspace(
+        project, model_fn=model_fn, max_upload_bytes=max_upload_bytes
+    )
     app[_STREAMS] = set()
     routes = web.RouteTableDef()
     session_id = "{session_id:[\\w-]+}"
@@ -92,9 +104,15 @@ def create_app(
     async def create_session(request: web.Request) -> web.Response:
         body = await _body(request)
         summary = _ws(request).start_run(
-            _string(body, "text"), agent=_optional_string(body, "agent")
+            _string(body, "text"),
+            agent=_optional_string(body, "agent"),
+            attachments=_attachments(body),
         )
         return _json(summary, status=201)
+
+    @routes.post(UPLOAD_PATH)
+    async def upload(request: web.Request) -> web.Response:
+        return _json({"files": await _receive_uploads(request)}, status=201)
 
     @routes.get(f"/api/sessions/{session_id}")
     async def get_session(request: web.Request) -> web.Response:
@@ -104,7 +122,9 @@ def create_app(
     async def send(request: web.Request) -> web.Response:
         body = await _body(request)
         summary = _ws(request).start_run(
-            _string(body, "text"), session_id=_id(request)
+            _string(body, "text"),
+            session_id=_id(request),
+            attachments=_attachments(body),
         )
         return _json(summary, status=202)
 
@@ -186,6 +206,7 @@ async def serve(
     on_ready=None,
     password: str | None = None,
     allowed_hosts: Iterable[str] = (),
+    max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
 ) -> None:
     """啟動伺服器，直到被取消（例如使用者按 Ctrl-C）。
 
@@ -197,6 +218,7 @@ async def serve(
         on_ready: 啟動後呼叫，參數是實際的網址。
         password: 登入密碼，見 create_app。
         allowed_hosts: 另外接受的 Host，見 create_app。
+        max_upload_bytes: 上傳的單一檔案大小上限。
 
     Raises:
         ValueError: 要讓其他電腦連線，卻沒有設定密碼。
@@ -214,6 +236,7 @@ async def serve(
         model_fn=model_fn,
         password=password,
         allowed_hosts=allowed_hosts,
+        max_upload_bytes=max_upload_bytes,
     )
     runner = web.AppRunner(app, handle_signals=False)
     await runner.setup()
@@ -272,6 +295,40 @@ def _optional_string(body: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _attachments(body: dict[str, Any]) -> list[str]:
+    value = body.get("attachments") or []
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise workspace_lib.WebError(400, "attachments 必須是字串陣列")
+    return value
+
+
+async def _receive_uploads(request: web.Request) -> list[dict[str, Any]]:
+    """讀取 multipart 表單裡的每個檔案並存檔，邊讀邊寫，不整個放進記憶體。"""
+    uploads = _ws(request).uploads
+    try:
+        reader = await request.multipart()
+    except (AssertionError, ValueError) as error:
+        raise workspace_lib.WebError(400, "請求不是 multipart 表單") from error
+    saved = []
+    try:
+        while (part := await reader.next()) is not None:
+            if not isinstance(part, BodyPartReader) or not part.filename:
+                continue
+
+            async def chunks(part: BodyPartReader = part):
+                while chunk := await part.read_chunk(_UPLOAD_CHUNK):
+                    yield chunk
+
+            saved.append(await uploads.save(part.filename, chunks()))
+    except uploads_lib.UploadError as error:
+        raise workspace_lib.WebError(error.status, str(error)) from error
+    if not saved:
+        raise workspace_lib.WebError(400, "沒有收到檔案")
+    return saved
+
+
 def _guard_middleware(host: str, allowed_hosts: list[str], has_password: bool):
     """只接受本機（或指定的 host）的請求，並擋掉其他網站送來的請求。
 
@@ -289,6 +346,9 @@ def _guard_middleware(host: str, allowed_hosts: list[str], has_password: bool):
             hostname = raw_host.split("]")[0] + "]"
         if not any_host and hostname.lower() not in accepted:
             raise workspace_lib.WebError(403, "不接受這個 Host 的請求")
+        if request.path == UPLOAD_PATH and request.method == "POST":
+            _check_upload(request, raw_host)
+            return await handler(request)
         if request.path.startswith("/api/") and request.method != "GET":
             origin = request.headers.get("Origin")
             # 只比對主機與埠號：放在 HTTPS 反向代理後面時，Origin 是
@@ -301,6 +361,18 @@ def _guard_middleware(host: str, allowed_hosts: list[str], has_password: bool):
         return await handler(request)
 
     return guard
+
+
+def _check_upload(request: web.Request, raw_host: str) -> None:
+    """上傳是 multipart 而不是 JSON，改用自訂標頭與 Origin 擋跨站請求。"""
+    if request.headers.get(UPLOAD_HEADER) != "1":
+        raise workspace_lib.WebError(403, f"上傳需要 {UPLOAD_HEADER} 標頭")
+    origin = request.headers.get("Origin")
+    if origin and urllib.parse.urlsplit(origin).netloc != raw_host:
+        raise workspace_lib.WebError(403, "不接受其他網站送來的請求")
+    content_type = request.headers.get("Content-Type", "")
+    if not content_type.startswith("multipart/form-data"):
+        raise workspace_lib.WebError(415, "上傳必須是 multipart/form-data")
 
 
 def _auth_middleware(password: str):

@@ -93,10 +93,10 @@ export function Conversation({ id }: { id: string }) {
     setTab(nextTab);
   };
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: string[]) => {
     try {
       stickToBottom.current = true;
-      upsertSummary(await api.send(id, text));
+      upsertSummary(await api.send(id, text, attachments));
       return true;
     } catch (error) {
       alert((error as Error).message);
@@ -213,6 +213,8 @@ export function Conversation({ id }: { id: string }) {
               busy={busy}
               onSubmit={send}
               onStop={() => void api.stop(id)}
+              onUpload={project?.uploads ? api.upload : undefined}
+              maxUploadBytes={project?.uploads?.maxBytes}
               controls={
                 <>
                   <span className="select-chip">agent：{summary.agent}</span>

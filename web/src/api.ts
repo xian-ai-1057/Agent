@@ -8,6 +8,7 @@ import type {
   ProjectInfo,
   SessionDetail,
   SessionSummary,
+  UploadedFile,
 } from "../../src/web/protocol.ts";
 
 export class ApiError extends Error {
@@ -41,10 +42,30 @@ export const api = {
   project: () => request<ProjectInfo>("GET", "/project"),
   sessions: () => request<SessionSummary[]>("GET", "/sessions"),
   session: (id: string) => request<SessionDetail>("GET", `/sessions/${id}`),
-  createSession: (text: string, agent: string) =>
-    request<SessionSummary>("POST", "/sessions", { text, agent }),
-  send: (id: string, text: string) =>
-    request<SessionSummary>("POST", `/sessions/${id}/messages`, { text }),
+  createSession: (text: string, agent: string, attachments: string[] = []) =>
+    request<SessionSummary>("POST", "/sessions", { text, agent, attachments }),
+  send: (id: string, text: string, attachments: string[] = []) =>
+    request<SessionSummary>("POST", `/sessions/${id}/messages`, {
+      text,
+      attachments,
+    }),
+  upload: async (file: File): Promise<UploadedFile> => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const response = await fetch("/api/uploads", {
+      method: "POST",
+      headers: { "X-Harness-Upload": "1" },
+      body: form,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = (data as { error?: string }).error ?? response.statusText;
+      throw new ApiError(response.status, message);
+    }
+    const [uploaded] = (data as { files: UploadedFile[] }).files;
+    if (!uploaded) throw new ApiError(500, "上傳失敗");
+    return uploaded;
+  },
   retry: (id: string) =>
     request<SessionSummary>("POST", `/sessions/${id}/retry`, {}),
   stop: (id: string) => request("POST", `/sessions/${id}/stop`, {}),

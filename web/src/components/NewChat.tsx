@@ -27,10 +27,10 @@ export function NewChat() {
     .flatMap((set) => set.tools)
     .filter((item) => agent.tools.includes(item.name));
 
-  const start = async (text: string) => {
+  const start = async (text: string, attachments: string[]) => {
     setError(undefined);
     try {
-      const summary = await api.createSession(text, agent.name);
+      const summary = await api.createSession(text, agent.name, attachments);
       upsertSummary(summary);
       navigate(`/s/${summary.id}`);
       return true;
@@ -70,6 +70,8 @@ export function NewChat() {
               rows={3}
               autoFocus
               onSubmit={start}
+              onUpload={project.uploads ? api.upload : undefined}
+              maxUploadBytes={project.uploads?.maxBytes}
               controls={
                 project.agents.length > 1 ? (
                   <label className="select-chip">

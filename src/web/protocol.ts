@@ -163,6 +163,12 @@ export interface ProjectInfo {
   agents: AgentInfo[];
   toolsets: ToolsetInfo[];
   permissions: PermissionSettings;
+  /**
+   * 可以上傳檔案時才有（Python 版）。上傳用 POST /api/uploads
+   * （multipart/form-data，要帶 X-Harness-Upload: 1 標頭），送出訊息時
+   * 把回傳的 path 放進 attachments。
+   */
+  uploads?: { maxBytes: number };
   model: {
     /** harness.yaml 裡的值，沒寫時為 null。 */
     config: { model: string | null; maxTurns: number | null };
@@ -177,6 +183,20 @@ export interface ProjectInfo {
     };
   };
 }
+
+/** 上傳完成的檔案。 */
+export interface UploadedFile {
+  name: string;
+  /** 相對於專案根目錄的路徑，送出訊息時放進 attachments。 */
+  path: string;
+  size: number;
+}
+
+/**
+ * 訊息附件的說明行：伺服器把附件接在使用者訊息後面，每個一行，
+ * 開頭是這個標記，接著是路徑（不含空白），後面可能還有給模型的說明。
+ */
+export const ATTACHMENT_MARKER = "[附件] ";
 
 /** 測試模型連線的結果。 */
 export interface ModelTestResult {

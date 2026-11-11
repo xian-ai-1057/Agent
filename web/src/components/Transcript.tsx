@@ -30,8 +30,16 @@ export function TurnView({
 }) {
   return (
     <>
-      {turn.user !== undefined && (
-        <div className="msg-user anim-in">{turn.user}</div>
+      {turn.user && <div className="msg-user anim-in">{turn.user}</div>}
+      {turn.attachments.length > 0 && (
+        <ul className="msg-attachments anim-in" aria-label="附加的檔案">
+          {turn.attachments.map((path) => (
+            <li key={path} className="attachment done" title={path}>
+              <FileIcon size={14} />
+              <span className="attachment-name">{path.split("/").at(-1)}</span>
+            </li>
+          ))}
+        </ul>
       )}
       {turn.blocks.map((block) => (
         <BlockView key={block.key} block={block} />
