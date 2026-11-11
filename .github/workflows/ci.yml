@@ -1,0 +1,63 @@
+# 每次開 PR 或推送到 main 時自動檢查。
+# 兩個工作同時跑：TypeScript 版（含前端）與 Python 版。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同一個 PR 推了新的 commit，就取消舊的那次檢查。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    name: TypeScript（lint、型別、測試、打包）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # npm ci 會觸發 prepare，也就是 npm run build。
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      # 前端打包結果要跟著 Python 原始碼進版控（見 web/sync-python.mjs）。
+      # 改了前端卻忘了重新打包時，這一步會失敗。
+      - name: 確認 python/src/harness/web/static 已重新打包
+        run: |
+          if [ -n "$(git status --porcelain -- python/src/harness/web/static)" ]; then
+            git status --short -- python/src/harness/web/static
+            echo "::error::前端有改動但沒有更新打包結果，請執行 npm run build 後一併 commit。"
+            exit 1
+          fi
+
+  python:
+    name: Python ${{ matrix.python-version }}（ruff、pytest）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: python/pyproject.toml
+      - run: pip install -e ".[dev,pdf,vectors]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest
