@@ -3,11 +3,15 @@
 import type {
   ApprovalDecision,
   ConnectionSettings,
+  Feedback,
+  FileEntry,
   ModelTestResult,
   PermissionMode,
   PermissionSettings,
   ProjectInfo,
+  SearchResult,
   SessionDetail,
+  SessionOptions,
   SessionSummary,
   UploadedFile,
 } from "../../src/web/protocol.ts";
@@ -43,8 +47,18 @@ export const api = {
   project: () => request<ProjectInfo>("GET", "/project"),
   sessions: () => request<SessionSummary[]>("GET", "/sessions"),
   session: (id: string) => request<SessionDetail>("GET", `/sessions/${id}`),
-  createSession: (text: string, agent: string, attachments: string[] = []) =>
-    request<SessionSummary>("POST", "/sessions", { text, agent, attachments }),
+  createSession: (
+    text: string,
+    agent: string,
+    attachments: string[] = [],
+    options?: Partial<SessionOptions>,
+  ) =>
+    request<SessionSummary>("POST", "/sessions", {
+      text,
+      agent,
+      attachments,
+      ...(options ? { options } : {}),
+    }),
   send: (id: string, text: string, attachments: string[] = []) =>
     request<SessionSummary>("POST", `/sessions/${id}/messages`, {
       text,
@@ -83,4 +97,29 @@ export const api = {
   saveConnection: (settings: ConnectionSettings) =>
     request("PUT", "/settings/connection", settings),
   testModel: () => request<ModelTestResult>("POST", "/settings/model/test", {}),
+
+  // 以下只有 Python 版的伺服器支援，先看 ProjectInfo.features 再呼叫。
+  renameSession: (id: string, title: string) =>
+    request<SessionSummary>("PATCH", `/sessions/${id}`, { title }),
+  deleteSession: (id: string) => request("DELETE", `/sessions/${id}`),
+  searchSessions: (q: string) =>
+    request<SearchResult[]>(
+      "GET",
+      `/sessions/search?q=${encodeURIComponent(q)}`,
+    ),
+  setOptions: (id: string, options: Partial<SessionOptions>) =>
+    request<SessionOptions>("PUT", `/sessions/${id}/options`, options),
+  setFeedback: (id: string, index: number, feedback: Feedback | null) =>
+    request("PUT", `/sessions/${id}/feedback`, { index, feedback }),
+  listFiles: (dir = "") =>
+    request<FileEntry[]>("GET", `/files/list?dir=${encodeURIComponent(dir)}`),
 };
+
+/**
+ * 工作資料夾裡一個檔案的網址（Python 版），可以直接放進 <img>、<iframe>
+ * 或用 fetch 讀取文字。download 為 true 時瀏覽器會下載而不是顯示。
+ */
+export function fileUrl(path: string, download = false): string {
+  const query = `path=${encodeURIComponent(path)}`;
+  return `/api/files?${query}${download ? "&download=1" : ""}`;
+}

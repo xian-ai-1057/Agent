@@ -57,9 +57,14 @@ export interface SubagentStep {
 /** 側欄與「工作中」列表需要的對話摘要。 */
 export interface SessionSummary {
   id: string;
-  /** 第一則使用者訊息的開頭。 */
+  /** 第一則使用者訊息的開頭，或使用者改過的名稱。 */
   title: string;
   agent: string;
+  /**
+   * 這段對話自己選的模型（Python 版）；沒有時跟著 agent 或專案的設定。
+   * 下一輪開始時生效。
+   */
+  model?: string | null;
   status: SessionStatus;
   activity?: Activity;
   /** 這一輪開始的時間（毫秒）。 */
@@ -119,6 +124,94 @@ export interface SessionDetail {
    * subagent 的對話不存檔，伺服器重新啟動後就沒有了。
    */
   subagentSteps?: Record<string, SubagentStep[]>;
+  /** 這段對話的選項（Python 版），見 SessionOptions。 */
+  options?: SessionOptions;
+  /**
+   * 使用者對回覆的評價（Python 版），以 assistant 訊息在 messages 裡的
+   * 索引為鍵。
+   */
+  feedback?: Record<string, Feedback>;
+}
+
+/**
+ * 一段對話自己的選項（Python 版）。每一項都是 null 時跟著 agent 的設定。
+ * PUT /api/sessions/:id/options 可以只送要改的欄位；建立對話時也可以帶。
+ */
+export interface SessionOptions {
+  /** 這段對話用的模型，必須是 ProjectInfo.models 裡的名稱。 */
+  model: string | null;
+  /** 這段對話可以用的工具名稱；只能是 agent 原本就有的工具。null 表示全部。 */
+  tools: string[] | null;
+  /** 這段對話一定要用的 skill 名稱，會在送給模型的訊息裡提示它先讀取。 */
+  skills: string[];
+}
+
+/** 使用者對一則回覆的評價。 */
+export interface Feedback {
+  rating: "up" | "down";
+  /** 倒讚時勾選的原因。 */
+  reasons?: string[];
+  comment?: string;
+}
+
+/** 對話搜尋的一筆結果（Python 版）。 */
+export interface SearchResult {
+  id: string;
+  title: string;
+  /** 命中訊息內容時，含關鍵字的一小段文字；只命中標題時沒有。 */
+  snippet?: string;
+  updatedAt: number;
+}
+
+/** 工作資料夾裡的一個檔案或資料夾（Python 版）。 */
+export interface FileEntry {
+  /** 相對於工作資料夾的路徑，用 / 分隔。 */
+  path: string;
+  name: string;
+  kind: "file" | "dir";
+  /** 檔案大小（位元組）；資料夾沒有。 */
+  size?: number;
+  /** 最後修改時間（毫秒）。 */
+  modifiedAt: number;
+}
+
+/** 可以在輸入框選的一個模型（Python 版）。 */
+export interface ModelOption {
+  /** 交給 litellm 的模型名稱。 */
+  name: string;
+  /** 顯示用的名稱。 */
+  label: string;
+  /** 供應商名稱，例如 Anthropic、公司自架。 */
+  provider: string;
+  /** 是否看得懂圖片；不知道時沒有。 */
+  vision?: boolean;
+  /** 是否為專案預設的模型。 */
+  isDefault?: boolean;
+}
+
+/** 可以在 ＋ 選單選的一個 skill（Python 版）。 */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  /** 內建 skill 或專案 skills/ 裡的。 */
+  builtin: boolean;
+}
+
+/**
+ * 伺服器支援哪些功能（Python 版才有）。沒有這個欄位或某一項是 false 時，
+ * 前端要把對應的介面藏起來，TypeScript 版的伺服器才不會壞掉。
+ */
+export interface ServerFeatures {
+  /** GET /api/files、/api/files/list：預覽與列出工作資料夾的檔案。 */
+  files: boolean;
+  /** PATCH /api/sessions/:id（改名）、DELETE /api/sessions/:id。 */
+  sessionAdmin: boolean;
+  /** GET /api/sessions/search?q=。 */
+  search: boolean;
+  /** PUT /api/sessions/:id/options：每段對話自己選模型、工具、skills。 */
+  sessionOptions: boolean;
+  /** PUT /api/sessions/:id/feedback：對回覆按讚或倒讚。 */
+  feedback: boolean;
 }
 
 export interface ToolInfo {
@@ -169,6 +262,12 @@ export interface ProjectInfo {
    * 把回傳的 path 放進 attachments。
    */
   uploads?: { maxBytes: number };
+  /** 伺服器支援哪些功能；TypeScript 版沒有這個欄位。 */
+  features?: ServerFeatures;
+  /** 輸入框可以選的模型（Python 版），預設模型排第一個。 */
+  models?: ModelOption[];
+  /** ＋ 選單可以選的 skills（Python 版）。 */
+  skills?: SkillInfo[];
   model: {
     /** harness.yaml 裡的值，沒寫時為 null。 */
     config: { model: string | null; maxTurns: number | null };
@@ -278,4 +377,6 @@ export type ServerEvent =
   | { type: "run_stopped"; sessionId: string }
   /** 對話紀錄被改寫（例如 Python 版壓縮對話），要重新讀取。 */
   | { type: "session_reload"; sessionId: string }
+  /** 對話被刪除（Python 版）。 */
+  | { type: "session_deleted"; sessionId: string }
   | { type: "project" };
