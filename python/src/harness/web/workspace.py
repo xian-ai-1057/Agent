@@ -22,12 +22,14 @@ from typing import Any
 
 from harness import builtin
 from harness import compaction as compaction_lib
+from harness import credentials
 from harness import datatypes
 from harness import delegation
 from harness import llm
 from harness import loop
 from harness import permissions as permissions_lib
 from harness import project as project_lib
+from harness import providers
 from harness import sandbox as sandbox_lib
 from harness import sessions as sessions_lib
 from harness import tools as tools_lib
@@ -170,8 +172,9 @@ class Workspace:
                         for name, value in os.environ.items()
                         if name.endswith("_API_KEY") and value
                     ),
-                    "fallbackModel": llm.FALLBACK_MODEL,
+                    "fallbackModel": llm.default_model(),
                 },
+                "connection": self._connection_info(),
             },
         }
 
@@ -327,10 +330,50 @@ class Workspace:
         self._apply_settings()
         self._emit({"type": "project"})
 
-    async def test_model(self) -> dict[str, Any]:
-        """用預設 agent 的模型送一個很短的請求，確認連得上。"""
+    async def update_connection(self, settings: dict[str, Any]) -> None:
+        """設定要連哪家供應商（或哪個端點）、金鑰與模型。
+
+        先用新的設定實際連一次模型，連得上才存檔；連不上時恢復原本的
+        設定並回報原因，所以不會存下打錯的金鑰。金鑰存在專案的
+        .harness/secrets/（見 credentials 模組），模型名稱寫進
+        harness.yaml。
+
+        Args:
+            settings: {"provider": 供應商代號或 "endpoint", "apiKey": 金鑰,
+                "baseURL": 端點或 Ollama 的網址, "model": 模型名稱}。
+                apiKey 與 baseURL 留空表示沿用目前的值。
+
+        Raises:
+            WebError: 設定不完整，或用新的設定連不上模型。
+        """
+        values, model = self._connection_values(settings)
+        own = self._overrides.get(self.project.default_agent, {})
+        before = {name: os.environ.get(name) for name in values}
+        _set_environment(values)
+        result = await self.test_model(own.get("model") or model)
+        if not result["ok"]:
+            _set_environment(before)
+            raise WebError(400, _explain_failure(result["message"]))
+        try:
+            config_lib.save_model_settings(
+                self.project.root, model, self._settings["maxTurns"]
+            )
+        except ValueError as error:
+            _set_environment(before)
+            raise WebError(400, str(error)) from error
+        credentials.update(self.project.root, values)
+        self._settings = {**self._settings, "model": model}
+        self._apply_settings()
+        self._emit({"type": "project"})
+
+    async def test_model(self, model: str | None = None) -> dict[str, Any]:
+        """送一個很短的請求，確認連得上模型。
+
+        Args:
+            model: 要測試的模型，預設是預設 agent 目前使用的模型。
+        """
         agent = self.project.agents[self.project.default_agent]
-        model = agent.model or llm.default_model()
+        model = model or agent.model or llm.default_model()
         messages = [{"role": "user", "content": "ping"}]
 
         async def first_item() -> None:
@@ -621,6 +664,76 @@ class Workspace:
             "deny": list(shared.deny),
         }
 
+    def _connection_values(
+        self, settings: dict[str, Any]
+    ) -> tuple[dict[str, str], str]:
+        """檢查連線設定，回傳 (要改的環境變數, 模型名稱)。
+
+        環境變數的值是空字串時表示不使用它。
+        """
+        provider_id = settings.get("provider")
+        api_key = _clean(settings.get("apiKey"))
+        base_url = _clean(settings.get("baseURL"))
+        model = _clean(settings.get("model"))
+        if not model:
+            raise WebError(400, "請填寫模型名稱")
+        if provider_id == providers.ENDPOINT:
+            base_url = base_url or os.environ.get(providers.BASE_URL_VAR)
+            if not base_url:
+                raise WebError(400, "請填寫端點網址")
+            values = {providers.BASE_URL_VAR: _checked_url(base_url)}
+            if api_key:
+                values[providers.API_KEY_VAR] = api_key
+            return values, model
+        provider = providers.find(provider_id or "")
+        if provider is None:
+            raise WebError(400, f"沒有 {provider_id} 這個供應商")
+        if not provider.matches(model):
+            raise WebError(
+                400,
+                f"{provider.label} 的模型名稱要以 {provider.id}/ 開頭，"
+                f"例如 {provider.default_model}",
+            )
+        # 直接連供應商：不再使用端點。
+        values = {providers.BASE_URL_VAR: ""}
+        if provider.key_var:
+            if api_key:
+                values[provider.key_var] = api_key
+            elif not provider.key_set():
+                raise WebError(400, "請填寫金鑰")
+        if provider.base_url_var and base_url:
+            values[provider.base_url_var] = _checked_url(base_url)
+        return values, model
+
+    def _connection_info(self) -> dict[str, Any]:
+        """連線設定的狀態：目前用哪家供應商、金鑰設定了沒。不含金鑰內容。"""
+        agent = self.project.agents[self.project.default_agent]
+        model = agent.model or llm.default_model()
+        if providers.uses_endpoint():
+            current = providers.ENDPOINT
+        else:
+            found = providers.of_model(model)
+            current = found.id if found else None
+        return {
+            "ready": providers.is_ready(model),
+            "provider": current,
+            "providers": [
+                {
+                    "id": item.id,
+                    "label": item.label,
+                    "defaultModel": item.default_model,
+                    "needsKey": item.key_var is not None,
+                    "keyVar": item.key_var,
+                    "keySet": item.key_var is not None and item.key_set(),
+                    "baseURL": os.environ.get(item.base_url_var)
+                    or item.default_base_url
+                    if item.base_url_var
+                    else None,
+                }
+                for item in providers.PROVIDERS
+            ],
+        }
+
     def _apply_settings(self) -> None:
         """把網頁上改過的 harness.yaml 套用到 agent；agent 檔案自己寫的優先。"""
         for name, agent in self.project.agents.items():
@@ -792,6 +905,37 @@ def _clean_patterns(items: Any) -> list[str]:
         return []
     cleaned = [item.strip() for item in items if isinstance(item, str)]
     return list(dict.fromkeys(item for item in cleaned if item))
+
+
+def _clean(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _checked_url(url: str) -> str:
+    if not url.startswith(("http://", "https://")):
+        raise WebError(400, "網址要以 http:// 或 https:// 開頭")
+    return url
+
+
+def _explain_failure(message: str) -> str:
+    """連線測試失敗時，在原始錯誤前面加上一句看得懂的說明。"""
+    hint = "連不上模型"
+    if "AuthenticationError" in message:
+        hint = "金鑰不正確，或這把金鑰不能使用這個模型"
+    elif "NotFoundError" in message:
+        hint = "找不到這個模型，請確認模型名稱"
+    elif "APIConnectionError" in message or "Timeout" in message:
+        hint = "連不到模型的伺服器，請確認網址與網路（需要 proxy 時要先設定）"
+    return f"{hint}。詳細訊息：{message}"
+
+
+def _set_environment(values: dict[str, str | None]) -> None:
+    """套用環境變數；空字串或 None 表示拿掉。"""
+    for name, value in values.items():
+        if value:
+            os.environ[name] = value
+        else:
+            os.environ.pop(name, None)
 
 
 def _shorten(text: str) -> str:

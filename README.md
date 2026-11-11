@@ -12,6 +12,23 @@ MCP 伺服器給它工具，再從命令列、網頁或自己的程式裡和它�
 想先快速瀏覽所有功能：打開 [`docs/index.html`](docs/index.html)（單一
 靜態網頁，附網頁版截圖，也可以直接用 GitHub Pages 發佈 `docs/` 資料夾）。
 
+## 快速部署
+
+想直接架起來用、不寫任何設定：需要一台裝好 Docker 的電腦。
+
+```bash
+git clone https://github.com/xian-ai-1057/AgentHarness.git
+cd AgentHarness
+docker compose up -d
+docker compose logs harness      # 看網址與自動產生的登入密碼
+```
+
+用瀏覽器打開 `http://<這台電腦的位址>:4321`，登入後依畫面選模型供應商、
+貼上金鑰，就可以開始對話、上傳檔案請它分析。不需要先建立專案，也不需要
+設定環境變數。公司網路要透過 proxy 才能連外時，把 proxy 寫在 `.env`
+（見 `.env.example`）。細節見
+[Python 版的說明](python/README.md#快速部署docker)。
+
 ## 為誰而做
 
 Agent Harness 和 [Hermes Agent](https://github.com/NousResearch/hermes-agent)、
@@ -76,6 +93,8 @@ litellm 直接連各家供應商。換模型只要改設定，不用改程式。
 | 在沙盒（Docker）裡執行程式 | 尚未支援 | [支援](python/README.md#在沙盒裡執行程式) |
 | 架在伺服器上（登入密碼） | 尚未支援 | [支援](python/README.md#部署到伺服器) |
 | 網頁上傳檔案 | 尚未支援 | [支援](python/README.md#上傳檔案) |
+| 一行部署（Docker Compose） | 尚未支援 | [支援](python/README.md#快速部署docker) |
+| 在網頁上填模型的金鑰 | 尚未支援（用環境變數） | [支援](python/README.md#在網頁上連接模型) |
 
 怎麼選：
 

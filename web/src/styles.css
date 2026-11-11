@@ -1829,6 +1829,31 @@ pre,
   animation: up 0.45s var(--ease) both;
 }
 
+.connection-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.connection-form label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.new-chat .lead {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
 .inline-error {
   color: var(--danger);
   font-size: 13px;

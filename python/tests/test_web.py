@@ -7,6 +7,7 @@ API 與事件格式要和 TypeScript 版完全相同，兩個版本共用同一�
 import asyncio
 import base64
 import json
+import os
 import pathlib
 
 import aiohttp
@@ -16,7 +17,11 @@ from aiohttp.test_utils import TestClient
 from aiohttp.test_utils import TestServer
 
 from harness import cli
+from harness import credentials
+from harness import llm
 from harness import project as project_lib
+from harness import providers
+from harness import sandbox as sandbox_lib
 from harness.web import config as config_lib
 from harness.web import server as server_lib
 from harness.web import uploads as uploads_lib
@@ -743,16 +748,354 @@ class TestServerDeployment:
             await server_lib.serve(loaded, port=0, **options)
         loaded.close()
 
-    def test_cli_refuses_public_host_without_password(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    @pytest.fixture
+    def served(self, monkeypatch):
+        """把伺服器換成假的，記下 CLI 交給它的參數。"""
+        calls = []
+
+        async def fake_serve(loaded, **options):
+            calls.append(options)
+            options["on_ready"]("http://test")
+
+        monkeypatch.setattr("harness.web.serve", fake_serve)
         monkeypatch.delenv("HARNESS_WEB_PASSWORD", raising=False)
+        return calls
+
+    def test_cli_generates_password_for_public_host(
+        self, tmp_path, served, capsys
+    ):
         root = make_project(tmp_path / "cli")
 
         code = cli.main(["web", "-p", str(root), "--host", "0.0.0.0"])
+        cli.main(["web", "-p", str(root), "--host", "0.0.0.0"])
+
+        assert code == 0
+        password = served[0]["password"]
+        assert len(password) >= 20
+        assert password in capsys.readouterr().out
+        # 重新啟動後還是同一組，使用者不用重新登入。
+        assert served[1]["password"] == password
+        saved = credentials.secrets_dir(root) / credentials.PASSWORD_FILE
+        assert saved.read_text("utf-8").strip() == password
+
+    def test_cli_generates_password_behind_reverse_proxy(
+        self, tmp_path, served
+    ):
+        root = make_project(tmp_path / "cli")
+
+        cli.main(["web", "-p", str(root), "--allowed-host", "ai.example.com"])
+
+        assert served[0]["password"]
+
+    def test_cli_uses_password_from_environment(
+        self, tmp_path, served, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("HARNESS_WEB_PASSWORD", "my-own-password")
+        root = make_project(tmp_path / "cli")
+
+        cli.main(["web", "-p", str(root), "--host", "0.0.0.0"])
+
+        assert served[0]["password"] == "my-own-password"
+        assert "my-own-password" not in capsys.readouterr().out
+        assert not credentials.secrets_dir(root).exists()
+
+    def test_cli_needs_no_password_on_localhost(self, tmp_path, served):
+        root = make_project(tmp_path / "cli")
+
+        cli.main(["web", "-p", str(root)])
+
+        assert served[0]["password"] is None
+        assert not credentials.secrets_dir(root).exists()
+
+
+class TestZeroConfigStart:
+    """pyharness web 指到空資料夾時，自動建立可以直接使用的助手。"""
+
+    @pytest.fixture
+    def served(self, monkeypatch):
+        """把伺服器換成假的，記下啟動時載入的專案。"""
+        loaded_projects = []
+
+        async def fake_serve(loaded, **options):
+            loaded_projects.append(loaded)
+
+        monkeypatch.setattr("harness.web.serve", fake_serve)
+        monkeypatch.setattr(sandbox_lib, "available", lambda: False)
+        return loaded_projects
+
+    def test_empty_folder_gets_a_ready_assistant(self, tmp_path, served):
+        root = tmp_path / "fresh"
+
+        code = cli.main(["web", "-p", str(root)])
+
+        assert code == 0
+        agent = served[0].agents["main"]
+        names = {item.name for item in agent.tools}
+        assert {"read_file", "update_plan", "web_fetch"} <= names
+        assert "run_python" not in names
+        assert served[0].memory is not None
+        assert (root / "workspace").is_dir()
+
+    def test_assistant_uses_sandbox_when_docker_works(
+        self, tmp_path, served, monkeypatch
+    ):
+        monkeypatch.setattr(sandbox_lib, "available", lambda: True)
+
+        cli.main(["web", "-p", str(tmp_path / "fresh")])
+
+        names = {item.name for item in served[0].agents["main"].tools}
+        assert "run_python" in names
+        assert served[0].sandbox is not None
+
+    def test_existing_project_is_left_alone(self, tmp_path, served):
+        root = make_project(tmp_path / "mine")
+
+        cli.main(["web", "-p", str(root)])
+
+        assert (root / "harness.yaml").read_text("utf-8") == CONFIG
+        assert served[0].name == "web_demo"
+
+    def test_folder_with_other_files_is_not_touched(
+        self, tmp_path, served, capsys
+    ):
+        (tmp_path / "notes.txt").write_text("我的檔案", encoding="utf-8")
+
+        code = cli.main(["web", "-p", str(tmp_path)])
 
         assert code == 1
-        assert "HARNESS_WEB_PASSWORD" in capsys.readouterr().err
+        assert "harness.yaml" in capsys.readouterr().err
+        assert [item.name for item in tmp_path.iterdir()] == ["notes.txt"]
+
+    def test_other_commands_do_not_create_projects(self, tmp_path, capsys):
+        code = cli.main(["run", "-p", str(tmp_path / "fresh"), "嗨"])
+
+        assert code == 1
+        assert not (tmp_path / "fresh").exists()
+
+    def test_keys_saved_from_the_web_reach_other_commands(
+        self, tmp_path, monkeypatch, fake_model
+    ):
+        monkeypatch.delenv("DEMO_API_KEY", raising=False)
+        root = make_project(tmp_path / "mine")
+        credentials.update(root, {"DEMO_API_KEY": "sk-saved"})
+        monkeypatch.delenv("DEMO_API_KEY")
+        monkeypatch.setattr(
+            llm, "complete", fake_model([conftest.text_response("好")])
+        )
+
+        cli.main(["run", "-p", str(root), "嗨"])
+
+        assert os.environ["DEMO_API_KEY"] == "sk-saved"
+
+
+class TestConnectionSettings:
+    """在網頁上選供應商、填金鑰與模型。"""
+
+    @pytest.fixture(autouse=True)
+    def clean_env(self, monkeypatch):
+        """清掉連線相關的環境變數，測試改動的部分結束後恢復。"""
+        names = [
+            "HARNESS_MODEL",
+            "HARNESS_BASE_URL",
+            "HARNESS_API_KEY",
+            "OLLAMA_API_BASE",
+            *(p.key_var for p in providers.PROVIDERS if p.key_var),
+        ]
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+
+    async def test_project_reports_missing_key(self, start):
+        h = await start()
+
+        _, info = await h.api("GET", "/project")
+
+        connection = info["model"]["connection"]
+        assert connection["ready"] is False
+        assert connection["provider"] == "anthropic"
+        anthropic = connection["providers"][0]
+        assert anthropic["keyVar"] == "ANTHROPIC_API_KEY"
+        assert anthropic["keySet"] is False
+
+    async def test_key_from_environment_makes_it_ready(
+        self, start, monkeypatch
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        h = await start()
+
+        _, info = await h.api("GET", "/project")
+
+        assert info["model"]["connection"]["ready"] is True
+        assert info["model"]["connection"]["provider"] == "openai"
+        assert info["agents"][0]["model"] == "openai/gpt-5"
+
+    async def test_saving_tests_the_model_then_stores_key_and_model(
+        self, start
+    ):
+        h = await start([conftest.text_response("pong")])
+
+        status, _ = await h.api(
+            "PUT",
+            "/settings/connection",
+            {
+                "provider": "openai",
+                "apiKey": " sk-new ",
+                "baseURL": "",
+                "model": "openai/gpt-5",
+            },
+        )
+
+        assert status == 200
+        assert h.model.requests[0]["model"] == "openai/gpt-5"
+        assert os.environ["OPENAI_API_KEY"] == "sk-new"
+        assert credentials.load(h.root)["OPENAI_API_KEY"] == "sk-new"
+        config = yaml.safe_load((h.root / "harness.yaml").read_text("utf-8"))
+        assert config["model"] == "openai/gpt-5"
+        _, info = await h.api("GET", "/project")
+        assert info["model"]["connection"]["ready"] is True
+        assert info["model"]["connection"]["provider"] == "openai"
+        assert "sk-new" not in json.dumps(info)
+        assert await h.wait_for("project")
+
+    async def test_failed_connection_is_not_saved(self, start):
+        class AuthenticationError(Exception):
+            """和 litellm 金鑰錯誤時丟出的例外同名。"""
+
+        async def broken(model, messages, tools, params):
+            raise AuthenticationError("401 invalid api key")
+            yield
+
+        h = await start(model=broken)
+
+        status, body = await h.api(
+            "PUT",
+            "/settings/connection",
+            {"provider": "openai", "apiKey": "sk-bad", "model": "openai/gpt-5"},
+        )
+
+        assert status == 400
+        assert body["error"].startswith("金鑰不正確")
+        assert "invalid api key" in body["error"]
+        assert "OPENAI_API_KEY" not in os.environ
+        assert credentials.load(h.root) == {}
+        config = yaml.safe_load((h.root / "harness.yaml").read_text("utf-8"))
+        assert "model" not in config
+
+    @pytest.mark.parametrize(
+        ("settings", "message"),
+        [
+            (
+                {"provider": "openai", "apiKey": "", "model": "openai/gpt-5"},
+                "金鑰",
+            ),
+            ({"provider": "openai", "apiKey": "k", "model": ""}, "模型名稱"),
+            (
+                {"provider": "openai", "apiKey": "k", "model": "gpt-5"},
+                "openai/",
+            ),
+            ({"provider": "nope", "apiKey": "k", "model": "x/y"}, "供應商"),
+            ({"provider": "endpoint", "apiKey": "", "model": "claude"}, "端點"),
+            (
+                {
+                    "provider": "endpoint",
+                    "baseURL": "litellm:4000",
+                    "model": "c",
+                },
+                "http",
+            ),
+        ],
+    )
+    async def test_incomplete_settings_are_rejected(
+        self, start, settings, message
+    ):
+        h = await start([conftest.text_response("pong")])
+
+        status, body = await h.api("PUT", "/settings/connection", settings)
+
+        assert status == 400
+        assert message in body["error"]
+        assert h.model.requests == []
+
+    async def test_existing_key_can_be_kept_when_changing_model(
+        self, start, monkeypatch
+    ):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+        h = await start([conftest.text_response("pong")])
+
+        status, _ = await h.api(
+            "PUT",
+            "/settings/connection",
+            {
+                "provider": "anthropic",
+                "apiKey": "",
+                "model": "anthropic/claude-sonnet-5-5",
+            },
+        )
+
+        assert status == 200
+        assert "ANTHROPIC_API_KEY" not in credentials.load(h.root)
+        _, info = await h.api("GET", "/project")
+        assert info["agents"][0]["model"] == "anthropic/claude-sonnet-5-5"
+
+    async def test_endpoint_and_back_to_direct_provider(self, start):
+        h = await start(
+            [conftest.text_response("pong"), conftest.text_response("pong")]
+        )
+
+        status, _ = await h.api(
+            "PUT",
+            "/settings/connection",
+            {
+                "provider": "endpoint",
+                "apiKey": "sk-proxy",
+                "baseURL": "http://litellm:4000",
+                "model": "claude",
+            },
+        )
+        _, info = await h.api("GET", "/project")
+
+        assert status == 200
+        assert os.environ["HARNESS_BASE_URL"] == "http://litellm:4000"
+        assert os.environ["HARNESS_API_KEY"] == "sk-proxy"
+        assert info["model"]["connection"]["provider"] == "endpoint"
+        assert info["model"]["connection"]["ready"] is True
+
+        status, _ = await h.api(
+            "PUT",
+            "/settings/connection",
+            {"provider": "openai", "apiKey": "sk-o", "model": "openai/gpt-5"},
+        )
+        _, info = await h.api("GET", "/project")
+
+        assert status == 200
+        assert "HARNESS_BASE_URL" not in os.environ
+        assert credentials.load(h.root)["HARNESS_BASE_URL"] == ""
+        assert info["model"]["connection"]["provider"] == "openai"
+
+    async def test_ollama_needs_no_key_and_keeps_server_address(self, start):
+        h = await start([conftest.text_response("pong")])
+
+        status, _ = await h.api(
+            "PUT",
+            "/settings/connection",
+            {
+                "provider": "ollama",
+                "baseURL": "http://host.docker.internal:11434",
+                "model": "ollama_chat/hermes3",
+            },
+        )
+        _, info = await h.api("GET", "/project")
+
+        assert status == 200
+        saved = "http://host.docker.internal:11434"
+        assert os.environ["OLLAMA_API_BASE"] == saved
+        ollama = next(
+            p
+            for p in info["model"]["connection"]["providers"]
+            if p["id"] == "ollama"
+        )
+        assert ollama["baseURL"] == saved
+        assert ollama["needsKey"] is False
+        assert info["model"]["connection"]["ready"] is True
 
 
 class TestUploads:

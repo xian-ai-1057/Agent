@@ -36,7 +36,7 @@ DEFAULT_HOST = "127.0.0.1"
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 _MAX_BODY = 1_000_000
 _HEARTBEAT = 25
-_LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
 # 密碼錯誤時多等一下，拖慢暴力猜密碼。
 _FAILED_LOGIN_DELAY = 1.0
 _REALM = 'Basic realm="Harness", charset="UTF-8"'
@@ -173,6 +173,11 @@ def create_app(
         _ws(request).update_model_settings(model, max_turns)
         return _json({"ok": True})
 
+    @routes.put("/api/settings/connection")
+    async def save_connection(request: web.Request) -> web.Response:
+        await _ws(request).update_connection(await _body(request))
+        return _json({"ok": True})
+
     @routes.post("/api/settings/model/test")
     async def test_model(request: web.Request) -> web.Response:
         await _body(request)
@@ -224,7 +229,7 @@ async def serve(
         ValueError: 要讓其他電腦連線，卻沒有設定密碼。
     """
     allowed_hosts = list(allowed_hosts)
-    if not password and (host not in _LOCAL_HOSTS or allowed_hosts):
+    if not password and (host not in LOCAL_HOSTS or allowed_hosts):
         raise ValueError(
             "讓其他電腦連線時一定要設定登入密碼：請設定環境變數 "
             "HARNESS_WEB_PASSWORD。伺服器可以執行專案的工具，不能沒有保護"
@@ -335,7 +340,7 @@ def _guard_middleware(host: str, allowed_hosts: list[str], has_password: bool):
     有密碼且沒有指定 allowed_hosts 時接受任何 Host：Host 檢查是為了擋
     DNS rebinding，而那種請求拿不到登入密碼。
     """
-    accepted = {*_LOCAL_HOSTS, host, *(item.lower() for item in allowed_hosts)}
+    accepted = {*LOCAL_HOSTS, host, *(item.lower() for item in allowed_hosts)}
     any_host = has_password and not allowed_hosts
 
     @web.middleware

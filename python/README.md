@@ -28,6 +28,83 @@ Python 版的特點：
   計畫、讀取網頁，以及 code-review、debugging 等現成的 skill。
 - **可以連接現成的 MCP 伺服器**，和 TypeScript 版用同一份設定：
   [連接 MCP 伺服器](#連接-mcp-伺服器)。
+- **部署後就能用**：`docker compose up -d` 啟動後，在網頁上貼上模型的
+  金鑰就可以開始，不需要寫設定檔：[快速部署](#快速部署docker)。
+
+## 快速部署（Docker）
+
+只想架起來給自己或團隊用、不想寫設定時用這個方式。需要一台裝好
+[Docker](https://docs.docker.com/engine/install/)（Docker 26、Compose 2.24
+以上）的電腦。
+
+```bash
+git clone https://github.com/xian-ai-1057/AgentHarness.git
+cd AgentHarness
+docker compose up -d             # 第一次會建置映像檔，需要幾分鐘
+docker compose logs harness      # 看自動產生的登入密碼
+```
+
+接著：
+
+1. 用瀏覽器打開 `http://<這台電腦的位址>:4321`，登入（使用者名稱不限，
+   密碼在上面的 log 裡）。
+2. 第一次會看到「先連接模型」：選供應商、貼上金鑰，按「測試連線並儲存」。
+3. 開始對話。可以直接上傳 Excel、PDF、CSV 請它分析。
+
+這樣啟動時，以下的事都自動完成，不需要設定：
+
+| 項目 | 自動的做法 | 想自己指定時 |
+|---|---|---|
+| 專案 | 建立一個通用助手：可以讀寫檔案、列計畫、讀取網頁、記住交代的事、寫程式分析上傳的檔案 | 修改 volume 裡的 `harness.yaml`、`agents/main.md`、`AGENTS.md` |
+| 登入密碼 | 第一次啟動時產生，之後每次啟動都用同一組 | `.env` 的 `HARNESS_WEB_PASSWORD` |
+| 模型與金鑰 | 在網頁上填寫（見[在網頁上連接模型](#在網頁上連接模型)） | `.env` 的 `ANTHROPIC_API_KEY` 等 |
+| 沙盒 | 一併建置裝好 pandas、matplotlib 等套件的映像檔 | 修改 `docker/sandbox.Dockerfile` |
+| 埠號 | 4321 | `.env` 的 `HARNESS_PORT` |
+
+要調整時，把 `.env.example` 複製成 `.env` 再修改，然後重新執行
+`docker compose up -d`。
+
+**公司網路要透過 proxy 才能連外**時，在 `.env` 寫上 proxy：
+
+```bash
+HTTP_PROXY=http://proxy.example.com:3128
+HTTPS_PROXY=http://proxy.example.com:3128
+NO_PROXY=localhost,127.0.0.1,.example.internal   # 不經過 proxy 的位址
+```
+
+建置映像檔（pip、apt）與執行時（呼叫模型、讀取網頁）都會使用，容器裡
+大小寫兩種環境變數（`HTTP_PROXY`、`http_proxy`…）都會設定。proxy 不會
+寫進映像檔。執行 `docker compose` 的終端機已經設定這些環境變數時，不寫
+`.env` 也會沿用。內網的模型端點（例如自架的 LiteLLM Proxy）記得放進
+`NO_PROXY`。
+
+**資料放在哪裡。** 專案、對話紀錄、上傳的檔案、記憶與金鑰都在名為
+`harness-data` 的 Docker volume 裡，`docker compose down` 與重新建置都
+不會刪除它（`docker compose down -v` 才會）。要看或修改裡面的檔案：
+
+```bash
+docker compose exec harness ls /assistant
+docker compose restart harness   # 改了 harness.yaml 或 agent 之後重新載入
+```
+
+更新版本：`git pull && docker compose up -d --build`。
+
+**安全上要知道的事**
+
+- **`docker-compose.yml` 把主機的 Docker socket 掛進容器**，沙盒才能啟動
+  容器來執行程式。能使用這個 socket 等於擁有主機的 root 權限，所以請放在
+  專用的機器或虛擬機上。不需要分析檔案時，把 `docker-compose.yml` 裡
+  `/var/run/docker.sock` 那一行刪掉再啟動（自動建立的助手就不會開啟
+  沙盒）。
+- **登入密碼會印在 log 裡**，看得到 `docker compose logs` 的人就能登入。
+- **這個設定是 http，沒有加密。** 只在內網或 VPN 裡使用；要從網際網路
+  連線，請在前面加上 HTTPS 的反向代理（見
+  [部署到伺服器](#部署到伺服器)的 nginx 設定）。
+- 其他注意事項（所有登入的人共用對話與上傳的檔案）見
+  [部署到伺服器](#部署到伺服器)最後的說明。
+
+不用 Docker 也可以：安裝後在一個空的資料夾執行 `pyharness web`，同樣會
+自動建立助手、在網頁上填金鑰（見[網頁版](#網頁版)）。
 
 ## 安裝
 
@@ -1007,6 +1084,16 @@ pyharness sandbox     # 檢查 Docker、映像檔與限制是否正常
 `pyharness sandbox` 會在沙盒裡跑一段檢查程式，列出 Python 版本、裝了
 哪些常用套件、網路是否關閉、工作目錄能不能寫入。
 
+用 [Docker Compose 部署](#快速部署docker)時這些都已經做好：映像檔來自
+`docker/sandbox.Dockerfile`，並用三個環境變數提供預設值（`harness.yaml`
+有寫的話以它為準）：
+
+| 環境變數 | 用途 |
+|---|---|
+| `HARNESS_SANDBOX_IMAGE` | 沒寫 `sandbox.image` 時使用的映像檔 |
+| `HARNESS_SANDBOX_NOTES` | 沒寫 `sandbox.notes` 時附在工具說明後面的文字 |
+| `HARNESS_SANDBOX_VOLUME` | pyharness 自己也跑在容器裡時，專案所在的 Docker volume 名稱。沙盒改成只掛載這個 volume 裡的工作目錄（需要 Docker 26 以上） |
+
 在程式裡使用：
 
 ```python
@@ -1135,8 +1222,20 @@ litellm 文件裡連 Proxy 的寫法 `litellm_proxy/claude` 也可以，送出�
 拿掉 `litellm_proxy/`。
 
 決定用哪個模型的順序：命令列的 `-m` → agent 檔案的 `model` →
-`harness.yaml` 的 `model` → 環境變數 `HARNESS_MODEL` →
-`anthropic/claude-opus-5-5`。
+`harness.yaml` 的 `model` → 環境變數 `HARNESS_MODEL` → 依已設定的金鑰
+挑選 → `anthropic/claude-opus-5-5`。
+
+「依已設定的金鑰挑選」是指直接連供應商、又沒有指定模型時，使用第一家
+已經設定金鑰的供應商的預設模型，所以只設定一把金鑰就能用：
+
+| 設定了 | 使用的模型 |
+|---|---|
+| `ANTHROPIC_API_KEY` | `anthropic/claude-opus-5-5` |
+| `OPENAI_API_KEY` | `openai/gpt-5` |
+| `GEMINI_API_KEY` | `gemini/gemini-2.5-pro` |
+| `OPENROUTER_API_KEY` | `openrouter/nousresearch/hermes-4-405b` |
+
+同時設定好幾把時，依表格由上到下的順序。
 
 其他要傳給模型的參數寫在 `modelParams`（agent 檔案或 `harness.yaml`
 皆可），會原樣交給 litellm：
@@ -1158,7 +1257,8 @@ pyharness memory             查看長期記憶（forget <識別碼> / clear）
 pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
                              （-l hr,sales 模擬受限的 agent）
 pyharness web                開啟網頁版（--port、--host、--allowed-host、
-                             --max-upload-mb，見下一節）
+                             --max-upload-mb，見下一節）；資料夾是空的
+                             時自動建立可以直接使用的助手
 pyharness sandbox            檢查沙盒（Docker）能不能正常執行程式
 
 chat 與 run 共用的選項：
@@ -1181,6 +1281,19 @@ pyharness web               # 開啟 http://127.0.0.1:4321
 pyharness web --port 8080   # 換埠號
 ```
 
+**資料夾是空的（或還不存在）時，會自動建立一個可以直接使用的通用
+助手**，不必先執行 `pyharness new`：
+
+```bash
+pyharness web -p ~/my-assistant
+```
+
+這個助手可以讀寫專案裡的檔案、列計畫、讀取網頁、記住使用者交代的事；
+這台電腦能使用 Docker 時，還會開啟[沙盒](#在沙盒裡執行程式)，讓它寫程式
+分析上傳的檔案。建立的就是一般的專案（`harness.yaml`、`agents/main.md`、
+`AGENTS.md`），之後可以照自己的需要修改。資料夾裡已經有其他檔案、卻
+沒有 `harness.yaml` 時不會自動建立，以免指錯位置。
+
 和 TypeScript 版的 `harness web` 是同一份網頁，功能說明見
 [根目錄 README 的網頁版](../README.md#網頁版)：串流對話、工具步驟、
 權限確認與寫檔差異、同時跑好幾段對話、出錯重試，以及寫回
@@ -1196,8 +1309,39 @@ Python 版另外會處理：
   存檔，所以伺服器重新啟動後只剩交辦內容與結果。
 - **對話壓縮**：壓縮的地方會標出「對話已壓縮」。
 - **訊息防護**：使用者的訊息被擋下時，顯示被擋下的原因。
-- **金鑰**：沒有設定 `HARNESS_BASE_URL`（直接連供應商）時，設定頁會
-  列出已設定的 `*_API_KEY` 環境變數名稱（不會顯示內容）。
+- **連接模型**：在網頁上選供應商、填金鑰與模型，不需要設定環境變數
+  （見下方的[在網頁上連接模型](#在網頁上連接模型)）。
+
+### 在網頁上連接模型
+
+還沒有設定金鑰時，打開網頁會先看到「先連接模型」；之後要更換，到
+「設定 → 模型」。
+
+1. 選供應商：Anthropic、OpenAI、Google、OpenRouter、Ollama（本機模型，
+   不需要金鑰），或自己的 OpenAI 相容端點（LiteLLM Proxy、vLLM 等，填
+   端點網址）。
+2. 貼上金鑰。模型名稱已經填好該供應商常用的模型，需要時再改。
+3. 按「測試連線並儲存」。**伺服器會先用新的設定實際連一次模型，連得上
+   才儲存**；金鑰打錯、模型名稱不對或連不到伺服器時，會顯示原因，原本
+   的設定保持不變。
+
+儲存的內容：
+
+- 模型名稱寫進 `harness.yaml` 的 `model`。
+- 金鑰與端點網址存在專案的 `.harness/secrets/env.json`，只有執行
+  pyharness 的使用者能讀（權限 600）。網頁上之後只顯示「已設定」，不會
+  再顯示內容。
+- 存起來的設定在每次啟動時套用，**優先於啟動時的環境變數**；同一個專案
+  的 `pyharness chat`、`pyharness run` 也會使用。要回到只用環境變數，
+  刪掉 `.harness/secrets/env.json` 再重新啟動。
+
+內建的檔案工具（`read_file`、`write_file` 等）不能存取
+`.harness/secrets/`，沙盒也掛載不到它。但 `shell` 的 `run_command` 可以
+執行任何指令（讀得到這個檔案，也讀得到環境變數），所以架給別人用的
+agent 不建議開啟 `shell`。
+
+清單以外的供應商（litellm 支援的其他服務）仍然用原本的方式：在
+`harness.yaml` 寫模型名稱、用環境變數提供金鑰。
 
 ### 上傳檔案
 
@@ -1236,6 +1380,10 @@ TypeScript 版的 `harness web` 不支援上傳，網頁上不會出現迴紋針
 把 pyharness 架在一台伺服器上，使用者用瀏覽器連線，自己的電腦不需要
 安裝 Python。agent 寫的程式在伺服器的[沙盒](#在沙盒裡執行程式)裡執行。
 
+最省事的做法是用 Docker Compose，見[快速部署](#快速部署docker)。以下是
+不用 Docker 執行 pyharness、自己安裝與設定的步驟，以及加上 HTTPS 的
+方式（兩種做法都適用）。
+
 **1. 安裝**（伺服器需要 Python 3.11 以上與 Docker）
 
 ```bash
@@ -1259,8 +1407,12 @@ export HARNESS_MODEL=claude
 ~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com
 ```
 
-- **讓其他電腦連線時一定要設定 `HARNESS_WEB_PASSWORD`**，否則伺服器會
-  拒絕啟動。瀏覽器會跳出登入視窗：使用者名稱不限，密碼要正確。
+- **讓其他電腦連線時一定要有登入密碼。** 沒有設定
+  `HARNESS_WEB_PASSWORD` 時，第一次啟動會自動產生一組並印在啟動訊息裡，
+  存在專案的 `.harness/secrets/web-password`，之後每次啟動都用同一組。
+  瀏覽器會跳出登入視窗：使用者名稱不限，密碼要正確。
+- 模型的三個環境變數也可以不設定，啟動後
+  [在網頁上連接模型](#在網頁上連接模型)。
 - `--allowed-host` 是使用者在瀏覽器網址列輸入的主機名稱（可以重複）。
   沒有指定時，只要密碼正確，用任何網址連線都接受。
 - 密碼會以 HTTP Basic Auth 傳送，**一定要放在 HTTPS 後面**，不要讓瀏覽器
@@ -1338,8 +1490,9 @@ sudo systemctl enable --now harness
   的 `knowledge`、`memory`、`guardrails`、`compaction`、`sandbox` 區塊，
   所以同一個專案仍然可以用 TypeScript 版執行（只是沒有這些功能；agent
   的 `tools` 列了 `sandbox` 的話，TypeScript 版會因為找不到它而無法載入）。
-- **網頁版的登入密碼（`HARNESS_WEB_PASSWORD`）與 `--allowed-host` 只有
-  Python 版支援。**Python 版壓縮
+- **網頁版的登入密碼（`HARNESS_WEB_PASSWORD`）、`--allowed-host`、在網頁上
+  連接模型、自動建立助手專案與 Docker Compose 部署只有 Python 版支援。**
+  TypeScript 版的內建檔案工具同樣不能存取 `.harness/secrets/`。Python 版壓縮
   過的對話，TypeScript 版會讀取壓縮後的歷史接續。
 - 對話紀錄的格式相同，同一個專案的對話可以用任一個版本接續。
 

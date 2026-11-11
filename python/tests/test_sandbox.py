@@ -96,6 +96,22 @@ class TestDockerArgs:
             assert flag in joined
         assert args[-3:] == ["my-image", "python", "-"]
 
+    def test_volume_mount_when_harness_runs_in_a_container(self, tmp_path):
+        box = sandbox.Sandbox(
+            workspace=tmp_path / "ws",
+            volume="harness-data",
+            volume_subpath="ws",
+        )
+
+        args = box.docker_args("box-1")
+
+        mount = args[args.index("--mount") + 1]
+        assert mount == (
+            "type=volume,src=harness-data,dst=/workspace,volume-nocopy,"
+            "volume-subpath=ws"
+        )
+        assert "-v" not in args
+
     def test_runs_as_current_user(self, tmp_path):
         args = sandbox.Sandbox(workspace=tmp_path).docker_args("x")
 
@@ -259,6 +275,35 @@ class TestConfig:
     def test_unknown_setting_is_an_error(self, tmp_path):
         with pytest.raises(ValueError, match="不認得的設定"):
             sandbox.from_config(tmp_path, {"timeout": 5})
+
+    def test_deployment_environment_supplies_defaults(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HARNESS_SANDBOX_IMAGE", "harness-sandbox")
+        monkeypatch.setenv("HARNESS_SANDBOX_NOTES", "已安裝 pandas。")
+        monkeypatch.setenv("HARNESS_SANDBOX_VOLUME", "harness-data")
+
+        box = sandbox.from_config(tmp_path, True)
+        custom = sandbox.from_config(
+            tmp_path, {"image": "mine", "workspace": "data/ws"}
+        )
+
+        assert box.image == "harness-sandbox"
+        assert box.notes == "已安裝 pandas。"
+        assert (box.volume, box.volume_subpath) == ("harness-data", "workspace")
+        assert custom.image == "mine"
+        assert custom.volume_subpath == "data/ws"
+
+    def test_without_deployment_environment_mounts_the_folder(
+        self, tmp_path, monkeypatch
+    ):
+        for name in (sandbox.IMAGE_ENV, sandbox.NOTES_ENV, sandbox.VOLUME_ENV):
+            monkeypatch.delenv(name, raising=False)
+
+        box = sandbox.from_config(tmp_path, True)
+
+        assert box.image == sandbox.DEFAULT_IMAGE
+        assert box.volume is None
 
 
 class TestProject:

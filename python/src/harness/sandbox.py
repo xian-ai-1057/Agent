@@ -13,12 +13,21 @@
       harness.yaml，無法藉此在主機上執行程式。
 
 每次執行都是全新的容器，變數不會留到下一次；要沿用結果請寫成檔案。
+
+pyharness 自己也跑在容器裡時（用 docker-compose.yml 部署），它看到的路徑
+不是主機上的路徑，沒辦法直接掛載。這時專案放在一個 Docker volume 裡，
+用環境變數 HARNESS_SANDBOX_VOLUME 告訴沙盒 volume 的名稱，沙盒改成只掛載
+那個 volume 裡的工作目錄。映像檔與給模型看的說明也可以用環境變數提供
+預設值（HARNESS_SANDBOX_IMAGE、HARNESS_SANDBOX_NOTES），harness.yaml 有寫
+的話以 harness.yaml 為準。
 """
 
 import asyncio
 import dataclasses
 import os
 import pathlib
+import shutil
+import subprocess
 import uuid
 from typing import Any
 
@@ -29,6 +38,9 @@ TOOL_NAME = "run_python"
 DEFAULT_IMAGE = "python:3.12-slim"
 DEFAULT_WORKSPACE = "workspace"
 CONTAINER_WORKDIR = "/workspace"
+IMAGE_ENV = "HARNESS_SANDBOX_IMAGE"
+NOTES_ENV = "HARNESS_SANDBOX_NOTES"
+VOLUME_ENV = "HARNESS_SANDBOX_VOLUME"
 NO_OUTPUT = "（程式執行完畢，沒有輸出。要看的結果請用 print 印出來）"
 
 # 專案裡會被 harness 讀取或執行的位置；掛進容器的話，容器裡的程式可以
@@ -42,6 +54,30 @@ _PROTECTED = (
     ".harness",
 )
 _KILL_TIMEOUT = 15
+_AVAILABLE_TIMEOUT = 10
+
+
+def available(command: str = "docker") -> bool:
+    """確認這台機器現在能不能用 Docker 執行容器。
+
+    Args:
+        command: 容器工具的指令，docker 或 podman。
+
+    Returns:
+        指令存在，而且連得上 Docker 時為 True。
+    """
+    if shutil.which(command) is None:
+        return False
+    try:
+        result = subprocess.run(
+            [command, "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            timeout=_AVAILABLE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 @dataclasses.dataclass
@@ -79,6 +115,9 @@ class Sandbox:
         command: 容器工具的指令，docker 或 podman。
         notes: 附加在工具說明後面給模型看的文字，例如已安裝的套件。
         max_output_chars: stdout、stderr 各自最多保留的字數。
+        volume: workspace 所在的 Docker volume 名稱；pyharness 本身跑在
+            容器裡時使用，None 表示直接掛載主機上的資料夾。
+        volume_subpath: workspace 在 volume 裡的相對路徑。
     """
 
     workspace: pathlib.Path
@@ -90,6 +129,8 @@ class Sandbox:
     command: str = "docker"
     notes: str = ""
     max_output_chars: int = 20_000
+    volume: str | None = None
+    volume_subpath: str = ""
 
     def __post_init__(self) -> None:
         self.workspace = pathlib.Path(self.workspace).resolve()
@@ -144,8 +185,7 @@ class Sandbox:
             "MPLBACKEND=Agg",
             "-e",
             "PYTHONDONTWRITEBYTECODE=1",
-            "-v",
-            f"{self.workspace}:{CONTAINER_WORKDIR}",
+            *self._mount_args(),
             "-w",
             CONTAINER_WORKDIR,
             self.image,
@@ -153,6 +193,21 @@ class Sandbox:
             "-",
         ]
         return args
+
+    def _mount_args(self) -> list[str]:
+        """把工作目錄掛進容器的參數。"""
+        if self.volume is None:
+            return ["-v", f"{self.workspace}:{CONTAINER_WORKDIR}"]
+        # volume-nocopy：資料夾是空的時，Docker 預設會把映像檔裡同一個
+        # 位置的內容與擁有者複製過來，工作目錄會變成 root 的，之後
+        # pyharness 就寫不進去（例如存不了上傳的檔案）。
+        mount = (
+            f"type=volume,src={self.volume},dst={CONTAINER_WORKDIR}"
+            ",volume-nocopy"
+        )
+        if self.volume_subpath:
+            mount += f",volume-subpath={self.volume_subpath}"
+        return ["--mount", mount]
 
     async def run(self, code: str) -> Result:
         """在新的容器裡執行一段 Python 程式。
@@ -313,6 +368,17 @@ def from_config(root: pathlib.Path, config: Any) -> Sandbox | None:
     workspace = _workspace(
         root, str(options.pop("workspace", DEFAULT_WORKSPACE))
     )
+    # 部署環境提供的預設值；harness.yaml 有寫的話以它為準。
+    for field, variable in (("image", IMAGE_ENV), ("notes", NOTES_ENV)):
+        if field not in options and os.environ.get(variable):
+            options[field] = os.environ[variable]
+    volume = os.environ.get(VOLUME_ENV)
+    if volume:
+        # 專案根目錄就是 volume 的根目錄，所以相對路徑相同。
+        options["volume"] = volume
+        options["volume_subpath"] = workspace.relative_to(
+            root.resolve()
+        ).as_posix()
     return Sandbox(workspace=workspace, **options)
 
 
