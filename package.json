@@ -1,7 +1,7 @@
 {
   "name": "agent-harness",
   "version": "0.2.0",
-  "description": "An open-source, lightweight, model-agnostic agent harness: define agents in Markdown, give them tools, and run them from the CLI, a web UI, or your own code.",
+  "description": "A fully open-source, model-agnostic agent harness for self-hosting, data sovereignty and education. Define agents in Markdown, give them tools, and run them from the CLI, a web UI or your own code.",
   "type": "module",
   "engines": {
     "node": ">=22.18"

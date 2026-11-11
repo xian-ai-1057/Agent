@@ -1,10 +1,11 @@
 # Agent Harness（Python 版）
 
-開源、輕量、不綁定模型供應商的 agent 框架的 Python 實作。
+Agent Harness 的 Python 實作：完全開源、不綁定模型供應商的 agent harness。
+為誰而做見[根目錄的 README](../README.md#為誰而做)。
 
-這是 Agent Harness 的 Python 實作，和根目錄的 TypeScript 版使用**同一種專案
-格式**（同一份 `harness.yaml` 與 `agents/*.md`）。兩個版本的比較與選擇
-方式見[根目錄的 README](../README.md#兩個版本)。
+和根目錄的 TypeScript 版使用**同一種專案格式**（同一份 `harness.yaml` 與
+`agents/*.md`）。兩個版本的比較與選擇方式見
+[根目錄的 README](../README.md#兩個版本)。
 
 Python 版的特點：
 

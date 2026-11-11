@@ -1,5 +1,5 @@
 /**
- * Agent Harness：開源、輕量、不綁定模型供應商的 agent 框架。
+ * Agent Harness：完全開源、不綁定模型供應商的 agent harness。
  *
  * @example
  * import { defineAgent, run, tool } from "agent-harness";

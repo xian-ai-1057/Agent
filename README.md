@@ -1,35 +1,53 @@
 # Agent Harness
 
-開源、輕量、不綁定模型供應商的 agent 框架。
+**完全開源、不綁定模型供應商的 agent harness。**
 
-在 Agent Harness 裡，每個 agent 都是同一種形狀：**一段指示，加上一組
-工具**。指示寫在 Markdown 檔，工具就是普通的函式或現成的 MCP 伺服器。
-其餘的事交給框架：呼叫模型、執行工具並把結果送回模型、保存與接續
-對話、在危險操作前取得使用者同意、在關鍵時間點插入自訂邏輯。
+用一份 `harness.yaml` 和幾個 Markdown 檔定義 agent，用普通的函式或現成的
+MCP 伺服器給它工具，再從命令列、網頁或自己的程式裡和它對話。其餘的事
+交給框架：呼叫模型、執行工具並把結果送回模型、保存與接續對話、在危險
+操作前取得使用者同意、在關鍵時間點插入自訂邏輯。
+
+提供 TypeScript 與 Python 兩個實作，共用同一種專案格式。
+
+## 為誰而做
+
+Agent Harness 和 [Hermes Agent](https://github.com/NousResearch/hermes-agent)、
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 屬於
+同一類工具，主要為以下三種使用者而做：
+
+- **需要避開中國大陸應用與服務的人。** 不少機關、企業與受管制產業因為
+  法規或資安政策，不能使用中國大陸的 AI 應用。Agent Harness 不依賴任何
+  中國大陸的服務，也沒有內建的雲端服務：模型由你自己選擇，可以接
+  Claude、GPT、Gemini 等，也可以透過 Ollama 完全在本機執行。
+- **希望完全開源、由自己掌控的人。** 框架、網頁介面與範例都在這個 repo
+  裡。不需要註冊帳號，框架本身不收集使用資料，對話紀錄是存在專案資料夾
+  裡的純文字檔。可以部署在自己的電腦或內網。
+- **想學 agent 怎麼運作的人。** 程式碼刻意保持精簡：TypeScript 版的主
+  迴圈約 300 行，執行時的相依套件只有四個；兩種語言的實作並排，註解與
+  文件都是繁體中文。適合拿來教學、改寫或做實驗，見
+  [閱讀原始碼](#閱讀原始碼)。
 
 ## 特色
 
-- **不綁定模型**：連接任何 OpenAI 相容端點（TypeScript 版）或透過
-  litellm（Python 版），Claude、GPT、Gemini、本地模型都能用，換模型
-  只要改設定。
-- **用檔案定義 agent**：`harness.yaml` 加上 `agents/*.md`，不需要寫
-  程式就能調整 agent 的行為，也方便放進版控與審查。
-- **工具來源不限**：Python 函式、TypeScript 函式、現成的 MCP 伺服器，
-  以及內建的檔案工具。
-- **安全的預設值**：權限模式與 allow / deny / ask 規則，會寄信、改資料、
-  花錢的工具執行前先問使用者；hooks 可以稽核、攔截或改寫工具呼叫。
-- **可接續的對話紀錄**：只附加不改寫的 JSONL 檔，兩個版本互通。
-- **多種使用方式**：命令列聊天、單次執行（適合排程與腳本）、網頁介面，
-  或當成函式庫嵌進自己的服務。
-- **進階能力（Python 版）**：多個 agent 協作、知識庫（RAG）、skills、
-  長期記憶、訊息防護、對話壓縮。
+**不綁定模型。** TypeScript 版連接任何 OpenAI 相容端點，Python 版透過
+litellm 直接連各家供應商。換模型只要改設定，不用改程式。
 
-可以用來做的事，例如：
+**用檔案定義 agent。** `harness.yaml` 加上 `agents/*.md`，不寫程式就能
+調整 agent 的行為，也方便放進版控與審查。
 
-- 為既有的系統或資料加上自然語言介面
-- 客服、內部知識問答、資料分析等對話式助手
-- 在網頁服務裡提供 copilot 功能
-- 由排程觸發、無人值守的自動化任務
+**工具來源不限。** Python 函式、TypeScript 函式、現成的 MCP 伺服器，
+以及內建的檔案工具。
+
+**安全的預設值。** 權限模式與 allow / deny / ask 規則：會寄信、改資料、
+花錢的工具，執行前先問使用者。Hooks 可以稽核、攔截或改寫工具呼叫。
+
+**可接續的對話紀錄。** 只附加、不改寫的 JSONL 檔，兩個版本互通。
+
+**多種使用方式。** 命令列聊天、單次執行（適合排程與腳本）、網頁介面，
+或當成函式庫嵌進自己的服務。
+
+**進階能力（Python 版）。** 多個 agent 協作、知識庫（RAG）、skills、
+長期記憶、訊息防護、對話壓縮。
 
 ## 兩個版本
 
@@ -541,6 +559,25 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 已經有一套程式碼，想讓 agent 透過工具使用它的功能：見
 [docs/MIGRATION.md](docs/MIGRATION.md)。
 
+## 閱讀原始碼
+
+想了解 agent harness 怎麼運作，建議照這個順序讀 TypeScript 版（`src/`）：
+
+| 順序 | 檔案 | 內容 |
+|---|---|---|
+| 1 | `types.ts` | 訊息、工具呼叫、執行結果等共用資料型別 |
+| 2 | `loop.ts` | 主迴圈：呼叫模型 → 執行工具 → 把結果送回，直到模型不再呼叫工具 |
+| 3 | `model.ts` | 呼叫 OpenAI 相容端點；主迴圈只認得一個模型函式介面，測試時可以換成假的模型 |
+| 4 | `tool.ts` | 工具的定義方式與參數驗證 |
+| 5 | `permissions.ts`、`hooks.ts` | 工具執行前的權限判斷與自訂邏輯 |
+| 6 | `session.ts` | 對話紀錄怎麼存成 JSONL 檔、怎麼接續 |
+| 7 | `mcp.ts`、`project.ts` | 連接 MCP 伺服器、載入專案資料夾 |
+
+Python 版（`python/src/harness/`）的結構相同（`loop.py`、`llm.py`、
+`tools.py`…），另外多了多個 agent 協作（`delegation.py`）、知識庫
+（`knowledge.py`）、對話壓縮（`compaction.py`）等進階功能，可以在讀懂
+主迴圈之後再看。
+
 ## 設計來源
 
 | 來源 | 採用的設計 |
@@ -548,6 +585,7 @@ Node.js 可以打包，所以這份打包結果要一起提交。
 | OpenAI Agents SDK | `Agent` 與執行迴圈分離、用 schema 定義工具參數、`context.deps` 傳遞相依物件、工具層級的 `needsApproval` |
 | Claude Agent SDK / Claude Code | Hooks、權限模式與 allow / deny / ask 規則、只附加不改寫的 JSONL 對話紀錄、用 Markdown 檔定義 agent、用 MCP 接外部工具 |
 | Hermes Agent | 不綁定模型供應商、toolsets（成組啟用工具）、專案層級的 `AGENTS.md` |
+| DeepSeek Harness | 對話壓縮的做法（Python 版） |
 
 ## 目前的限制與還沒有的功能
 
