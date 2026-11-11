@@ -72,12 +72,14 @@ litellm 直接連各家供應商。換模型只要改設定，不用改程式。
 | 長期記憶 | 尚未支援 | [支援](python/README.md#長期記憶) |
 | 訊息防護（個資遮蔽、提示注入） | 尚未支援 | [支援](python/README.md#訊息防護) |
 | 對話壓縮 | 讀得懂 Python 版的壓縮紀錄，本身不壓縮 | [支援](python/README.md#對話壓縮) |
+| 在沙盒（Docker）裡執行程式 | 尚未支援 | [支援](python/README.md#在沙盒裡執行程式) |
+| 架在伺服器上（登入密碼） | 尚未支援 | [支援](python/README.md#部署到伺服器) |
 
 怎麼選：
 
 - **工具是 Python、想用最少的步驟接上**，要把 agent 嵌進 Python
   網頁服務，或需要多個 agent 協作、知識庫、skills、長期記憶、訊息防護、
-  對話壓縮：
+  對話壓縮、在沙盒裡執行程式、架在伺服器上給大家用：
   用 [Python 版](python/README.md)。
 - **工具是 TypeScript、或要嵌進 Node.js 服務**：用 TypeScript 版。
 
