@@ -9,8 +9,7 @@ MCP 伺服器給它工具，再從命令列、網頁或自己的程式裡和它�
 
 提供 TypeScript 與 Python 兩個實作，共用同一種專案格式。
 
-**說明文件：<https://agent-harness-docs-ten.vercel.app>**（文件原始檔在
-`docs/`，撰寫與部署方式見 [docs/README.md](docs/README.md)）
+**說明文件：<https://agent-harness-docs-ten.vercel.app>**
 
 ## 快速部署
 
