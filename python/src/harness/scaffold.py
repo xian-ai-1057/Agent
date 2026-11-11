@@ -1,4 +1,11 @@
-"""建立新專案的範本檔案（`pyharness new`）。"""
+"""建立新專案的範本檔案。
+
+兩種範本：
+    create_project    `pyharness new`：給開發者的起點，附一個範例工具與
+        各種設定的註解。
+    create_assistant  `pyharness web` 指到空資料夾時自動建立：不用寫任何
+        程式就能直接使用的通用助手。
+"""
 
 import pathlib
 
@@ -130,6 +137,74 @@ _FILES = {
 }
 
 
+_ASSISTANT_CONFIG = """\
+# 自動建立的通用助手。直接用就可以，不需要修改任何設定。
+#
+# 模型與金鑰在網頁的「設定 → 模型」填寫，也可以用環境變數提供
+# （例如 ANTHROPIC_API_KEY、OPENAI_API_KEY）。
+name: {name}
+
+defaultAgent: main
+
+permissions:
+  # 寫檔、讀取網頁這類動作，執行前先在網頁上問使用者。
+  mode: ask
+
+# 長期記憶：使用者說「請記住……」時，之後的對話都會記得。
+memory: true
+{sandbox}"""
+
+_SANDBOX_ON = """
+# 沙盒：讓助手寫 Python 程式解析上傳的檔案、分析資料，在 Docker 容器裡
+# 執行，沒有網路。上傳的檔案與產生的結果都在 workspace/。
+sandbox: true
+"""
+
+_SANDBOX_OFF = """
+# 沙盒：讓助手寫 Python 程式解析上傳的檔案、分析資料。建立這個專案時
+# 這台電腦不能使用 Docker，所以沒有開啟。裝好 Docker 之後，把下面這行
+# 與 agents/main.md 裡 tools 的 sandbox 取消註解，再重新啟動。
+# sandbox: true
+"""
+
+_ASSISTANT_AGENTS_MD = """\
+# {name}
+
+這裡寫所有對話都要知道的背景知識與規則，例如公司的名稱、常用的術語、
+回答時要遵守的規定。內容會接在助手的指示後面，改完重新啟動就生效。
+"""
+
+_ASSISTANT_AGENT = """\
+---
+name: main
+description: 通用助手：回答問題、查資料、整理與分析檔案
+tools:
+  - files
+  - plan
+  - web
+  {sandbox_tool}
+skills:
+  - planning
+  - web-research
+---
+你是一位通用的工作助手。
+
+- 用使用者的語言回答，先講結論，再補充必要的說明。
+- 不確定的事情照實說，不要編造資料、數字或出處。
+- 使用者上傳的檔案在 workspace/uploads/。
+{file_hint}
+- 需要網路上的資料時用 web_fetch 讀取網頁，並附上來源網址。
+- 工作有好幾個步驟時，先用 update_plan 列出計畫，再一步一步完成。
+- 產生的檔案（報告、圖表、整理好的資料）存在 workspace/ 裡，並告訴
+  使用者檔名。
+"""
+
+_FILE_HINT_SANDBOX = """\
+- 要解析 Excel、PDF、Word 或計算數字時，寫 Python 程式用 run_python
+  執行，不要自己心算或猜測檔案內容。"""
+_FILE_HINT_PLAIN = "- 文字檔用 read_file 讀取。"
+
+
 def create_project(path: str | pathlib.Path) -> list[pathlib.Path]:
     """在指定資料夾建立專案範本，不會覆寫已存在的檔案。
 
@@ -139,9 +214,69 @@ def create_project(path: str | pathlib.Path) -> list[pathlib.Path]:
     Returns:
         這次實際建立的檔案路徑。
     """
+    return _write_files(pathlib.Path(path).resolve(), _FILES)
+
+
+def create_assistant(
+    path: str | pathlib.Path, *, sandbox: bool = False
+) -> list[pathlib.Path]:
+    """建立不用寫程式就能直接使用的通用助手，不會覆寫已存在的檔案。
+
+    助手可以讀寫專案裡的檔案、列計畫、讀取網頁，並記住使用者交代的事。
+
+    Args:
+        path: 專案資料夾，不存在時會建立。
+        sandbox: 是否開啟沙盒，讓助手寫 Python 程式分析檔案（需要
+            Docker）。
+
+    Returns:
+        這次實際建立的檔案路徑。
+    """
     root = pathlib.Path(path).resolve()
+    config = _ASSISTANT_CONFIG.replace(
+        "{sandbox}", _SANDBOX_ON if sandbox else _SANDBOX_OFF
+    )
+    agent = _ASSISTANT_AGENT.replace(
+        "{sandbox_tool}", "- sandbox" if sandbox else "# - sandbox"
+    ).replace(
+        "{file_hint}", _FILE_HINT_SANDBOX if sandbox else _FILE_HINT_PLAIN
+    )
+    created = _write_files(
+        root,
+        {
+            "harness.yaml": config,
+            "AGENTS.md": _ASSISTANT_AGENTS_MD,
+            "agents/main.md": agent,
+            ".gitignore": _GITIGNORE,
+        },
+    )
+    (root / "workspace").mkdir(exist_ok=True)
+    return created
+
+
+def is_empty(path: str | pathlib.Path) -> bool:
+    """資料夾不存在，或裡面沒有任何東西（隱藏檔不算）。
+
+    Args:
+        path: 要檢查的資料夾。
+
+    Returns:
+        可以放心在裡面建立新專案時為 True。
+    """
+    root = pathlib.Path(path)
+    if not root.exists():
+        return True
+    if not root.is_dir():
+        return False
+    return all(item.name.startswith(".") for item in root.iterdir())
+
+
+def _write_files(
+    root: pathlib.Path, files: dict[str, str]
+) -> list[pathlib.Path]:
+    """寫入範本檔案，已存在的檔案保持不動。"""
     created = []
-    for relative, template in _FILES.items():
+    for relative, template in files.items():
         target = root / relative
         if target.exists():
             continue

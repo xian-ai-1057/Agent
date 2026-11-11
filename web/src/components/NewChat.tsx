@@ -5,6 +5,7 @@ import { api } from "../api.ts";
 import { navigate } from "../router.ts";
 import { upsertSummary, useStore } from "../store.ts";
 import { Composer } from "./Composer.tsx";
+import { ConnectionForm } from "./ConnectionForm.tsx";
 import { ChevronDownIcon, FolderIcon } from "./Icons.tsx";
 
 export function NewChat() {
@@ -22,6 +23,27 @@ export function NewChat() {
     project.agents.find((item) => item.name === project.defaultAgent) ??
     project.agents[0];
   if (!agent) return <main className="main" />;
+
+  const { connection } = project.model;
+  if (connection && !connection.ready) {
+    return (
+      <main className="main">
+        <div className="new-chat">
+          <div className="new-chat-inner anim-in">
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <span className="subtle mono">第一次使用</span>
+              <h1>先連接模型</h1>
+              <p className="lead">
+                選一家模型供應商並貼上金鑰，就可以開始使用。之後要更換，到「設定
+                → 模型」修改。
+              </p>
+            </div>
+            <ConnectionForm project={project} connection={connection} />
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   const tools = project.toolsets
     .flatMap((set) => set.tools)

@@ -5,7 +5,8 @@ pyharness chat                在目前專案開始聊天
 pyharness run "<訊息>"        執行一次後結束
 pyharness memory              查看、刪除或清空長期記憶
 pyharness knowledge [查詢]    檢查知識庫的索引，或試著搜尋
-pyharness web                 開啟網頁版
+pyharness web                 開啟網頁版；資料夾是空的時，自動建立一個
+                              可以直接使用的助手
 pyharness sandbox             檢查沙盒（Docker）能不能正常執行程式
 
 指令名稱是 pyharness，避免和 TypeScript 版的 harness 指令衝突；也可以
@@ -16,16 +17,20 @@ import argparse
 import asyncio
 import dataclasses
 import os
+import pathlib
 import sys
 from collections.abc import Callable
 
 from harness import agents
 from harness import compaction as compaction_lib
+from harness import credentials
 from harness import datatypes
 from harness import knowledge as knowledge_lib
+from harness import llm
 from harness import loop
 from harness import permissions as permissions_lib
 from harness import project as project_lib
+from harness import providers
 from harness import sandbox as sandbox_lib
 from harness import scaffold
 from harness import sessions
@@ -55,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
         "sandbox": _command_sandbox,
     }
     try:
+        if args.command == "web":
+            _prepare_web_project(args.project)
+        # 在網頁上填過的金鑰存在專案裡，聊天與單次執行也用得到。
+        credentials.apply(args.project)
         # with 確保專案啟動的 MCP 伺服器在結束時關閉。
         with project_lib.load_project(args.project) as loaded:
             return commands.get(args.command, _command_agent)(args, loaded)
@@ -112,8 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allowed-host",
         action="append",
         metavar="主機名稱",
-        help="瀏覽器網址上的主機名稱，例如反向代理的網域（可以重複）；"
-        f"需要設定 {WEB_PASSWORD_ENV}",
+        help="瀏覽器網址上的主機名稱，例如反向代理的網域（可以重複）",
     )
     web.add_argument(
         "--max-upload-mb",
@@ -178,18 +186,58 @@ def _command_memory(
     return 0
 
 
+def _prepare_web_project(path: str) -> None:
+    """資料夾是空的時，建立一個可以直接使用的助手專案。
+
+    已經有檔案、卻沒有 harness.yaml 的資料夾不會動它：多半是指錯了位置，
+    交給 load_project 回報錯誤。
+    """
+    root = pathlib.Path(path)
+    if (root / project_lib.CONFIG_FILE).exists() or not scaffold.is_empty(root):
+        return
+    scaffold.create_assistant(root, sandbox=sandbox_lib.available())
+    print(f"{root.resolve()} 是空的，已經建立一個可以直接使用的助手。")
+
+
+def _web_password(
+    args: argparse.Namespace, loaded: project_lib.Project
+) -> tuple[str | None, str]:
+    """決定網頁版的登入密碼，回傳 (密碼, 給使用者看的說明)。
+
+    只給本機使用時不需要密碼。讓其他電腦連線、又沒有用環境變數指定
+    密碼時，自動產生一組並存在專案裡，之後每次啟動都用同一組。
+    """
+    from harness.web import server
+
+    password = os.environ.get(WEB_PASSWORD_ENV) or None
+    if password:
+        return password, f"密碼是環境變數 {WEB_PASSWORD_ENV} 的值。"
+    if args.host in server.LOCAL_HOSTS and not args.allowed_host:
+        return None, ""
+    password, _ = credentials.web_password(loaded.root)
+    stored = credentials.SECRETS_DIR / credentials.PASSWORD_FILE
+    return password, (
+        f"密碼：{password}\n"
+        f"（自動產生，存在 {stored}；要用自己的密碼請設定環境變數 "
+        f"{WEB_PASSWORD_ENV}）"
+    )
+
+
 def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
     """啟動網頁版，直到使用者按 Ctrl-C。"""
     # aiohttp 只有網頁版用得到，延後到這裡才載入。
     from harness import web
 
-    password = os.environ.get(WEB_PASSWORD_ENV) or None
+    password, password_note = _web_password(args, loaded)
 
     def ready(url: str) -> None:
         print(f"{loaded.name} 的網頁版已啟動：{url}")
         if password:
-            print(f"需要登入：使用者名稱不限，密碼是 {WEB_PASSWORD_ENV}。")
-        print("按 Ctrl-C 結束。")
+            print(f"需要登入：使用者名稱不限。{password_note}")
+        agent = loaded.agents[loaded.default_agent]
+        if not providers.is_ready(agent.model or llm.default_model()):
+            print("還沒有設定模型的金鑰：打開網頁後依畫面選供應商、貼上金鑰。")
+        print("按 Ctrl-C 結束。", flush=True)
 
     try:
         asyncio.run(

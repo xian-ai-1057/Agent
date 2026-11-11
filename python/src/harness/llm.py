@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import Any
 
 from harness import datatypes
+from harness import providers
 
 FALLBACK_MODEL = "anthropic/claude-opus-5-5"
 # litellm 文件裡連 LiteLLM Proxy 的寫法；送給端點前拿掉。
@@ -44,9 +45,18 @@ def default_model() -> str:
     """取得預設模型名稱（litellm 格式，例如 openai/gpt-5）。
 
     Returns:
-        環境變數 HARNESS_MODEL 的值，沒設定時用 FALLBACK_MODEL。
+        環境變數 HARNESS_MODEL 的值。沒設定時，直接連供應商的話用第一家
+        已經設定金鑰的供應商的預設模型（只設了 OPENAI_API_KEY 就用
+        OpenAI 的模型）；都沒有時用 FALLBACK_MODEL。
     """
-    return os.environ.get("HARNESS_MODEL") or FALLBACK_MODEL
+    configured = os.environ.get("HARNESS_MODEL")
+    if configured:
+        return configured
+    if not providers.uses_endpoint():
+        detected = providers.detect()
+        if detected is not None:
+            return detected.default_model
+    return FALLBACK_MODEL
 
 
 async def complete(

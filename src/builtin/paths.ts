@@ -1,13 +1,19 @@
 /** 內建工具共用的路徑處理。 */
 
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ToolError } from "../tool.ts";
 import type { RunContext } from "../types.ts";
 
 /**
+ * 存放金鑰與登入密碼的資料夾（Python 版的網頁會把連線設定存在這裡），
+ * 內建工具不能碰。
+ */
+const SECRETS_DIR = join(".harness", "secrets");
+
+/**
  * 把相對路徑轉成專案根目錄底下的絕對路徑。
  *
- * @throws 路徑跑到專案根目錄之外時。
+ * @throws 路徑跑到專案根目錄之外，或指向存放金鑰的資料夾時。
  */
 export function resolvePath(context: RunContext, path: string): string {
   const root = resolve(context.workdir);
@@ -15,6 +21,9 @@ export function resolvePath(context: RunContext, path: string): string {
   const fromRoot = relative(root, target);
   if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
     throw new ToolError(`路徑超出專案資料夾：${path}`);
+  }
+  if (fromRoot === SECRETS_DIR || fromRoot.startsWith(SECRETS_DIR + sep)) {
+    throw new ToolError(`不能存取存放金鑰的資料夾：${path}`);
   }
   return target;
 }

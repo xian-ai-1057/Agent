@@ -80,6 +80,22 @@ describe("內建檔案工具", () => {
     },
   );
 
+  it.each([
+    ".harness/secrets/env.json",
+    ".harness/secrets",
+    "a/../.harness/secrets/x",
+  ])("拒絕存放金鑰的資料夾 %s", (path) => {
+    expect(() => resolvePath(contextIn(tempDir()), path)).toThrow(/金鑰/);
+  });
+
+  it("其他 .harness 底下的檔案仍然可以存取", () => {
+    const context = contextIn(tempDir());
+
+    expect(resolvePath(context, ".harness/memory.json")).toContain(
+      "memory.json",
+    );
+  });
+
   it("只有會改檔案的工具需要使用者同意", () => {
     expect(writeFileTool.needsApproval).toBe(true);
     expect(editFileTool.needsApproval).toBe(true);

@@ -1,0 +1,10 @@
+# 映像檔只需要 python/ 與 docker/。
+*
+!python
+!docker
+**/__pycache__
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache
+**/.venv
+python/tests

@@ -4,6 +4,9 @@ import pathlib
 
 from harness import datatypes
 
+# 存放金鑰與登入密碼的資料夾（見 harness.credentials），內建工具不能碰。
+SECRETS_DIR = pathlib.Path(".harness") / "secrets"
+
 
 def resolve_path(context: datatypes.RunContext, path: str) -> pathlib.Path:
     """把相對路徑轉成專案根目錄底下的絕對路徑。
@@ -16,12 +19,15 @@ def resolve_path(context: datatypes.RunContext, path: str) -> pathlib.Path:
         解析後的絕對路徑。
 
     Raises:
-        ValueError: 路徑跑到專案根目錄之外。
+        ValueError: 路徑跑到專案根目錄之外，或指向存放金鑰的資料夾。
     """
     root = context.workdir.resolve()
     target = (root / path).resolve()
     if target != root and root not in target.parents:
         raise ValueError(f"路徑超出專案資料夾：{path}")
+    secrets = root / SECRETS_DIR
+    if target == secrets or secrets in target.parents:
+        raise ValueError(f"不能存取存放金鑰的資料夾：{path}")
     return target
 
 

@@ -1,8 +1,9 @@
 /**
  * 設定：模型、權限、工具、agent。
  *
- * 改動先放在草稿裡，按「儲存」才寫回 harness.yaml。端點網址與金鑰來自
- * 環境變數，這裡只顯示狀態。
+ * 改動先放在草稿裡，按「儲存」才寫回 harness.yaml。伺服器支援在網頁上
+ * 設定連線時（Python 版），供應商、金鑰與模型用 ConnectionForm 設定；
+ * 否則端點網址與金鑰來自環境變數，這裡只顯示狀態。
  */
 
 import { type FormEvent, useEffect, useState } from "react";
@@ -17,6 +18,7 @@ import { api } from "../api.ts";
 import { MODE_LABELS } from "../format.ts";
 import type { SettingsSection } from "../router.ts";
 import { refreshProject, useStore } from "../store.ts";
+import { ConnectionForm } from "./ConnectionForm.tsx";
 import { CheckIcon, CloseIcon } from "./Icons.tsx";
 import { Link } from "./Sidebar.tsx";
 
@@ -189,7 +191,7 @@ type EditProps = {
 function ModelSection({ project, draft, edit }: EditProps) {
   const [test, setTest] = useState<ModelTestResult | "testing">();
   const agent = project.agents.find((a) => a.name === project.defaultAgent);
-  const { env } = project.model;
+  const { env, connection } = project.model;
   const source = draft.model.trim()
     ? "config"
     : agent?.modelSource === "agent"
@@ -226,126 +228,138 @@ function ModelSection({ project, draft, edit }: EditProps) {
       <div>
         <h2 id="h-model">模型</h2>
         <p className="lead">
-          {python
-            ? "透過 litellm 連接模型：可以直接連供應商，也可以設定 HARNESS_BASE_URL 連 OpenAI 相容端點。"
-            : "連接任何 OpenAI 相容的端點，例如 LiteLLM Proxy、OpenRouter、Ollama。"}
+          {connection
+            ? "選一家模型供應商並填上金鑰，或連到自己的 OpenAI 相容端點。"
+            : python
+              ? "透過 litellm 連接模型：可以直接連供應商，也可以設定 HARNESS_BASE_URL 連 OpenAI 相容端點。"
+              : "連接任何 OpenAI 相容的端點，例如 LiteLLM Proxy、OpenRouter、Ollama。"}
           換模型只要改這裡。
         </p>
       </div>
 
-      <div className="form-row">
-        <label htmlFor="model-name">模型名稱</label>
-        <input
-          id="model-name"
-          className="field mono"
-          value={draft.model}
-          placeholder={env.model ?? env.fallbackModel ?? "端點認得的模型名稱"}
-          onChange={(event) =>
-            edit((d) => ({ ...d, model: event.target.value }))
-          }
-        />
-        <div className="chain">
-          <span>讀取順序：</span>
-          <span className={`link ${source === "agent" ? "on" : ""}`}>
-            agent 的 model
-          </span>
-          <span aria-hidden="true">→</span>
-          <span className={`link ${source === "config" ? "on" : ""}`}>
-            harness.yaml
-          </span>
-          <span aria-hidden="true">→</span>
-          <span className={`link ${source === "env" ? "on" : ""}`}>
-            HARNESS_MODEL
-          </span>
-        </div>
-        <div className="help">
-          {source === "default"
-            ? env.fallbackModel
-              ? `還沒有設定模型，目前使用預設的 ${env.fallbackModel}。`
-              : "還沒有設定模型：在這裡填寫，或設定環境變數 HARNESS_MODEL。"
-            : `${project.defaultAgent} 目前使用：${
-                source === "config" ? draft.model.trim() : (agent?.model ?? "")
-              }（${SOURCE_LABELS[source]}）`}
-        </div>
-      </div>
-
-      <div className="form-row">
-        <label htmlFor="base-url">端點網址</label>
-        <input
-          id="base-url"
-          className="field mono"
-          readOnly
-          value={
-            env.baseURL ??
-            (python
-              ? "未設定（直接連模型供應商）"
-              : "未設定（使用 OpenAI 官方端點）")
-          }
-        />
-        <div className="help">
-          來自環境變數 <code>HARNESS_BASE_URL</code>
-          ，要改的話請設定後重新啟動 {python ? "pyharness web" : "harness web"}
-          。
-        </div>
-      </div>
-
-      <div className="box box-row">
-        <div>
-          <div style={{ fontWeight: 600 }}>金鑰</div>
-          <div className="help" style={{ marginTop: 4 }}>
-            {keyText}
-          </div>
-        </div>
-        <span className={`badge ${keyOk ? "badge-muted" : "badge-danger"}`}>
-          {keySet ? "已設定" : "未設定"}
-        </span>
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 12,
-          alignItems: "center",
-        }}
-      >
-        <button
-          type="button"
-          className="btn btn-dark"
-          disabled={test === "testing"}
-          onClick={runTest}
-        >
-          {test === "testing" && (
-            <span
-              className="spin"
-              style={{
-                width: 12,
-                height: 12,
-                border: "2px solid rgba(255,255,255,.35)",
-                borderTopColor: "#fff",
-                borderRadius: "50%",
-              }}
+      {connection ? (
+        <ConnectionForm project={project} connection={connection} />
+      ) : (
+        <>
+          <div className="form-row">
+            <label htmlFor="model-name">模型名稱</label>
+            <input
+              id="model-name"
+              className="field mono"
+              value={draft.model}
+              placeholder={
+                env.model ?? env.fallbackModel ?? "端點認得的模型名稱"
+              }
+              onChange={(event) =>
+                edit((d) => ({ ...d, model: event.target.value }))
+              }
             />
-          )}
-          測試連線
-        </button>
-        {test && test !== "testing" && (
-          <span
-            className={`anim-in ${test.ok ? "ok-text" : "inline-error"}`}
-            role="status"
+            <div className="chain">
+              <span>讀取順序：</span>
+              <span className={`link ${source === "agent" ? "on" : ""}`}>
+                agent 的 model
+              </span>
+              <span aria-hidden="true">→</span>
+              <span className={`link ${source === "config" ? "on" : ""}`}>
+                harness.yaml
+              </span>
+              <span aria-hidden="true">→</span>
+              <span className={`link ${source === "env" ? "on" : ""}`}>
+                HARNESS_MODEL
+              </span>
+            </div>
+            <div className="help">
+              {source === "default"
+                ? env.fallbackModel
+                  ? `還沒有設定模型，目前使用預設的 ${env.fallbackModel}。`
+                  : "還沒有設定模型：在這裡填寫，或設定環境變數 HARNESS_MODEL。"
+                : `${project.defaultAgent} 目前使用：${
+                    source === "config"
+                      ? draft.model.trim()
+                      : (agent?.model ?? "")
+                  }（${SOURCE_LABELS[source]}）`}
+            </div>
+          </div>
+
+          <div className="form-row">
+            <label htmlFor="base-url">端點網址</label>
+            <input
+              id="base-url"
+              className="field mono"
+              readOnly
+              value={
+                env.baseURL ??
+                (python
+                  ? "未設定（直接連模型供應商）"
+                  : "未設定（使用 OpenAI 官方端點）")
+              }
+            />
+            <div className="help">
+              來自環境變數 <code>HARNESS_BASE_URL</code>
+              ，要改的話請設定後重新啟動{" "}
+              {python ? "pyharness web" : "harness web"}。
+            </div>
+          </div>
+
+          <div className="box box-row">
+            <div>
+              <div style={{ fontWeight: 600 }}>金鑰</div>
+              <div className="help" style={{ marginTop: 4 }}>
+                {keyText}
+              </div>
+            </div>
+            <span className={`badge ${keyOk ? "badge-muted" : "badge-danger"}`}>
+              {keySet ? "已設定" : "未設定"}
+            </span>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 12,
+              alignItems: "center",
+            }}
           >
-            {test.ok ? (
-              <>
-                <CheckIcon size={14} />
-                已連線，{test.model} 有回應
-              </>
-            ) : (
-              test.message
+            <button
+              type="button"
+              className="btn btn-dark"
+              disabled={test === "testing"}
+              onClick={runTest}
+            >
+              {test === "testing" && (
+                <span
+                  className="spin"
+                  style={{
+                    width: 12,
+                    height: 12,
+                    border: "2px solid rgba(255,255,255,.35)",
+                    borderTopColor: "#fff",
+                    borderRadius: "50%",
+                  }}
+                />
+              )}
+              測試連線
+            </button>
+            {test && test !== "testing" && (
+              <span
+                className={`anim-in ${test.ok ? "ok-text" : "inline-error"}`}
+                role="status"
+              >
+                {test.ok ? (
+                  <>
+                    <CheckIcon size={14} />
+                    已連線，{test.model} 有回應
+                  </>
+                ) : (
+                  test.message
+                )}
+              </span>
             )}
-          </span>
-        )}
-      </div>
-      <div className="help">測試使用已儲存的設定。</div>
+          </div>
+          <div className="help">測試使用已儲存的設定。</div>
+        </>
+      )}
 
       <div
         className="form-row"

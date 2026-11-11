@@ -181,7 +181,47 @@ export interface ProjectInfo {
       /** 都沒設定模型時使用的預設模型（Python 版）。 */
       fallbackModel?: string;
     };
+    /**
+     * 可以在網頁上設定連線時才有（Python 版）：選供應商、填金鑰與模型，
+     * 用 PUT /api/settings/connection 儲存。
+     */
+    connection?: ConnectionInfo;
   };
+}
+
+/** 一家可以直接連線的模型供應商。 */
+export interface ProviderInfo {
+  /** 代號，也是模型名稱的開頭（anthropic/...）。 */
+  id: string;
+  label: string;
+  defaultModel: string;
+  needsKey: boolean;
+  /** 金鑰的環境變數名稱；不需要金鑰時為 null。 */
+  keyVar: string | null;
+  /** 金鑰是否已經設定（不會送出金鑰的內容）。 */
+  keySet: boolean;
+  /** 可以自訂伺服器位址時（Ollama），目前的位址；否則為 null。 */
+  baseURL: string | null;
+}
+
+/** 連線設定的狀態。 */
+export interface ConnectionInfo {
+  /** 預設 agent 的模型需要的金鑰或端點是否已經設定。 */
+  ready: boolean;
+  /** 目前使用的供應商代號、"endpoint"（OpenAI 相容端點），或清單以外時為 null。 */
+  provider: string | null;
+  providers: ProviderInfo[];
+}
+
+/** 連 OpenAI 相容端點時，連線設定裡的供應商代號。 */
+export const ENDPOINT_PROVIDER = "endpoint";
+
+/** PUT /api/settings/connection 的內容；apiKey、baseURL 留空表示沿用目前的值。 */
+export interface ConnectionSettings {
+  provider: string;
+  apiKey: string;
+  baseURL: string;
+  model: string;
 }
 
 /** 上傳完成的檔案。 */

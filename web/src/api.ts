@@ -2,6 +2,7 @@
 
 import type {
   ApprovalDecision,
+  ConnectionSettings,
   ModelTestResult,
   PermissionMode,
   PermissionSettings,
@@ -79,5 +80,7 @@ export const api = {
     request("PUT", "/settings/permissions", settings),
   saveModel: (model: string | null, maxTurns: number | null) =>
     request("PUT", "/settings/model", { model, maxTurns }),
+  saveConnection: (settings: ConnectionSettings) =>
+    request("PUT", "/settings/connection", settings),
   testModel: () => request<ModelTestResult>("POST", "/settings/model/test", {}),
 };

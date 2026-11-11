@@ -1,0 +1,64 @@
+# 一行部署 Agent Harness：
+#
+#   docker compose up -d          建置並啟動
+#   docker compose logs harness   看網址與自動產生的登入密碼
+#
+# 不需要任何設定就能啟動。要調整的話，把 .env.example 複製成 .env 再修改
+# （埠號、登入密碼、proxy、模型金鑰）。說明見 README 的「快速部署」。
+
+name: harness
+
+# 建置映像檔時（pip、apt）使用的 proxy；沒有設定時是空的，等於不使用。
+x-proxy-args: &proxy-args
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+  http_proxy: ${HTTP_PROXY:-}
+  https_proxy: ${HTTPS_PROXY:-}
+  no_proxy: ${NO_PROXY:-}
+
+services:
+  harness:
+    build:
+      context: .
+      args: *proxy-args
+    image: agent-harness
+    restart: unless-stopped
+    ports:
+      - "${HARNESS_PORT:-4321}:4321"
+    # .env 裡的其他設定（模型金鑰、HARNESS_WEB_PASSWORD…）原樣交給容器。
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # 執行時（呼叫模型、讀取網頁）使用的 proxy，大小寫兩種寫法都設定。
+      <<: *proxy-args
+      # 沙盒：agent 寫的 Python 程式在另一個容器裡執行，只看得到
+      # harness-data 裡的 workspace/。
+      HARNESS_SANDBOX_IMAGE: harness-sandbox
+      HARNESS_SANDBOX_VOLUME: harness-data
+      HARNESS_SANDBOX_NOTES: >-
+        已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、matplotlib
+        （圖表可以直接使用中文）。
+    volumes:
+      # 專案、對話紀錄、上傳的檔案與金鑰都在這個 volume 裡。
+      - harness-data:/assistant
+      # 讓沙盒用主機的 Docker 啟動容器。能使用這個 socket 等於擁有主機的
+      # root 權限；不需要沙盒（分析上傳的檔案）時，把這一行刪掉。
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # 只用來建置沙盒的映像檔，本身不會持續執行。
+  sandbox-image:
+    build:
+      context: docker
+      dockerfile: sandbox.Dockerfile
+      args: *proxy-args
+    image: harness-sandbox
+    command: ["true"]
+    restart: "no"
+    network_mode: none
+
+volumes:
+  harness-data:
+    # 固定名稱：沙盒要用這個名稱掛載 workspace/。
+    name: harness-data
