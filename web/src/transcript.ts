@@ -37,7 +37,14 @@ export interface Step {
 }
 
 export type Block =
-  | { kind: "text"; key: string; text: string; streaming: boolean }
+  | {
+      kind: "text";
+      key: string;
+      text: string;
+      streaming: boolean;
+      /** 這段文字是 messages 裡第幾則（評價回覆時用）；還在產生的文字沒有。 */
+      messageIndex?: number;
+    }
   | { kind: "notice"; key: string; text: string }
   | { kind: "steps"; key: string; steps: Step[] };
 
@@ -124,6 +131,7 @@ export function buildTurns(
           key: `m${index}`,
           text: message.content,
           streaming: false,
+          messageIndex: index,
         });
       }
       for (const call of message.tool_calls ?? []) {
@@ -207,6 +215,27 @@ export function collectFiles(turns: Turn[]): FileChange[] {
     }
   }
   return [...byPath.values()].reverse();
+}
+
+/** 使用者附上的檔案，同一個路徑只留一次，新的在前面。 */
+export function collectAttachments(turns: Turn[]): string[] {
+  const seen = new Set<string>();
+  for (const turn of [...turns].reverse()) {
+    for (const path of turn.attachments) seen.add(path);
+  }
+  return [...seen];
+}
+
+/** 一輪裡 agent 的回覆：所有文字段落接起來，以及最後一則的索引。 */
+export function replyOf(turn: Turn): { text: string; index?: number } {
+  const texts = turn.blocks.filter(
+    (block): block is Extract<Block, { kind: "text" }> =>
+      block.kind === "text" && !block.streaming,
+  );
+  return {
+    text: texts.map((block) => block.text.trim()).join("\n\n"),
+    index: texts.at(-1)?.messageIndex,
+  };
 }
 
 /**

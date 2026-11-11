@@ -1,7 +1,12 @@
 /** 一段對話：內容、權限確認、輸入框，以及右側的檔案面板。 */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { PermissionMode } from "../../../src/web/protocol.ts";
+import type {
+  Feedback,
+  PermissionMode,
+  SessionDetail,
+  SessionOptions,
+} from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
 import { isBusy, MODE_LABELS, STOP_NOTICES } from "../format.ts";
 import {
@@ -10,9 +15,33 @@ import {
   upsertSummary,
   useStore,
 } from "../store.ts";
-import { buildTurns, collectFiles, type FileChange } from "../transcript.ts";
+import {
+  buildTurns,
+  collectAttachments,
+  collectFiles,
+  type FileChange,
+  replyOf,
+  type Step,
+  type Turn,
+} from "../transcript.ts";
 import { ApprovalCard } from "./ApprovalCard.tsx";
+import "./chat/chat.css";
 import { Composer } from "./Composer.tsx";
+import {
+  agentTools,
+  type ComposerOptions,
+  effectiveModel,
+  modelLabel,
+  optionsEnabled,
+} from "./chat/options.ts";
+import { PlanChecklist } from "./chat/PlanChecklist.tsx";
+import {
+  forgetHandoff,
+  type PendingMessage,
+  peekHandoff,
+} from "./chat/pending.ts";
+import { latestPlan } from "./chat/plan.ts";
+import { Thinking } from "./chat/Thinking.tsx";
 import { FilePanel, type PanelTab } from "./FilePanel.tsx";
 import {
   AlertIcon,
@@ -22,10 +51,14 @@ import {
   ShieldIcon,
 } from "./Icons.tsx";
 import { Link } from "./Sidebar.tsx";
-import { TurnView } from "./Transcript.tsx";
+import { AttachmentChip, TurnView } from "./Transcript.tsx";
 
+type Pending = PendingMessage & { sent: boolean };
+
+/** App 以對話 id 當 key，換對話時整個重新建立，暫存的狀態不會帶過去。 */
 export function Conversation({ id }: { id: string }) {
-  const detail = useStore((s) => s.details[id]);
+  const stored = useStore((s) => s.details[id]);
+  const storedSummary = useStore((s) => s.sessions[id]);
   const previews = useStore((s) => s.previews);
   const project = useStore((s) => s.project);
   const [missing, setMissing] = useState<string>();
@@ -33,25 +66,71 @@ export function Conversation({ id }: { id: string }) {
     open: null,
   });
   const [tab, setTab] = useState<PanelTab>("diff");
+  // 新對話頁交過來、或剛在這裡送出的訊息；伺服器的事件到了就換掉。
+  const [pending, setPending] = useState<Pending | undefined>(() => {
+    const handed = peekHandoff(id);
+    return handed ? { ...handed, sent: true } : undefined;
+  });
+  const [sendError, setSendError] = useState<string>();
+  const [optionsOverride, setOptionsOverride] = useState<SessionOptions>();
+  const [optionsError, setOptionsError] = useState<string>();
+  const [runModel, setRunModel] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const autoOpened = useRef<string>(undefined);
 
   useEffect(() => {
-    setMissing(undefined);
-    setPanel({ open: null });
-    stickToBottom.current = true;
+    forgetHandoff(id);
     loadSession(id).catch((error: Error) => setMissing(error.message));
   }, [id]);
+
+  // 對話內容還在讀取、但已經有摘要時（剛建立的對話），先用空的內容顯示。
+  const detail = useMemo<SessionDetail | undefined>(
+    () =>
+      stored ??
+      (storedSummary
+        ? {
+            summary: storedSummary,
+            messages: [],
+            partial: "",
+            approvals: [],
+            mode: null,
+          }
+        : undefined),
+    [stored, storedSummary],
+  );
 
   const turns = useMemo(
     () => (detail ? buildTurns(detail, previews) : []),
     [detail, previews],
   );
   const files = useMemo(() => collectFiles(turns), [turns]);
+  const attachments = useMemo(() => collectAttachments(turns), [turns]);
   const summary = detail?.summary;
   const busy = isBusy(summary);
   const approval = detail?.approvals[0];
+
+  // 伺服器記下這則訊息（或這一輪已經結束）之後，就不再顯示暫時的訊息。
+  const pendingShown =
+    pending &&
+    !(
+      stored &&
+      (stored.messages.slice(pending.base).some((m) => m.role === "user") ||
+        (pending.sent && !isBusy(stored.summary)))
+    )
+      ? pending
+      : undefined;
+  useEffect(() => {
+    if (pending && !pendingShown) setPending(undefined);
+  }, [pending, pendingShown]);
+
+  // 這一輪的計畫（最後一則使用者訊息之後的 update_plan）。
+  const plan = useMemo(() => {
+    if (!detail || !busy) return undefined;
+    const messages = detail.messages;
+    const start = messages.findLastIndex((m) => m.role === "user");
+    return latestPlan(messages.slice(Math.max(0, start)));
+  }, [detail, busy]);
 
   useEffect(() => {
     document.title = summary ? `${summary.title} · Harness` : "Harness";
@@ -71,7 +150,23 @@ export function Conversation({ id }: { id: string }) {
     const element = scrollRef.current;
     if (element && stickToBottom.current)
       element.scrollTop = element.scrollHeight;
-  }, [detail]);
+  }, [detail, pendingShown]);
+
+  const agentInfo = project?.agents.find((a) => a.name === summary?.agent);
+  const models = project?.models ?? [];
+  const optionsValue: SessionOptions = optionsOverride ??
+    detail?.options ?? {
+      model: summary?.model ?? null,
+      tools: null,
+      skills: [],
+    };
+  const currentModel = effectiveModel(optionsValue, agentInfo?.model, models);
+
+  // 每一輪開始時記下用的模型，顯示在回覆底下。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在開始跑的時候記
+  useEffect(() => {
+    if (busy) setRunModel(currentModel);
+  }, [busy]);
 
   if (missing) {
     return (
@@ -92,14 +187,27 @@ export function Conversation({ id }: { id: string }) {
     setPanel({ open: true, path: change.path });
     setTab(nextTab);
   };
+  const openPath = (path: string) => {
+    setPanel({ open: true, path });
+    setTab("preview");
+  };
 
-  const send = async (text: string, attachments: string[]) => {
+  const send = async (text: string, files: string[]) => {
+    setSendError(undefined);
+    stickToBottom.current = true;
+    setPending({
+      text,
+      attachments: files,
+      base: stored?.messages.length ?? 0,
+      sent: false,
+    });
     try {
-      stickToBottom.current = true;
-      upsertSummary(await api.send(id, text, attachments));
+      upsertSummary(await api.send(id, text, files));
+      setPending((current) => current && { ...current, sent: true });
       return true;
     } catch (error) {
-      alert((error as Error).message);
+      setPending(undefined);
+      setSendError(`訊息沒有送出：${(error as Error).message}`);
       return false;
     }
   };
@@ -109,6 +217,52 @@ export function Conversation({ id }: { id: string }) {
     setDetailMode(id, mode);
     await api.setMode(id, mode).catch(() => undefined);
   };
+
+  const changeOptions = (change: Partial<SessionOptions>) => {
+    const previous = optionsValue;
+    setOptionsOverride({ ...optionsValue, ...change });
+    setOptionsError(undefined);
+    api.setOptions(id, change).then(
+      (saved) => {
+        if (saved && Array.isArray(saved.skills)) setOptionsOverride(saved);
+      },
+      (error: Error) => {
+        setOptionsOverride(previous);
+        setOptionsError(`選項沒有存到：${error.message}`);
+      },
+    );
+  };
+
+  const composerOptions: ComposerOptions | undefined =
+    project && optionsEnabled(project)
+      ? {
+          models,
+          skills: project.skills ?? [],
+          tools: agentInfo ? agentTools(project, agentInfo) : [],
+          value: optionsValue,
+          fallbackModel: agentInfo?.model,
+          onChange: changeOptions,
+          nextTurn: true,
+        }
+      : undefined;
+
+  const rate = project?.features?.feedback
+    ? (index: number, feedback: Feedback | null) =>
+        api.setFeedback(id, index, feedback).then(() => undefined)
+    : undefined;
+  const lastModel = modelLabel(
+    runModel ??
+      effectiveModel(
+        stored?.options ?? {
+          model: summary.model ?? null,
+          tools: null,
+          skills: [],
+        },
+        agentInfo?.model,
+        models,
+      ),
+    models,
+  );
 
   const projectMode = project?.permissions.mode ?? "ask";
   const modeLabel = detail.mode
@@ -124,9 +278,13 @@ export function Conversation({ id }: { id: string }) {
       ? summary.notice
       : undefined;
   const showThinking =
-    summary.status === "running" &&
-    summary.activity?.kind === "thinking" &&
-    !detail.partial;
+    Boolean(pendingShown) ||
+    (summary.status === "running" &&
+      (summary.activity === undefined ||
+        summary.activity.kind === "thinking") &&
+      !detail.partial);
+  const approvalAgent =
+    (approval && findApprovalStep(turns, approval.id)?.agent) ?? summary.agent;
 
   return (
     <>
@@ -134,7 +292,7 @@ export function Conversation({ id }: { id: string }) {
         <header className="main-header">
           <div className="main-title">
             <h1>{summary.title}</h1>
-            <span className="subtle mono">
+            <span className="subtle mono ch-hide-narrow">
               {project?.name} · {summary.agent}
             </span>
           </div>
@@ -159,29 +317,58 @@ export function Conversation({ id }: { id: string }) {
               80;
           }}
         >
-          <div className="thread">
-            {turns.map((turn) => (
-              <TurnView key={turn.key} turn={turn} onOpenFile={openFile} />
-            ))}
-            {showThinking && (
-              <div className="thinking anim-in">
-                <span className="dot pulse" />
-                思考中…
-              </div>
+          <div className="thread ch-thread">
+            {turns.map((turn, index) => {
+              const last = index === turns.length - 1;
+              const finished = !last || !busy || Boolean(pendingShown);
+              const reply = finished ? replyOf(turn) : undefined;
+              return (
+                <TurnView
+                  key={turn.key}
+                  turn={turn}
+                  onOpenFile={openFile}
+                  onOpenPath={project?.features?.files ? openPath : undefined}
+                  reply={
+                    reply?.text
+                      ? {
+                          text: reply.text,
+                          index: reply.index,
+                          feedback:
+                            reply.index === undefined
+                              ? undefined
+                              : detail.feedback?.[String(reply.index)],
+                          onFeedback: rate,
+                          model:
+                            last && !pendingShown && !busy
+                              ? lastModel
+                              : undefined,
+                        }
+                      : undefined
+                  }
+                />
+              );
+            })}
+            {pendingShown && (
+              <PendingView
+                pending={pendingShown}
+                onOpenPath={project?.features?.files ? openPath : undefined}
+              />
             )}
-            {summary.status === "error" && (
+            {showThinking && <Thinking />}
+            {summary.status === "error" && !pendingShown && (
               <ErrorCard id={id} message={summary.error ?? "未知的錯誤"} />
             )}
-            {summary.status === "stopped" && (
+            {summary.status === "stopped" && !pendingShown && (
               <div className="notice anim-in">你停止了這一輪。</div>
             )}
-            {blockedNotice && (
+            {blockedNotice && !pendingShown && (
               <div className="notice anim-in">
                 <ShieldIcon />
                 這則訊息被防護規則擋下，沒有送給模型：{blockedNotice}
               </div>
             )}
             {summary.status === "done" &&
+              !pendingShown &&
               summary.stopReason &&
               summary.stopReason !== "end_turn" &&
               summary.stopReason !== "blocked" && (
@@ -193,13 +380,14 @@ export function Conversation({ id }: { id: string }) {
           </div>
         </div>
 
-        <div className="composer-wrap">
+        <div className="composer-wrap ch-composer-wrap">
           <div className="composer-inner">
+            {plan && <PlanChecklist items={plan} />}
             {approval && (
               <ApprovalCard
                 key={approval.id}
                 approval={approval}
-                agent={project?.name ?? summary.agent}
+                agent={approvalAgent}
                 onShowFile={() => {
                   if (approval.preview) {
                     setPanel({ open: true, path: approval.preview.path });
@@ -215,12 +403,15 @@ export function Conversation({ id }: { id: string }) {
               onStop={() => void api.stop(id)}
               onUpload={project?.uploads ? api.upload : undefined}
               maxUploadBytes={project?.uploads?.maxBytes}
+              options={composerOptions}
               controls={
                 <>
-                  <span className="select-chip">agent：{summary.agent}</span>
+                  {!composerOptions && (
+                    <span className="select-chip">agent：{summary.agent}</span>
+                  )}
                   <label className="select-chip">
                     <ShieldIcon />
-                    {modeLabel}
+                    <span className="ch-hide-narrow">{modeLabel}</span>
                     <ChevronDownIcon />
                     <select
                       aria-label="這段對話的權限模式"
@@ -238,14 +429,21 @@ export function Conversation({ id }: { id: string }) {
                 </>
               }
             />
+            {(sendError || optionsError) && (
+              <p className="inline-error" role="alert">
+                {sendError ?? optionsError}
+              </p>
+            )}
           </div>
         </div>
       </main>
       {panelOpen && (
         <FilePanel
           files={files}
+          attachments={attachments}
           selected={panel.path}
           tab={tab}
+          canLoad={Boolean(project?.features?.files)}
           onSelect={(path) => setPanel({ open: true, path })}
           onTab={setTab}
           onClose={() => setPanel((p) => ({ ...p, open: false }))}
@@ -255,8 +453,57 @@ export function Conversation({ id }: { id: string }) {
   );
 }
 
+/** 剛送出、還沒出現在紀錄裡的訊息。 */
+export function PendingView({
+  pending,
+  onOpenPath,
+}: {
+  pending: { text: string; attachments: string[] };
+  onOpenPath?: (path: string) => void;
+}) {
+  return (
+    <>
+      {pending.text && (
+        <div className="ch-user anim-in">
+          <div className="msg-user">{pending.text}</div>
+        </div>
+      )}
+      {pending.attachments.length > 0 && (
+        <ul className="msg-attachments anim-in" aria-label="附加的檔案">
+          {pending.attachments.map((path) => (
+            <li key={path}>
+              <AttachmentChip path={path} onOpen={onOpenPath} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/** 等待確認的工具呼叫是哪一個步驟（subagent 的步驟才知道是誰要求的）。 */
+function findApprovalStep(turns: Turn[], approvalId: string): Step | undefined {
+  const search = (steps: Step[] | undefined): Step | undefined => {
+    for (const step of steps ?? []) {
+      if (step.approval?.id === approvalId) return step;
+      const child = search(step.children);
+      if (child) return child;
+    }
+    return undefined;
+  };
+  for (const turn of turns) {
+    for (const block of turn.blocks) {
+      if (block.kind !== "steps") continue;
+      const found = search(block.steps);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 function ErrorCard({ id, message }: { id: string; message: string }) {
   const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState<string>();
   const modelProblem = /模型|端點|HARNESS_|API|Connection/i.test(message);
   return (
     <section className="error-card anim-rise" role="alert">
@@ -270,6 +517,7 @@ function ErrorCard({ id, message }: { id: string; message: string }) {
           <p className="body subtle">
             你的訊息已經保留，問題排除後按重試就會接著跑。
           </p>
+          {error && <p className="inline-error">重試失敗：{error}</p>}
         </div>
       </div>
       <div className="actions">
@@ -279,10 +527,11 @@ function ErrorCard({ id, message }: { id: string; message: string }) {
           disabled={retrying}
           onClick={async () => {
             setRetrying(true);
+            setError(undefined);
             try {
               upsertSummary(await api.retry(id));
-            } catch (error) {
-              alert((error as Error).message);
+            } catch (failure) {
+              setError((failure as Error).message);
             }
             setRetrying(false);
           }}

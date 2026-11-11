@@ -4,12 +4,21 @@ import { useState } from "react";
 import {
   type Block,
   type FileChange,
-  formatArgs,
   resultPreview,
   type Step,
   summarizeSteps,
   type Turn,
 } from "../transcript.ts";
+import "./chat/chat.css";
+import { FileBadge } from "./chat/FileBadge.tsx";
+import {
+  MessageActions,
+  type ReplyActions,
+  UserCopy,
+} from "./chat/MessageActions.tsx";
+import { PlanList } from "./chat/PlanChecklist.tsx";
+import { planFromArguments, planProgress } from "./chat/plan.ts";
+import { describeStep, type StepSentence, sentenceText } from "./chat/steps.ts";
 import {
   CheckIcon,
   ChevronIcon,
@@ -24,19 +33,29 @@ import { Markdown } from "./Markdown.tsx";
 export function TurnView({
   turn,
   onOpenFile,
+  onOpenPath,
+  reply,
 }: {
   turn: Turn;
   onOpenFile: (change: FileChange) => void;
+  /** 點了使用者附上的檔案；沒有提供時附件不能點。 */
+  onOpenPath?: (path: string) => void;
+  /** 這一輪已經結束時，回覆底下的動作。 */
+  reply?: ReplyActions;
 }) {
   return (
     <>
-      {turn.user && <div className="msg-user anim-in">{turn.user}</div>}
+      {turn.user && (
+        <div className="ch-user anim-in">
+          <div className="msg-user">{turn.user}</div>
+          <UserCopy text={turn.user} />
+        </div>
+      )}
       {turn.attachments.length > 0 && (
         <ul className="msg-attachments anim-in" aria-label="附加的檔案">
           {turn.attachments.map((path) => (
-            <li key={path} className="attachment done" title={path}>
-              <FileIcon size={14} />
-              <span className="attachment-name">{path.split("/").at(-1)}</span>
+            <li key={path}>
+              <AttachmentChip path={path} onOpen={onOpenPath} />
             </li>
           ))}
         </ul>
@@ -53,7 +72,38 @@ export function TurnView({
             onOpen={() => onOpenFile(change)}
           />
         ))}
+      {reply?.text && <MessageActions {...reply} />}
     </>
+  );
+}
+
+/** 使用者訊息上的附件；可以預覽時是按鈕。 */
+export function AttachmentChip({
+  path,
+  onOpen,
+}: {
+  path: string;
+  onOpen?: (path: string) => void;
+}) {
+  const name = path.split("/").at(-1);
+  if (!onOpen) {
+    return (
+      <span className="attachment done" title={path}>
+        <FileIcon size={14} />
+        <span className="attachment-name">{name}</span>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="attachment done ch-attach-btn"
+      title={`預覽 ${path}`}
+      onClick={() => onOpen(path)}
+    >
+      <FileIcon size={14} />
+      <span className="attachment-name">{name}</span>
+    </button>
   );
 }
 
@@ -85,8 +135,9 @@ function StepGroup({ steps }: { steps: Step[] }) {
   let label = `已執行 ${steps.length} 個步驟`;
   if (errors > 0) label += ` · ${errors} 個工具錯誤`;
   const who = active?.agent ? `${active.agent}：` : "";
-  if (active?.status === "waiting") label = `${who}等你確認 ${active.name}`;
-  else if (active) label = `${who}執行 ${active.name}…`;
+  if (active?.status === "waiting") {
+    label = `${who}等你確認：${sentenceText(describeStep(active))}`;
+  } else if (active) label = `${who}${sentenceText(describeStep(active))}…`;
 
   return (
     <div className="anim-in">
@@ -118,9 +169,30 @@ function StepGroup({ steps }: { steps: Step[] }) {
   );
 }
 
+function Sentence({ sentence }: { sentence: StepSentence }) {
+  const { verb, target, style } = sentence;
+  return (
+    <span className="ch-step-text">
+      <span className="ch-step-verb">{verb}</span>
+      {target && style === "code" && (
+        <code className="ch-step-code">{target}</code>
+      )}
+      {target && style === "quote" && (
+        <span className="ch-step-target">「{target}」</span>
+      )}
+      {target && style === "plain" && (
+        <span className="ch-step-target">{target}</span>
+      )}
+    </span>
+  );
+}
+
 function StepRow({ step }: { step: Step }) {
   const [expanded, setExpanded] = useState(false);
-  const args = formatArgs(step);
+  const sentence = describeStep(step);
+  const plan =
+    step.name === "update_plan" ? planFromArguments(step.args) : undefined;
+  const progress = plan ? planProgress(plan) : undefined;
   return (
     <li className="anim-in">
       <button
@@ -133,9 +205,13 @@ function StepRow({ step }: { step: Step }) {
           <StepIcon status={step.status} />
         </span>
         {step.agent && <span className="step-agent">{step.agent}</span>}
-        <span className="step-name">{step.name}</span>
-        <span className="step-args">{args}</span>
-        {step.status === "done" && step.result && (
+        <Sentence sentence={sentence} />
+        {progress && (
+          <span className="step-result">
+            {progress.done} / {progress.total}
+          </span>
+        )}
+        {!plan && step.status === "done" && step.result && (
           <span className="step-result anim-in">
             {resultPreview(step.result)}
           </span>
@@ -153,20 +229,7 @@ function StepRow({ step }: { step: Step }) {
       {step.status === "error" && !expanded && (
         <div className="step-error anim-shake">{step.result}</div>
       )}
-      {expanded && (
-        <div className="step-detail anim-in">
-          <span className="label">參數</span>
-          <pre>{prettyArgs(step)}</pre>
-          {step.result !== undefined && (
-            <>
-              <span className="label">
-                {step.status === "error" ? "錯誤" : "結果"}
-              </span>
-              <pre>{step.result}</pre>
-            </>
-          )}
-        </div>
-      )}
+      {expanded && <StepDetail step={step} plan={plan} />}
       {step.children && (
         <ol className="step-list substeps" aria-label="subagent 的步驟">
           {step.children.map((child) => (
@@ -178,10 +241,58 @@ function StepRow({ step }: { step: Step }) {
   );
 }
 
+/** 展開後的內容：指令用終端機的樣子，計畫用清單，其他顯示原始參數與結果。 */
+function StepDetail({
+  step,
+  plan,
+}: {
+  step: Step;
+  plan: ReturnType<typeof planFromArguments>;
+}) {
+  const { command, cwd } = step.args;
+  if (step.name === "run_command" && typeof command === "string") {
+    return (
+      <div className="step-detail anim-in">
+        <div className="ch-term">
+          {typeof cwd === "string" && cwd !== "." && cwd !== "" && (
+            <div className="ch-term-cwd">{cwd}</div>
+          )}
+          <pre className="ch-term-cmd">
+            <span aria-hidden="true">$ </span>
+            {command}
+          </pre>
+          {step.result !== undefined && (
+            <pre
+              className={`ch-term-out${step.status === "error" ? " error" : ""}`}
+            >
+              {step.result}
+            </pre>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="step-detail anim-in">
+      {plan && <PlanList items={plan} />}
+      <span className="label">參數</span>
+      <pre>{prettyArgs(step)}</pre>
+      {step.result !== undefined && (
+        <>
+          <span className="label">
+            {step.status === "error" ? "錯誤" : "結果"}
+          </span>
+          <pre>{step.result}</pre>
+        </>
+      )}
+    </div>
+  );
+}
+
 function StepIcon({ status }: { status: Step["status"] }) {
   if (status === "done") {
     return (
-      <span className="anim-pop" style={{ color: "var(--accent)" }}>
+      <span className="anim-pop ch-step-ok">
         <CheckIcon />
       </span>
     );
@@ -211,10 +322,13 @@ function FileCard({
   onOpen: () => void;
 }) {
   return (
-    <button type="button" className="file-card anim-in" onClick={onOpen}>
-      <span className="icon">
-        <FileIcon />
-      </span>
+    <button
+      type="button"
+      className="file-card anim-in"
+      onClick={onOpen}
+      aria-label={`預覽 ${change.path}`}
+    >
+      <FileBadge path={change.path} />
       <span>
         <span className="name">{change.path.split("/").at(-1)}</span>
         <span className="meta">{change.path} · 已寫入</span>

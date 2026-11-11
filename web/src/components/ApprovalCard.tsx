@@ -3,6 +3,8 @@
 import { type ReactNode, useEffect, useState } from "react";
 import type { Approval, ApprovalDecision } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
+import "./chat/chat.css";
+import { describeStep, sentenceText } from "./chat/steps.ts";
 import { lineStats } from "./FilePanel.tsx";
 
 export function ApprovalCard({
@@ -11,11 +13,14 @@ export function ApprovalCard({
   onShowFile,
 }: {
   approval: Approval;
+  /** 提出要求的 agent 名稱。 */
   agent: string;
   onShowFile: () => void;
 }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
+  // 決定後先收起來，等伺服器的事件到了才真的移除。
+  const [leaving, setLeaving] = useState(false);
 
   const decide = async (decision: ApprovalDecision) => {
     if (sending) return;
@@ -23,6 +28,7 @@ export function ApprovalCard({
     setError(undefined);
     try {
       await api.decide(approval.sessionId, approval.id, decision);
+      setLeaving(true);
     } catch (failure) {
       setError((failure as Error).message);
       setSending(false);
@@ -44,69 +50,120 @@ export function ApprovalCard({
   });
 
   const { preview } = approval;
+  const command =
+    approval.tool === "run_command" &&
+    typeof approval.arguments.command === "string"
+      ? approval.arguments.command
+      : undefined;
+  const cwd =
+    typeof approval.arguments.cwd === "string" &&
+    approval.arguments.cwd !== "." &&
+    approval.arguments.cwd !== ""
+      ? approval.arguments.cwd
+      : undefined;
+  const sentence = describeStep({
+    name: approval.tool,
+    args: approval.arguments,
+  });
+  // 不認識的工具只說要執行哪個工具，參數在下面。
+  const action =
+    sentence.verb === approval.tool
+      ? `執行 ${approval.tool}`
+      : sentenceText(sentence);
   const stats = preview ? lineStats(preview.before, preview.after) : undefined;
 
   return (
-    <section className="approval-card anim-rise" aria-label="權限確認">
-      <div className="approval-head">
-        <div style={{ minWidth: 0 }}>
-          <div className="title">
-            {preview
-              ? `${agent} 想要寫入檔案`
-              : `${agent} 想要執行 ${approval.tool}`}
-          </div>
-          <div className="meta">
-            {approval.tool}
+    <div className={`ch-approval-wrap${leaving ? " leaving" : ""}`}>
+      <div>
+        <section className="approval-card ch-approval" aria-label="權限確認">
+          <div className="approval-head">
+            <div style={{ minWidth: 0 }}>
+              <div className="title">
+                {preview
+                  ? `${agent} 想要寫入檔案`
+                  : command !== undefined
+                    ? `${agent} 想要執行指令`
+                    : `${agent} 想要${action}`}
+              </div>
+              <div className="meta">
+                {approval.tool}
+                {preview && (
+                  <>
+                    {" · "}
+                    {preview.path}
+                    {" · "}
+                    {preview.before === null ? "新檔案" : "修改"}{" "}
+                    <span className="plus">+{stats?.added}</span>{" "}
+                    <span className="minus">−{stats?.removed}</span>
+                  </>
+                )}
+              </div>
+            </div>
             {preview && (
-              <>
-                {" · "}
-                {preview.path}
-                {" · "}
-                {preview.before === null ? "新檔案" : "修改"}{" "}
-                <span className="plus">+{stats?.added}</span>{" "}
-                <span className="minus">−{stats?.removed}</span>
-              </>
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={onShowFile}
+              >
+                查看內容
+              </button>
             )}
           </div>
-        </div>
-        {preview && (
-          <button
-            type="button"
-            className="btn btn-outline"
-            onClick={onShowFile}
-          >
-            查看內容
-          </button>
-        )}
+          {!preview && command !== undefined && (
+            <div className="ch-term ch-approval-term">
+              {cwd && <div className="ch-term-cwd">{cwd}</div>}
+              <pre className="ch-term-cmd">
+                <span aria-hidden="true">$ </span>
+                {command}
+              </pre>
+            </div>
+          )}
+          {!preview && command === undefined && (
+            <pre className="approval-args">
+              {JSON.stringify(approval.arguments, null, 2)}
+            </pre>
+          )}
+          <div className="approval-options ch-approval-options">
+            <Option
+              n="1"
+              kind="primary"
+              disabled={sending}
+              onClick={() => decide("once")}
+            >
+              允許這一次
+            </Option>
+            <Option n="2" disabled={sending} onClick={() => decide("always")}>
+              這個專案以後都允許 <code>{approval.tool}</code>
+            </Option>
+            <Option
+              n="3"
+              kind="outline"
+              disabled={sending}
+              onClick={() => decide("deny")}
+            >
+              拒絕
+            </Option>
+          </div>
+          {error && (
+            <div className="inline-error" role="alert">
+              {error}
+            </div>
+          )}
+        </section>
       </div>
-      {!preview && (
-        <pre className="approval-args">
-          {JSON.stringify(approval.arguments, null, 2)}
-        </pre>
-      )}
-      <div className="approval-options">
-        <Option n="1" disabled={sending} onClick={() => decide("once")}>
-          允許這一次
-        </Option>
-        <Option n="2" disabled={sending} onClick={() => decide("always")}>
-          這個專案以後都允許 <code>{approval.tool}</code>
-        </Option>
-        <Option n="3" disabled={sending} onClick={() => decide("deny")}>
-          拒絕
-        </Option>
-      </div>
-      {error && <div className="inline-error">{error}</div>}
-    </section>
+    </div>
   );
 }
 
 function Option({
   n,
+  kind = "plain",
   disabled,
   onClick,
   children,
 }: {
   n: string;
+  kind?: "primary" | "plain" | "outline";
   disabled: boolean;
   onClick: () => void;
   children: ReactNode;
@@ -114,7 +171,7 @@ function Option({
   return (
     <button
       type="button"
-      className="approval-option"
+      className={`approval-option ch-option ${kind}`}
       disabled={disabled}
       onClick={onClick}
     >
