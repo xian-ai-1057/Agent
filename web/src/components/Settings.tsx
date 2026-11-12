@@ -21,6 +21,11 @@ import { refreshProject, useStore } from "../store.ts";
 import { ConnectionForm } from "./ConnectionForm.tsx";
 import { CheckIcon, CloseIcon } from "./Icons.tsx";
 import { Link } from "./Sidebar.tsx";
+import {
+  getThemePreference,
+  setThemePreference,
+  type ThemePreference,
+} from "./shell/theme.ts";
 
 interface Draft {
   model: string;
@@ -109,6 +114,7 @@ export function Settings({ section }: { section: SettingsSection }) {
           <h1>設定</h1>
           <span className="subtle mono">{project.name} / harness.yaml</span>
         </div>
+        <ThemeSwitch />
       </header>
       <div className="scroll">
         <div className="settings">
@@ -122,7 +128,12 @@ export function Settings({ section }: { section: SettingsSection }) {
           </nav>
           <div className="settings-body anim-in" key={section}>
             {section === "model" && (
-              <ModelSection project={project} draft={current} edit={edit} />
+              <ModelSection
+                project={project}
+                draft={current}
+                edit={edit}
+                saveBarShown={dirty}
+              />
             )}
             {section === "permissions" && (
               <PermissionSection
@@ -144,7 +155,6 @@ export function Settings({ section }: { section: SettingsSection }) {
             <button
               type="button"
               className="btn btn-ghost"
-              style={{ color: "#fff" }}
               onClick={() => {
                 setDraft(null);
                 setError(undefined);
@@ -154,7 +164,7 @@ export function Settings({ section }: { section: SettingsSection }) {
             </button>
             <button
               type="button"
-              className="btn btn-light"
+              className="btn btn-accent"
               disabled={saving}
               onClick={save}
             >
@@ -173,6 +183,37 @@ export function Settings({ section }: { section: SettingsSection }) {
   );
 }
 
+const THEMES: [ThemePreference, string][] = [
+  ["system", "跟著系統"],
+  ["light", "淺色"],
+  ["dark", "深色"],
+];
+
+/** 外觀：跟著系統、淺色或深色，只存在這個瀏覽器。 */
+function ThemeSwitch() {
+  const [theme, setTheme] = useState(getThemePreference);
+  return (
+    <fieldset className="theme-switch">
+      <legend>外觀</legend>
+      <div className="segmented segmented-sm">
+        {THEMES.map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={theme === id}
+            onClick={() => {
+              setThemePreference(id);
+              setTheme(id);
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function toDraft(project: ProjectInfo): Draft {
   const { config } = project.model;
   return {
@@ -188,7 +229,15 @@ type EditProps = {
   edit: (change: (value: Draft) => Draft) => void;
 };
 
-function ModelSection({ project, draft, edit }: EditProps) {
+function ModelSection({
+  project,
+  draft,
+  edit,
+  saveBarShown,
+}: EditProps & {
+  /** 下方的儲存列出現時，連線表單的按鈕改成次要樣式，畫面上只留一個紅色按鈕。 */
+  saveBarShown: boolean;
+}) {
   const [test, setTest] = useState<ModelTestResult | "testing">();
   const agent = project.agents.find((a) => a.name === project.defaultAgent);
   const { env, connection } = project.model;
@@ -238,7 +287,11 @@ function ModelSection({ project, draft, edit }: EditProps) {
       </div>
 
       {connection ? (
-        <ConnectionForm project={project} connection={connection} />
+        <ConnectionForm
+          project={project}
+          connection={connection}
+          secondary={saveBarShown}
+        />
       ) : (
         <>
           <div className="form-row">
@@ -323,21 +376,12 @@ function ModelSection({ project, draft, edit }: EditProps) {
           >
             <button
               type="button"
-              className="btn btn-dark"
+              className="btn btn-outline"
               disabled={test === "testing"}
               onClick={runTest}
             >
               {test === "testing" && (
-                <span
-                  className="spin"
-                  style={{
-                    width: 12,
-                    height: 12,
-                    border: "2px solid rgba(255,255,255,.35)",
-                    borderTopColor: "#fff",
-                    borderRadius: "50%",
-                  }}
-                />
+                <span className="spinner spin" aria-hidden="true" />
               )}
               測試連線
             </button>
@@ -516,7 +560,11 @@ function PermissionSection({ project, draft, edit }: EditProps) {
               </option>
             ))}
           </select>
-          <button type="submit" className="btn btn-dark" style={{ height: 44 }}>
+          <button
+            type="submit"
+            className="btn btn-outline"
+            style={{ height: 44 }}
+          >
             新增規則
           </button>
         </form>

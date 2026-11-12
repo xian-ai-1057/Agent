@@ -16,6 +16,7 @@ import pytest
 
 import harness
 from harness import cli
+from harness import datatypes
 from harness import sandbox
 from harness import tools
 from tests import conftest
@@ -142,8 +143,97 @@ class TestRun:
             context,
         )
 
-        assert output == "3"
+        assert output == f"3\n\n{sandbox.PRODUCED_MARKER}workspace/out.txt"
         assert (box.workspace / "out.txt").read_text() == "done"
+
+    async def test_lists_new_and_modified_files_only(self, box, context):
+        box.workspace.mkdir()
+        (box.workspace / "same.txt").write_text("不變")
+        (box.workspace / "edit.txt").write_text("舊")
+        (box.workspace / "charts").mkdir()
+        [tool] = box.tools()
+
+        output = await _invoke(
+            tool,
+            "import os, time\n"
+            "open('edit.txt', 'w').write('新的內容')\n"
+            "time.sleep(0.05)\n"
+            "open('charts/a.png', 'wb').write(b'png')\n"
+            "open('.hidden', 'w').write('x')\n"
+            "os.makedirs('.cache', exist_ok=True)\n"
+            "open('.cache/b.txt', 'w').write('x')\n"
+            "print('ok')",
+            context,
+        )
+
+        lines = output.split("\n")
+        assert lines[:2] == ["ok", ""]
+        assert lines[2:] == [
+            f"{sandbox.PRODUCED_MARKER}workspace/charts/a.png",
+            f"{sandbox.PRODUCED_MARKER}workspace/edit.txt",
+        ]
+
+    async def test_no_produced_block_when_nothing_changed(self, box, context):
+        box.workspace.mkdir()
+        (box.workspace / "data.csv").write_text("a\n1\n")
+        [tool] = box.tools()
+
+        output = await _invoke(
+            tool, "print(open('data.csv').read()[0])", context
+        )
+
+        assert output == "a"
+
+    async def test_failed_run_still_lists_partial_outputs(self, box, context):
+        [tool] = box.tools()
+
+        with pytest.raises(tools.ToolError) as raised:
+            await _invoke(
+                tool,
+                "open('partial.csv', 'w').write('a')\nraise ValueError('壞')",
+                context,
+            )
+
+        message = str(raised.value)
+        assert "結束代碼 1" in message
+        assert message.endswith(
+            f"\n\n{sandbox.PRODUCED_MARKER}workspace/partial.csv"
+        )
+
+    async def test_files_outside_project_root_are_not_listed(
+        self, box, tmp_path
+    ):
+        elsewhere = datatypes.RunContext(
+            agent_name="test", workdir=tmp_path / "other", session_id="s1"
+        )
+        [tool] = box.tools()
+
+        output = await _invoke(tool, "open('a.txt', 'w').write('x')", elsewhere)
+
+        assert output == sandbox.NO_OUTPUT
+
+    def test_produced_list_is_capped_newest_first(self, tmp_path):
+        before = {"old.txt": (1, 1)}
+        after = {f"f{i}.txt": (100 + i, 1) for i in range(25)}
+        after["old.txt"] = (1, 1)
+
+        text = sandbox.produced_lines(
+            tmp_path / "workspace", tmp_path, before, after
+        )
+
+        lines = text.strip().split("\n")
+        assert len(lines) == 21
+        assert lines[0] == f"{sandbox.PRODUCED_MARKER}workspace/f24.txt"
+        assert "old.txt" not in text
+        assert "5 個檔案沒有列出" in lines[-1]
+
+    def test_marker_matches_the_web_protocol(self):
+        path = pathlib.Path(__file__).parents[2] / "src" / "web" / "protocol.ts"
+        if not path.exists():
+            pytest.skip("不在 repo 裡執行，找不到 protocol.ts")
+        protocol = path.read_text(encoding="utf-8")
+
+        assert f'PRODUCED_MARKER = "{sandbox.PRODUCED_MARKER}"' in protocol
 
     async def test_stderr_is_appended(self, box, context):
         [tool] = box.tools()

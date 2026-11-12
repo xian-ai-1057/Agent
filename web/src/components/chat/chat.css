@@ -1,0 +1,1907 @@
+/*
+ * 對話畫面（對話、新對話、輸入框、檔案面板）自己的樣式。
+ *
+ * 顏色、圓角、陰影都用 styles.css 的變數，深色模式跟著變。只有程式碼
+ * 上色與檔案類型標籤在這裡定義自己的顏色（淺色、深色各一組，文字與底色
+ * 的對比都在 4.5:1 以上）。動畫只動 transform 與
+ * opacity（收合用 grid-template-rows），減少動態效果時全部關掉。
+ */
+
+/* ── 程式碼上色（不用紅色） ─────────────────────────── */
+
+:root {
+  --hl-keyword: #6f42c1;
+  --hl-string: #1a7f37;
+  --hl-number: #0550ae;
+  --hl-comment: #5f6873;
+  --hl-title: #0b6e99;
+  --hl-attr: #8a5a00;
+  --hl-type: #7d5800;
+  --hl-meta: #57606a;
+  --hl-builtin: #0a5b8f;
+  --badge-doc: #1f5fae;
+  --badge-doc-bg: rgba(31, 95, 174, 0.12);
+  --badge-sheet: #1b6b3a;
+  --badge-sheet-bg: rgba(27, 107, 58, 0.12);
+  --badge-slide: #9a3f1b;
+  --badge-slide-bg: rgba(154, 63, 27, 0.12);
+  --badge-pdf: #4a4a4a;
+  --badge-pdf-bg: rgba(74, 74, 74, 0.1);
+  --badge-image: #6a45c2;
+  --badge-image-bg: rgba(106, 69, 194, 0.12);
+  --badge-archive: #7a5a00;
+  --badge-archive-bg: rgba(122, 90, 0, 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --hl-keyword: #c4a7ff;
+    --hl-string: #7ee2a8;
+    --hl-number: #79c0ff;
+    --hl-comment: #8b949e;
+    --hl-title: #6cc3e6;
+    --hl-attr: #f0b36b;
+    --hl-type: #e3c46a;
+    --hl-meta: #a0a8b0;
+    --hl-builtin: #8ecbf5;
+    --badge-doc: #8fb8f0;
+    --badge-doc-bg: rgba(143, 184, 240, 0.16);
+    --badge-sheet: #7fd3a0;
+    --badge-sheet-bg: rgba(127, 211, 160, 0.16);
+    --badge-slide: #f0a47f;
+    --badge-slide-bg: rgba(240, 164, 127, 0.16);
+    --badge-pdf: #d0d0d0;
+    --badge-pdf-bg: rgba(208, 208, 208, 0.12);
+    --badge-image: #c4a7ff;
+    --badge-image-bg: rgba(196, 167, 255, 0.16);
+    --badge-archive: #e3c46a;
+    --badge-archive-bg: rgba(227, 196, 106, 0.16);
+  }
+}
+
+:root[data-theme="dark"] {
+  --hl-keyword: #c4a7ff;
+  --hl-string: #7ee2a8;
+  --hl-number: #79c0ff;
+  --hl-comment: #8b949e;
+  --hl-title: #6cc3e6;
+  --hl-attr: #f0b36b;
+  --hl-type: #e3c46a;
+  --hl-meta: #a0a8b0;
+  --hl-builtin: #8ecbf5;
+  --badge-doc: #8fb8f0;
+  --badge-doc-bg: rgba(143, 184, 240, 0.16);
+  --badge-sheet: #7fd3a0;
+  --badge-sheet-bg: rgba(127, 211, 160, 0.16);
+  --badge-slide: #f0a47f;
+  --badge-slide-bg: rgba(240, 164, 127, 0.16);
+  --badge-pdf: #d0d0d0;
+  --badge-pdf-bg: rgba(208, 208, 208, 0.12);
+  --badge-image: #c4a7ff;
+  --badge-image-bg: rgba(196, 167, 255, 0.16);
+  --badge-archive: #e3c46a;
+  --badge-archive-bg: rgba(227, 196, 106, 0.16);
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag {
+  color: var(--hl-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-symbol {
+  color: var(--hl-string);
+}
+
+.hljs-number,
+.hljs-variable.constant_ {
+  color: var(--hl-number);
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: var(--hl-comment);
+  font-style: italic;
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-title.function_ {
+  color: var(--hl-title);
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-name {
+  color: var(--hl-attr);
+}
+
+.hljs-type,
+.hljs-title.class_ {
+  color: var(--hl-type);
+}
+
+.hljs-meta,
+.hljs-tag {
+  color: var(--hl-meta);
+}
+
+.hljs-built_in,
+.hljs-bullet {
+  color: var(--hl-builtin);
+}
+
+/* 刪除的行用警告色加刪除線，不用紅色。 */
+.hljs-deletion {
+  color: var(--warn);
+  text-decoration: line-through;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
+
+/* ── 程式碼區塊與數學式 ─────────────────────────────── */
+
+.ch-code {
+  margin: 0 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm, 4px);
+  overflow: hidden;
+  background: var(--soft);
+}
+
+.ch-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 2px 12px;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.ch-code-lang {
+  font: 500 11.5px var(--mono);
+  color: var(--muted);
+}
+
+.ch-code-copy {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: var(--r-sm, 4px);
+  transition: color var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-code-copy:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.ch-swap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  animation: ch-fade var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.md .ch-code pre {
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.md .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+  margin: 0 0 12px;
+}
+
+.md .katex {
+  font-size: 1.05em;
+}
+
+/* 回覆裡的圖片（例如程式畫的圖表）不超出對話寬度。 */
+.md img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--r-md, 8px);
+}
+
+/* ── 對話內容 ─────────────────────────────────────── */
+
+/* 新訊息淡入並上升一點點（比共用的 anim-in 短）。 */
+.ch-thread .anim-in {
+  animation: ch-rise var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+/* 狀態圖示換成勾勾時輕輕放大，不彈跳。 */
+.ch-thread .anim-pop {
+  animation: ch-check-pop var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+.ch-thread .collapse {
+  transition-duration: var(--dur-3, 320ms);
+  transition-timing-function: var(--ease-out, ease);
+}
+
+.ch-thread .chevron {
+  transition: transform var(--dur-2, 200ms) var(--ease-out, ease);
+}
+
+.ch-user {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.ch-user-copy {
+  opacity: 0;
+}
+
+.ch-user:hover .ch-user-copy,
+.ch-user:focus-within .ch-user-copy {
+  opacity: 1;
+}
+
+.ch-attach-btn {
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  transition: background-color var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-attach-btn:hover {
+  background: var(--hover);
+}
+
+.thinking.ch-thinking {
+  color: var(--muted);
+}
+
+.ch-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.ch-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--muted);
+  animation: ch-dot 1.2s ease-in-out infinite;
+}
+
+.ch-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.ch-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* 回覆底下的動作 */
+
+.ch-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: -12px;
+  min-height: 30px;
+}
+
+.ch-action {
+  height: 30px;
+  min-width: 30px;
+  border: 0;
+  border-radius: var(--r-sm, 4px);
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  transition:
+    opacity var(--dur-2, 200ms) var(--ease-out, ease),
+    transform var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-action:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.ch-action:active {
+  transform: scale(0.94);
+}
+
+.ch-actions .ch-action[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--soft);
+  animation: ch-pop-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.ch-action-label {
+  animation: ch-pop-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.ch-action-label {
+  font-size: 12px;
+}
+
+.ch-model-tag {
+  margin-left: 6px;
+  font: 400 11.5px var(--mono);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.ch-action-error {
+  font-size: 12px;
+  color: var(--danger);
+  margin-left: 6px;
+}
+
+/* 觸控裝置沒有滑過的狀態，動作一直顯示。 */
+@media (hover: none) {
+  .ch-user-copy {
+    opacity: 1;
+  }
+}
+
+/* 步驟 */
+
+.ch-step-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.ch-step-verb {
+  flex: none;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.ch-step-code,
+.ch-step-target {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-2);
+}
+
+.ch-step-code {
+  font: 400 12px var(--mono);
+  background: var(--soft);
+  border-radius: var(--r-sm, 4px);
+  padding: 1px 6px;
+}
+
+.ch-step-ok {
+  color: var(--ok);
+}
+
+.step-list > li {
+  animation: ch-fade var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+/* 指令與輸出，像終端機一樣 */
+
+.ch-term {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm, 4px);
+  background: var(--soft);
+  overflow: hidden;
+}
+
+.ch-term-cwd {
+  padding: 8px 12px 0;
+  font: 400 11.5px var(--mono);
+  color: var(--muted);
+}
+
+.ch-term .ch-term-cmd,
+.ch-term .ch-term-out {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 0;
+  background: transparent;
+  font: 400 12.5px / 1.6 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ch-term .ch-term-cmd {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.ch-term-cmd > span {
+  color: var(--muted);
+  user-select: none;
+}
+
+.ch-term .ch-term-out {
+  border-top: 1px dashed var(--line-2);
+  color: var(--ink-2);
+  max-height: 280px;
+  overflow: auto;
+}
+
+.ch-term .ch-term-out.error {
+  color: var(--warn-ink, var(--warn));
+}
+
+/* 檔案類型標籤（顏色定義在檔案開頭；PDF 不用紅色） */
+
+.ch-badge {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm, 4px);
+  font: 700 10.5px var(--mono);
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  background: var(--soft);
+}
+
+.ch-badge[data-kind="doc"] {
+  color: var(--badge-doc);
+  background: var(--badge-doc-bg);
+}
+
+.ch-badge[data-kind="sheet"] {
+  color: var(--badge-sheet);
+  background: var(--badge-sheet-bg);
+}
+
+.ch-badge[data-kind="slide"] {
+  color: var(--badge-slide);
+  background: var(--badge-slide-bg);
+}
+
+.ch-badge[data-kind="pdf"] {
+  color: var(--badge-pdf);
+  background: var(--badge-pdf-bg);
+}
+
+.ch-badge[data-kind="image"] {
+  color: var(--badge-image);
+  background: var(--badge-image-bg);
+}
+
+.ch-badge[data-kind="archive"] {
+  color: var(--badge-archive);
+  background: var(--badge-archive-bg);
+}
+
+.ch-thread .file-card {
+  border-radius: var(--r-md, 8px);
+}
+
+/* ── 程式產生的檔案與圖片 ─────────────────────────── */
+
+.ch-thumbs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ch-thumb {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md, 8px);
+  background: var(--panel);
+  overflow: hidden;
+  cursor: zoom-in;
+  transition:
+    border-color var(--dur-1, 120ms) var(--ease-out, ease),
+    transform var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-thumb:hover:not(:disabled) {
+  border-color: var(--line-3);
+}
+
+.ch-thumb:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.ch-thumb:disabled {
+  cursor: default;
+}
+
+.ch-thumb img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(320px, 100%);
+  max-height: 220px;
+  object-fit: contain;
+}
+
+/* 卡片裡有兩個動作（預覽、下載），外層是 div，hover 交給卡片。 */
+.file-card.ch-produced {
+  padding: 6px 10px 6px 6px;
+  gap: 8px;
+}
+
+.ch-produced-open {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  border-radius: var(--r-sm, 4px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ch-produced-open:disabled {
+  cursor: default;
+}
+
+.ch-produced-main {
+  min-width: 0;
+}
+
+.ch-produced-main .name,
+.ch-produced-main .meta {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 步驟：已修正的錯誤、拒絕 ─────────────────────── */
+
+.ch-fixed-note {
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.step-flag.ch-flag-muted,
+.ch-step-muted {
+  color: var(--muted);
+}
+
+.ch-step-muted {
+  display: flex;
+}
+
+/* ── 中斷、出錯的說明卡片 ─────────────────────────── */
+
+.ch-error-icon {
+  display: flex;
+  color: var(--danger);
+}
+
+.error-card.ch-interrupted {
+  border-color: var(--line-2);
+  background: var(--warn-bg);
+}
+
+.error-card.ch-interrupted .title {
+  color: var(--warn-ink);
+}
+
+.error-card.ch-interrupted .ch-error-icon {
+  color: var(--warn);
+}
+
+/* ── 計畫清單 ─────────────────────────────────────── */
+
+.ch-plan {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md, 8px);
+  background: var(--panel);
+  animation: ch-rise var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+.ch-plan-head {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  text-align: left;
+  border-radius: var(--r-md, 8px);
+}
+
+.ch-plan-head:hover {
+  background: var(--hover);
+}
+
+.ch-plan-head .chevron {
+  margin-left: auto;
+  transition: transform var(--dur-2, 200ms) var(--ease-out, ease);
+}
+
+.ch-plan .collapse {
+  transition-duration: var(--dur-3, 320ms);
+}
+
+.ch-plan-title {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ch-plan-count {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-plan-current {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.ch-plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.step-detail .ch-plan-list {
+  padding: 0 0 4px;
+  max-height: none;
+}
+
+.ch-plan-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ch-plan-mark {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1.5px solid var(--line-3);
+  border-radius: var(--r-pill, 999px);
+  display: grid;
+  place-items: center;
+}
+
+.ch-plan-item.completed .ch-plan-mark {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--panel);
+}
+
+.ch-plan-item.in_progress .ch-plan-mark {
+  border-color: var(--accent);
+}
+
+.ch-plan-item.in_progress .ch-plan-mark::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--accent);
+  animation: ch-pop-in var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+.ch-plan-step {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  transition: color var(--dur-2, 200ms) var(--ease-out, ease);
+}
+
+.ch-plan-item.in_progress .ch-plan-step {
+  font-weight: 500;
+}
+
+.ch-plan-item.completed .ch-plan-step {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.ch-check-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: ch-draw var(--dur-3, 320ms) var(--ease-out, ease) both;
+}
+
+/* ── 權限確認 ─────────────────────────────────────── */
+
+/* 決定之後整張卡片收起來（grid 0fr），等伺服器移除。 */
+.ch-approval-wrap {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--dur-3, 320ms) var(--ease-out, ease),
+    opacity var(--dur-2, 200ms) var(--ease-out, ease);
+}
+
+.ch-approval-wrap > div {
+  min-height: 0;
+}
+
+.ch-approval-wrap.leaving {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.ch-approval-wrap.leaving > div {
+  overflow: hidden;
+}
+
+.approval-card.ch-approval {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-md, 8px);
+  padding-top: 20px;
+  animation: ch-slide-up var(--dur-3, 320ms) var(--ease-out, ease) both;
+}
+
+.ch-approval::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  background: var(--accent);
+  transform-origin: left center;
+  animation: ch-strip var(--dur-3, 320ms) var(--ease-out, ease) both;
+}
+
+.ch-approval-term {
+  margin: 0;
+}
+
+.ch-approval .ch-term .ch-term-cmd {
+  max-height: 160px;
+  overflow: auto;
+}
+
+.ch-approval-options .ch-option {
+  border-radius: var(--r-pill, 999px);
+  padding: 0 14px;
+  transition:
+    background-color var(--dur-1, 120ms) var(--ease-out, ease),
+    transform var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-approval-options .ch-option:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.ch-approval-options .ch-option.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink, var(--panel));
+}
+
+.ch-approval-options .ch-option.primary:hover {
+  background: var(--accent-hover, var(--accent));
+  border-color: var(--accent-hover, var(--accent));
+}
+
+.ch-approval-options .ch-option.primary .kbd {
+  border-color: currentColor;
+  color: inherit;
+  opacity: 0.8;
+}
+
+.ch-approval-options .ch-option.plain:hover,
+.ch-approval-options .ch-option.outline:hover {
+  background: var(--hover);
+  border-color: var(--line-3);
+}
+
+.ch-approval-options .ch-option.outline {
+  background: transparent;
+}
+
+.ch-approval-options .ch-option:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ── 輸入框 ─────────────────────────────────────── */
+
+.ch-composer {
+  position: relative;
+}
+
+/* 焦點時外圈淡入（只動 opacity）。 */
+.ch-composer::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 0 0 3px var(--line-3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2, 200ms) var(--ease-out, ease);
+}
+
+.ch-composer:focus-within::after {
+  opacity: 1;
+}
+
+.ch-bar-gap {
+  flex: 1;
+}
+
+.ch-send {
+  animation: ch-swap-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+/* 停止鈕用中性色：等確認時，權限卡片的「允許」才是唯一的紅色按鈕。 */
+.ch-composer .send-btn.stop {
+  background: var(--ink);
+  color: var(--panel);
+}
+
+.ch-composer .send-btn.stop:hover:not(:disabled) {
+  background: var(--ink-2);
+}
+
+.ch-send:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.icon-btn.ch-plus-btn {
+  width: 32px;
+  height: 32px;
+}
+
+.ch-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.ch-model-btn {
+  height: 32px;
+  max-width: 200px;
+  border: 0;
+  border-radius: var(--r-pill, 999px);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 0 8px 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-model-btn:hover,
+.ch-model-btn[aria-expanded="true"] {
+  background: var(--hover);
+}
+
+.ch-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill, 999px);
+  font-size: 12.5px;
+  color: var(--ink-2);
+  animation: ch-pop-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.ch-chip.leaving {
+  animation: ch-chip-out var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.ch-chip-kind {
+  font: 500 10.5px var(--mono);
+  color: var(--muted);
+}
+
+.ch-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-chip button {
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--r-pill, 999px);
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.ch-chip button:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+/* ── 彈出選單 ─────────────────────────────────────── */
+
+.ch-pop {
+  position: absolute;
+  z-index: 40;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md, 8px);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-pop);
+  animation: ch-pop-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.ch-pop.up {
+  bottom: calc(100% + 6px);
+}
+
+.ch-pop.down {
+  top: calc(100% + 6px);
+}
+
+.ch-pop.start {
+  left: 0;
+}
+
+.ch-pop.end {
+  right: 0;
+}
+
+.ch-pop.up.start {
+  transform-origin: bottom left;
+}
+
+.ch-pop.up.end {
+  transform-origin: bottom right;
+}
+
+.ch-pop.down.start {
+  transform-origin: top left;
+}
+
+.ch-pop.down.end {
+  transform-origin: top right;
+}
+
+.ch-plus-pop {
+  width: 300px;
+}
+
+.ch-pop-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  animation: ch-slide-side var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+.ch-pop-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ch-pop-item {
+  width: 100%;
+  border: 0;
+  border-radius: var(--r-sm, 4px);
+  background: transparent;
+  color: inherit;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  font-size: 13.5px;
+}
+
+.ch-pop-item:hover,
+.ch-pop-item:focus-visible {
+  background: var(--hover);
+}
+
+.ch-pop-item:focus-visible {
+  outline-offset: -2px;
+}
+
+.ch-pop .ch-pop-item > svg {
+  flex: none;
+  color: var(--muted);
+}
+
+.ch-pop-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ch-pop-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-pop-title.mono {
+  font-size: 12.5px;
+}
+
+.ch-pop-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ch-pop-sub.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ch-tag {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill, 999px);
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--ink-2);
+}
+
+.ch-pop-check {
+  flex: none;
+  width: 16px;
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+}
+
+.ch-pop .ch-pop-check svg {
+  animation: ch-pop-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.ch-count {
+  font: 400 12px var(--mono);
+  color: var(--muted);
+}
+
+.ch-box {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--line-3);
+  border-radius: var(--r-sm, 4px);
+  display: grid;
+  place-items: center;
+  transition:
+    background-color var(--dur-1, 120ms) var(--ease-out, ease),
+    border-color var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-box.on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--panel);
+}
+
+.ch-box.on svg {
+  animation: ch-pop-in var(--dur-1, 120ms) var(--ease-out, ease) both;
+}
+
+.ch-pop-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  flex: none;
+}
+
+.ch-pop-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13.5px;
+  outline: none;
+}
+
+.ch-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 4px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.icon-btn.ch-pop-back {
+  width: 30px;
+  height: 30px;
+}
+
+.ch-pop-heading {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ch-pop-note,
+.ch-pop-hint,
+.ch-pop-empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ch-pop-note,
+.ch-pop-hint {
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+
+/* ── 新對話 ───────────────────────────────────────── */
+
+/*
+ * 用 margin: auto 置中：內容比畫面高時從上面開始排，可以捲動，
+ * 不會像 justify-content: center 那樣把上半部切掉。
+ */
+.new-chat.ch-new {
+  justify-content: flex-start;
+}
+
+.new-chat .ch-new-inner {
+  margin: auto;
+}
+
+.ch-greeting {
+  text-align: center;
+}
+
+.new-chat .thread.ch-new-thread {
+  padding: 0;
+  max-width: none;
+}
+
+.ch-suggestions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.ch-suggestion {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill, 999px);
+  background: var(--panel);
+  color: var(--ink-2);
+  font-size: 13px;
+  transition:
+    background-color var(--dur-1, 120ms) var(--ease-out, ease),
+    transform var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-suggestion:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.ch-suggestion:active {
+  transform: scale(0.97);
+}
+
+/* ── 檔案面板 ─────────────────────────────────────── */
+
+.ch-panel.anim-panel {
+  animation: ch-panel-in var(--dur-3, 320ms) var(--ease-out, ease) both;
+}
+
+.panel.ch-panel-full {
+  position: fixed;
+  inset: 8px;
+  z-index: 50;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  box-shadow: var(--shadow-pop);
+  animation: ch-scale-in var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+.ch-panel .panel-header {
+  gap: 4px;
+}
+
+.ch-panel .tabs {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ch-panel .tab {
+  white-space: nowrap;
+  padding: 0 10px;
+}
+
+.ch-panel-tools {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.ch-tab-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: ch-fade var(--dur-2, 200ms) var(--ease-out, ease) both;
+}
+
+.file-head.ch-preview-head {
+  flex-wrap: nowrap;
+}
+
+.ch-preview-title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ch-preview-name {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-preview-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-preview-media {
+  padding: 16px;
+  display: grid;
+  place-items: center;
+}
+
+.ch-preview-media img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--r-sm, 4px);
+  border: 1px solid var(--line);
+}
+
+.ch-preview-pdf {
+  display: flex;
+  flex-direction: column;
+  height: calc(100% - 64px);
+  min-height: 60vh;
+}
+
+.ch-preview-pdf iframe {
+  flex: 1;
+  width: 100%;
+  min-height: 60vh;
+  border: 0;
+  background: var(--soft);
+}
+
+.ch-preview-open {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ch-preview-state {
+  padding: 32px 24px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+}
+
+.ch-preview-note {
+  padding: 8px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ch-preview-code.preview-body {
+  padding: 16px;
+}
+
+.ch-preview-code .ch-code {
+  margin: 0;
+}
+
+.ch-preview-plain {
+  font-family: var(--mono);
+}
+
+.ch-csv {
+  padding: 12px 16px 24px;
+}
+
+.ch-csv-scroll {
+  overflow: auto;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm, 4px);
+}
+
+.ch-csv table {
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-csv th,
+.ch-csv td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ch-csv th {
+  position: sticky;
+  top: 0;
+  background: var(--soft);
+  font-weight: 600;
+}
+
+.ch-binary {
+  margin: 16px;
+  padding: 16px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md, 8px);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.ch-binary-main {
+  flex: 1;
+  min-width: 140px;
+}
+
+.ch-binary-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ch-binary-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.ch-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ch-file-row {
+  width: 100%;
+  border: 0;
+  border-radius: var(--r-md, 8px);
+  background: transparent;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  transition: background-color var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-file-row:hover {
+  background: var(--hover);
+}
+
+.ch-file-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ch-file-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-file-meta {
+  font: 400 12px var(--mono);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 按鈕與對話框 ─────────────────────────────────── */
+
+.btn.ch-btn-small {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+.modal.ch-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+}
+
+.ch-dialog-body {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ch-dialog-body h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.ch-dialog-lead {
+  margin: -8px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.ch-reasons {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ch-reason {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md, 8px);
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: background-color var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-reason:hover {
+  background: var(--hover);
+}
+
+.ch-reason.on {
+  border-color: var(--ink);
+}
+
+.ch-reason:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ch-reason input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.ch-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.ch-dialog-field textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md, 8px);
+  background: var(--panel);
+  padding: 8px 10px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.ch-dialog-field textarea:focus {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 0;
+}
+
+.dialog-actions.ch-dialog-actions {
+  margin-top: 0;
+}
+
+/* ── 窄畫面 ───────────────────────────────────────── */
+
+@media (max-width: 520px) {
+  .ch-hide-narrow {
+    display: none;
+  }
+  .thread.ch-thread {
+    padding: 20px 16px 16px;
+  }
+  .new-chat .thread.ch-new-thread {
+    padding: 0;
+  }
+  .composer-wrap.ch-composer-wrap {
+    padding: 0 12px 12px;
+  }
+  .new-chat.ch-new {
+    padding: 24px 16px;
+  }
+  .new-chat .ch-greeting {
+    font-size: 24px;
+  }
+  .ch-model-btn {
+    max-width: 120px;
+  }
+  .ch-pop {
+    width: min(320px, calc(100vw - 24px));
+  }
+  .ch-actions .ch-model-tag {
+    max-width: 140px;
+  }
+  .ch-user .msg-user {
+    max-width: 90%;
+  }
+}
+
+/* ── 動畫 ─────────────────────────────────────────── */
+
+@keyframes ch-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ch-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-check-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-swap-in {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-chip-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes ch-slide-side {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-strip {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes ch-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  40% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ch-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* 減少動態效果：這裡的動畫與轉場全部關掉。 */
+@media (prefers-reduced-motion: reduce) {
+  :where(
+    .ch-thread,
+    .ch-new,
+    .ch-composer,
+    .ch-composer-wrap,
+    .ch-pop,
+    .ch-panel,
+    .ch-approval-wrap,
+    .ch-plan,
+    .ch-dialog,
+    .ch-actions,
+    .ch-code,
+    .ch-chips,
+    .ch-thinking
+  ),
+  :where(
+    .ch-thread,
+    .ch-new,
+    .ch-composer,
+    .ch-composer-wrap,
+    .ch-pop,
+    .ch-panel,
+    .ch-approval-wrap,
+    .ch-plan,
+    .ch-dialog,
+    .ch-actions,
+    .ch-code,
+    .ch-chips,
+    .ch-thinking
+  )::before,
+  :where(
+    .ch-thread,
+    .ch-new,
+    .ch-composer,
+    .ch-composer-wrap,
+    .ch-pop,
+    .ch-panel,
+    .ch-approval-wrap,
+    .ch-plan,
+    .ch-dialog,
+    .ch-actions,
+    .ch-code,
+    .ch-chips,
+    .ch-thinking
+  )::after,
+  :where(
+      .ch-thread,
+      .ch-new,
+      .ch-composer,
+      .ch-composer-wrap,
+      .ch-pop,
+      .ch-panel,
+      .ch-approval-wrap,
+      .ch-plan,
+      .ch-dialog,
+      .ch-actions,
+      .ch-code,
+      .ch-chips,
+      .ch-thinking
+    )
+    *,
+  :where(
+      .ch-thread,
+      .ch-new,
+      .ch-composer,
+      .ch-composer-wrap,
+      .ch-pop,
+      .ch-panel,
+      .ch-approval-wrap,
+      .ch-plan,
+      .ch-dialog,
+      .ch-actions,
+      .ch-code,
+      .ch-chips,
+      .ch-thinking
+    )
+    *::before,
+  :where(
+      .ch-thread,
+      .ch-new,
+      .ch-composer,
+      .ch-composer-wrap,
+      .ch-pop,
+      .ch-panel,
+      .ch-approval-wrap,
+      .ch-plan,
+      .ch-dialog,
+      .ch-actions,
+      .ch-code,
+      .ch-chips,
+      .ch-thinking
+    )
+    *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: 減少動態效果時要蓋過所有動畫 */
+    animation: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: 減少動態效果時要蓋過所有轉場 */
+    transition: none !important;
+  }
+  .ch-dots i {
+    opacity: 0.6;
+  }
+}

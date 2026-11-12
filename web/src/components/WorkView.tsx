@@ -1,15 +1,17 @@
 /** 工作中：同時進行的對話一覽，可以直接允許、拒絕或停止。 */
 
 import { useEffect, useState } from "react";
-import type {
-  ApprovalDecision,
-  SessionSummary,
+import {
+  type ApprovalDecision,
+  INTERRUPTED_STOP_REASON,
+  type SessionSummary,
 } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
 import { activityLabel, formatAgo, formatDuration, useNow } from "../format.ts";
 import { useStore } from "../store.ts";
 import { CheckIcon, CrossIcon, ShieldIcon } from "./Icons.tsx";
 import { Link } from "./Sidebar.tsx";
+import { showToast } from "./shell/toast.tsx";
 
 type Filter = "all" | "waiting" | "running" | "finished";
 
@@ -115,7 +117,7 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
     setBusy(true);
     await api
       .decide(summary.id, approval.id, decision)
-      .catch((error: Error) => alert(error.message));
+      .catch((error: Error) => showToast(error.message, "error"));
     setBusy(false);
   };
 
@@ -131,7 +133,10 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
   } else if (status === "error") {
     line = summary.error ?? "出錯";
   } else if (status === "stopped") {
-    line = "你停止了這一輪";
+    line =
+      summary.stopReason === INTERRUPTED_STOP_REASON
+        ? "伺服器重新啟動，這一輪中斷了；打開對話可以重試"
+        : "你停止了這一輪";
   } else {
     line =
       summary.toolErrors > 0
@@ -150,7 +155,7 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
       <span className="work-status">
         {status === "running" && <span className="ring" />}
         {status === "waiting" && (
-          <span className="anim-pop" style={{ color: "var(--accent)" }}>
+          <span className="anim-pop accent-text">
             <ShieldIcon size={18} />
           </span>
         )}
@@ -160,7 +165,7 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
           </span>
         )}
         {status === "error" && (
-          <span className="anim-pop" style={{ color: "var(--danger)" }}>
+          <span className="anim-pop danger-text">
             <CrossIcon />
           </span>
         )}
@@ -200,7 +205,11 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
           <button
             type="button"
             className="btn btn-outline"
-            onClick={() => void api.stop(summary.id)}
+            onClick={() =>
+              void api
+                .stop(summary.id)
+                .catch((error: Error) => showToast(error.message, "error"))
+            }
           >
             停止
           </button>

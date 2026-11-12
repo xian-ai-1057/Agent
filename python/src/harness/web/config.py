@@ -50,6 +50,47 @@ def read_model_settings(root: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def read_model_choices(root: pathlib.Path) -> list[dict[str, str]]:
+    """讀取 harness.yaml 的 models：管理者另外開放給使用者選的模型。
+
+    每一項可以是 litellm 的模型名稱，或 {name: 名稱, label: 顯示名稱}：
+
+        models:
+          - openai/gpt-5
+          - name: anthropic/claude-haiku-4-5
+            label: Claude Haiku（快）
+
+    Args:
+        root: 專案根目錄。
+
+    Returns:
+        [{"name": ..., "label": ...}]，沒寫 label 時沒有這個鍵。
+
+    Raises:
+        ValueError: models 的寫法不對。
+    """
+    items = read_config(root).get("models") or []
+    if not isinstance(items, list):
+        raise ValueError(f"{project_lib.CONFIG_FILE} 的 models 必須是清單")
+    choices = []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            choices.append({"name": item.strip()})
+            continue
+        name = item.get("name") if isinstance(item, dict) else None
+        label = item.get("label") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"{project_lib.CONFIG_FILE} 的 models 每一項要是模型名稱，"
+                f"或含 name 的設定：{item!r}"
+            )
+        choice = {"name": name.strip()}
+        if isinstance(label, str) and label.strip():
+            choice["label"] = label.strip()
+        choices.append(choice)
+    return choices
+
+
 def save_model_settings(
     root: pathlib.Path, model: str | None, max_turns: int | None
 ) -> None:

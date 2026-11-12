@@ -23,14 +23,16 @@ export function navigate(path: string): void {
   for (const listener of listeners) listener();
 }
 
+/** 網址改變時通知（包含上一頁、下一頁），回傳取消訂閱的函式。 */
+export function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 export function useRoute(): Route {
-  const path = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    () => location.pathname,
-  );
+  const path = useSyncExternalStore(subscribe, () => location.pathname);
   return parse(path);
 }
 

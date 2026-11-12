@@ -9,7 +9,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
-      pandas numpy openpyxl pdfplumber python-docx matplotlib
+      pandas numpy openpyxl pdfplumber python-docx python-pptx matplotlib
 # 圖表預設用中文字型，否則中文會變成方框。
 RUN printf 'font.family: Noto Sans CJK JP\naxes.unicode_minus: False\n' \
       > /etc/matplotlibrc

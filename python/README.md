@@ -1023,7 +1023,7 @@ sandbox:
   cpus: 1                       # 可用的 CPU 數，預設 1
   network: false                # 是否允許連網，預設 false
   command: docker               # 或 podman
-  notes: 已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、matplotlib。
+  notes: 已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、python-pptx、matplotlib。
 ```
 
 全部用預設值的話寫 `sandbox: true`。和內建的 `files` 一樣，agent 要在
@@ -1069,7 +1069,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
-      pandas numpy openpyxl pdfplumber python-docx matplotlib
+      pandas numpy openpyxl pdfplumber python-docx python-pptx matplotlib
 # 圖表預設用中文字型，否則中文會變成方框
 RUN printf 'font.family: Noto Sans CJK JP\naxes.unicode_minus: False\n' \
       > /etc/matplotlibrc
@@ -1311,6 +1311,24 @@ Python 版另外會處理：
 - **訊息防護**：使用者的訊息被擋下時，顯示被擋下的原因。
 - **連接模型**：在網頁上選供應商、填金鑰與模型，不需要設定環境變數
   （見下方的[在網頁上連接模型](#在網頁上連接模型)）。
+- **每段對話選模型、工具與 skills**：輸入框右下角選模型，左下角的 ＋
+  勾選 skills 與工具，下一則訊息開始生效。要多開放幾個模型給使用者選，
+  在 `harness.yaml` 寫 `models: [openai/gpt-5, ...]`（每一項也可以是
+  `{name, label}`）。
+- **預覽檔案**：點附件或 agent 寫的檔案，右側面板直接顯示圖片、PDF、
+  CSV、Markdown 與程式碼，也可以下載。只看得到專案資料夾裡的檔案，
+  `.harness/` 與其他以點開頭的檔案一律不提供；HTML、SVG 只顯示原始碼。
+  `run_python` 新增或修改的檔案也會以檔案卡片出現。
+- **減少確認**：權限確認可以選「這段對話都允許」（只記在這段對話，
+  不寫進 `harness.yaml`）；同一段對話裡同意過、參數完全相同的呼叫
+  不再重複問。`edit_file` 也會顯示修改前後的差異。
+- **中斷後接著做**：伺服器在一輪跑到一半時重新啟動，那段對話會顯示
+  被中斷，按重試接著做，中斷的工具呼叫不會被當成拒絕。
+- **網頁版說明**：從網頁執行時，agent 的指示後面會多一段說明（使用者
+  只有瀏覽器、檔案以卡片呈現、數字只引用程式印出來的值）。
+- **管理對話**：⌘K 搜尋標題與內容、重新命名、刪除。
+- **回覆的評價**：讚或倒讚（可以勾選原因），同時記在
+  `.harness/feedback.jsonl`。
 
 ### 在網頁上連接模型
 

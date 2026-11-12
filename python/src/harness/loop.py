@@ -21,6 +21,8 @@ from harness import skills as skills_lib
 from harness import tools as tools_lib
 
 _INTERRUPTED = "工具執行被中斷，沒有結果"
+# 和 src/web/protocol.ts 的 DENIED_RESULT 相同，網頁用它辨認被拒絕的呼叫。
+DENIED_RESULT = "使用者沒有同意這次呼叫，請不要重試同樣的操作"
 
 # 正在執行的工具呼叫。subagent 用它標記自己的事件屬於哪一次呼叫；
 # 同時執行的工具各自在自己的 Task 裡，不會互相干擾。
@@ -171,7 +173,7 @@ async def _run_loop(
 ) -> AsyncIterator[datatypes.Event]:
     """主迴圈本體，最上層的對話與 subagent 的對話都走這裡。"""
     options = dataclasses.replace(options, relay=_EventRelay())
-    _close_dangling_tool_calls(session)
+    close_dangling_tool_calls(session)
     if user_input is None:
         _assert_resumable(session)
     agent = delegation.active_agent(entry, session.messages)
@@ -686,25 +688,51 @@ def _assert_resumable(session: sessions.Session) -> None:
         )
 
 
-def _close_dangling_tool_calls(session: sessions.Session) -> None:
-    """替上次中斷時沒有結果的工具呼叫補上結果。
+def dangling_tool_calls(
+    messages: list[datatypes.Message],
+) -> list[dict[str, Any]]:
+    """找出對話紀錄裡還沒有結果的工具呼叫。
 
-    模型要求每個 tool call 都要有對應的結果，否則下一次請求會失敗；
-    使用者在工具執行途中按 Ctrl-C 就會留下這種狀態。
+    使用者在工具執行途中按 Ctrl-C，或伺服器在等待確認時重新啟動，
+    都會留下這種呼叫。
+
+    Args:
+        messages: 對話紀錄。
+
+    Returns:
+        OpenAI 格式的 tool call（assistant 訊息裡的 tool_calls 項目）。
     """
     answered = {
         message.get("tool_call_id")
-        for message in session.messages
+        for message in messages
         if message.get("role") == "tool"
     }
-    for message in list(session.messages):
-        for call in message.get("tool_calls") or []:
-            if call["id"] in answered:
-                continue
-            result = datatypes.ToolResult(
-                call["id"], call["function"]["name"], _INTERRUPTED, True
-            )
-            session.append(_tool_message(result))
+    return [
+        call
+        for message in messages
+        for call in message.get("tool_calls") or []
+        if call["id"] not in answered
+    ]
+
+
+def close_dangling_tool_calls(
+    session: sessions.Session, reason: str = _INTERRUPTED
+) -> None:
+    """替上次中斷時沒有結果的工具呼叫補上錯誤結果。
+
+    模型要求每個 tool call 都要有對應的結果，否則下一次請求會失敗。
+    主迴圈開始時會自動補上；呼叫端想給模型更具體的說明時（例如伺服器
+    重新啟動），可以在執行前先用自己的 reason 補上。
+
+    Args:
+        session: 對話紀錄。
+        reason: 給模型看的說明。
+    """
+    for call in dangling_tool_calls(session.messages):
+        result = datatypes.ToolResult(
+            call["id"], call["function"]["name"], reason, True
+        )
+        session.append(_tool_message(result))
 
 
 async def _execute_calls(
@@ -775,7 +803,7 @@ async def _authorize(
         return _error(call, "權限設定不允許使用這個工具，請改用其他做法")
     if verdict == "ask" and not hook_allowed:
         if not await permissions_lib.ask(permissions, call, target):
-            return _error(call, "使用者沒有同意這次呼叫，請不要重試同樣的操作")
+            return _error(call, DENIED_RESULT)
     return None
 
 

@@ -70,7 +70,7 @@ Python 版的網頁也可以直接選供應商並貼上金鑰，不需要設定�
 
 ## 決定用哪個模型的順序
 
-1. 命令列的 `-m`
+1. 命令列的 `-m`；網頁上這段對話選的模型（Python 版，見[選擇模型、工具與 skills](/guide/web#選擇模型工具與-skills)）
 2. agent 檔案的 `model`
 3. `harness.yaml` 的 `model`
 4. 環境變數 `HARNESS_MODEL`

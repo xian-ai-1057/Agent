@@ -1,7 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
+import { applyStoredTheme } from "./components/shell/theme.ts";
 import "./styles.css";
+
+applyStoredTheme();
 
 const root = document.getElementById("root");
 if (root) {

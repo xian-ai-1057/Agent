@@ -15,6 +15,7 @@ import type {
   SessionSummary,
 } from "../../src/web/protocol.ts";
 import { api } from "./api.ts";
+import { navigate } from "./router.ts";
 
 export interface State {
   project?: ProjectInfo;
@@ -126,6 +127,10 @@ function handle(event: ServerEvent): void {
     return;
   }
   const id = event.sessionId;
+  if (event.type === "session_deleted") {
+    forget(id);
+    return;
+  }
   if (event.type === "approval" && event.approval.preview) {
     const preview = event.approval.preview;
     setState((s) => ({
@@ -230,4 +235,46 @@ export function setDetailMode(id: string, mode: SessionDetail["mode"]): void {
     if (!detail) return s;
     return { ...s, details: { ...s.details, [id]: { ...detail, mode } } };
   });
+}
+
+/**
+ * 把一段對話從畫面上拿掉；正在看這段對話時回到新對話。
+ * 刪除成功後呼叫，伺服器的 session_deleted 事件也會呼叫，重複呼叫沒關係。
+ */
+function forget(id: string): void {
+  if (location.pathname === `/s/${id}`) navigate("/");
+  if (!state.sessions[id] && !state.details[id]) return;
+  setState((s) => {
+    const { [id]: _summary, ...sessions } = s.sessions;
+    const { [id]: _detail, ...details } = s.details;
+    return { ...s, sessions, details };
+  });
+}
+
+/**
+ * 改對話名稱（Python 版）：先改畫面，伺服器回報失敗時改回原本的名稱並
+ * 丟出錯誤。名稱沒變或是空白時什麼都不做。
+ */
+export async function renameSession(id: string, title: string): Promise<void> {
+  const before = state.sessions[id];
+  const next = title.trim();
+  if (!before || !next || next === before.title) return;
+  upsertSummary({ ...before, title: next });
+  try {
+    upsertSummary(await api.renameSession(id, next));
+  } catch (error) {
+    const current = state.sessions[id];
+    if (current) upsertSummary({ ...current, title: before.title });
+    throw error;
+  }
+}
+
+/**
+ * 刪除對話（Python 版）：伺服器確認刪除後才從畫面拿掉，失敗時丟出錯誤、
+ * 畫面不動。不先拿掉：伺服器可能拒絕（例如對話還在執行），先換頁會讓
+ * 使用者離開一段其實沒被刪掉的對話。正在看這段對話時會回到新對話。
+ */
+export async function deleteSession(id: string): Promise<void> {
+  await api.deleteSession(id);
+  forget(id);
 }
