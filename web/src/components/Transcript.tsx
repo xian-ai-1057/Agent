@@ -168,7 +168,7 @@ function StepGroup({ steps }: { steps: Step[] }) {
   let label = `已執行 ${steps.length} 個步驟`;
   if (errors > 0) label += ` · ${errors} 個工具錯誤`;
   const fixedNote =
-    !active && fixed > 0 ? `${fixed} 個步驟出錯，已自動修正` : undefined;
+    !active && fixed > 0 ? `${fixed} 個步驟出錯，已繼續處理` : undefined;
   const who = active?.agent ? `${active.agent}：` : "";
   if (active?.status === "waiting") {
     label = `${who}等你確認：${sentenceText(describeStep(active))}`;
@@ -259,7 +259,7 @@ function StepRow({ step }: { step: Step }) {
           <span className="step-flag warn anim-in">工具錯誤</span>
         )}
         {step.status === "error" && step.recovered && (
-          <span className="step-flag ch-flag-muted">出錯，已修正</span>
+          <span className="step-flag ch-flag-muted">出錯，已繼續</span>
         )}
         {step.status === "waiting" && (
           <span className="step-flag accent">等你確認</span>

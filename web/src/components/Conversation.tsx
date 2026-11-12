@@ -554,11 +554,12 @@ function ErrorCard({
             {interrupted ? "這一輪被中斷了" : "這一輪出錯停下來了"}
           </div>
           <p className="body">{message}</p>
-          <p className="body subtle">
-            {interrupted
-              ? "你的訊息已經保留，按重試就會接著做。"
-              : "你的訊息已經保留，問題排除後按重試就會接著跑。"}
-          </p>
+          {/* 中斷的說明已經提到重試，不再重複一次。 */}
+          {!interrupted && (
+            <p className="body subtle">
+              你的訊息已經保留，問題排除後按重試就會接著跑。
+            </p>
+          )}
           {error && <p className="inline-error">重試失敗：{error}</p>}
         </div>
       </div>
