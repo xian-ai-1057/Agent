@@ -1905,3 +1905,34 @@
     opacity: 0.6;
   }
 }
+
+/* ── 工作資料夾選單 ───────────────────────────────── */
+
+.ch-folder-btn {
+  max-width: 220px;
+  padding: 0 8px;
+  gap: 6px;
+}
+
+.ch-folder-btn > svg:first-child {
+  flex: none;
+  color: var(--muted);
+}
+
+.ch-folder-btn .ch-tag {
+  flex: none;
+}
+
+.ch-folder-pop {
+  width: 300px;
+}
+
+/* 窄畫面：選單改以整個輸入框為基準靠左對齊，不會超出畫面右邊。 */
+@media (max-width: 520px) {
+  .ch-folder-anchor {
+    position: static;
+  }
+  .ch-folder-btn {
+    max-width: 140px;
+  }
+}

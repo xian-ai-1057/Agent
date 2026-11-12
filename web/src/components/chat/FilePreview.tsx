@@ -13,6 +13,7 @@ import { fenced, Markdown } from "../Markdown.tsx";
 import { parseCsv } from "./csv.ts";
 import { FileBadge } from "./FileBadge.tsx";
 import { fileName, languageOf, previewKind } from "./filetype.ts";
+import { useFolder } from "./folder.ts";
 import { DownloadIcon } from "./icons.tsx";
 
 /** 最多讀幾個位元組；大檔案只讀開頭，不整個下載。 */
@@ -27,12 +28,13 @@ type Loaded =
   | { state: "ready"; text: string; truncated: boolean };
 
 export function FilePreview({ path }: { path: string }) {
+  const folder = useFolder();
   const kind = previewKind(path);
   const name = fileName(path);
   if (kind === "image") {
     return (
       <div className="ch-preview-media">
-        <img src={fileUrl(path)} alt={name} />
+        <img src={fileUrl(path, false, folder)} alt={name} />
       </div>
     );
   }
@@ -42,10 +44,10 @@ export function FilePreview({ path }: { path: string }) {
         {/* 不加 sandbox：Chromium 不在沙箱框架裡顯示 PDF。伺服器以
             application/pdf 加 nosniff 送出，PDF 由瀏覽器自己的檢視器開，
             碰不到這個網頁。 */}
-        <iframe src={fileUrl(path)} title={name} />
+        <iframe src={fileUrl(path, false, folder)} title={name} />
         <a
           className="ch-preview-open"
-          href={fileUrl(path)}
+          href={fileUrl(path, false, folder)}
           target="_blank"
           rel="noreferrer noopener"
         >
@@ -65,12 +67,13 @@ function TextPreview({
   path: string;
   kind: "markdown" | "csv" | "html" | "text";
 }) {
+  const folder = useFolder();
   const [loaded, setLoaded] = useState<Loaded>({ state: "loading" });
 
   useEffect(() => {
     const controller = new AbortController();
     setLoaded({ state: "loading" });
-    readHead(fileUrl(path), TEXT_LIMIT, controller.signal)
+    readHead(fileUrl(path, false, folder), TEXT_LIMIT, controller.signal)
       .then(({ text, truncated }) => {
         setLoaded({ state: "ready", text, truncated });
       })
@@ -79,7 +82,7 @@ function TextPreview({
         setLoaded({ state: "error", message: error.message });
       });
     return () => controller.abort();
-  }, [path]);
+  }, [path, folder]);
 
   if (loaded.state === "loading") {
     return <div className="ch-preview-state">讀取中…</div>;
@@ -224,12 +227,13 @@ function CsvTable({ text }: { text: string }) {
 }
 
 function BinaryCard({ path }: { path: string }) {
+  const folder = useFolder();
   const [size, setSize] = useState<number>();
   useEffect(() => {
     let alive = true;
     const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
     api
-      .listFiles(dir)
+      .listFiles(dir, folder)
       .then((entries) => {
         const entry = entries.find((item) => item.path === path);
         if (alive && entry?.size !== undefined) setSize(entry.size);
@@ -238,7 +242,7 @@ function BinaryCard({ path }: { path: string }) {
     return () => {
       alive = false;
     };
-  }, [path]);
+  }, [path, folder]);
   return (
     <div className="ch-binary">
       <FileBadge path={path} />
@@ -249,7 +253,11 @@ function BinaryCard({ path }: { path: string }) {
           這種檔案無法在這裡預覽
         </div>
       </div>
-      <a className="btn btn-outline" href={fileUrl(path, true)} download>
+      <a
+        className="btn btn-outline"
+        href={fileUrl(path, true, folder)}
+        download
+      >
         <DownloadIcon size={14} />
         下載
       </a>

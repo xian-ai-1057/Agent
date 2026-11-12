@@ -11,12 +11,12 @@ import {
   type MouseEvent,
   type ReactNode,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
 import type { SessionSummary } from "../../../src/web/protocol.ts";
+import { settingsHome } from "../auth.ts";
 import { navigate, type Route } from "../router.ts";
 import { deleteSession, renameSession, useStore } from "../store.ts";
 import {
@@ -29,7 +29,9 @@ import {
   TrashIcon,
 } from "./Icons.tsx";
 import { ConfirmDialog } from "./shell/Dialog.tsx";
+import { FloatingMenu } from "./shell/FloatingMenu.tsx";
 import { showToast } from "./shell/toast.tsx";
+import { UserMenu } from "./shell/UserMenu.tsx";
 
 /** 用 <a> 讓中鍵、複製連結都正常，點擊時改由前端路由處理。 */
 export function Link({
@@ -198,13 +200,14 @@ export function Sidebar({
 
       <div className="side-footer">
         <Link
-          to="/settings/permissions"
+          to={settingsHome(project)}
           className={`side-item ${route.page === "settings" ? "active" : ""}`}
           current={route.page === "settings"}
         >
           <GearIcon />
           <span className="grow">設定</span>
         </Link>
+        <UserMenu />
       </div>
 
       {menu && (
@@ -358,7 +361,7 @@ function RenameInput({
   );
 }
 
-/** ⋮ 按鈕打開的小選單，放在 body 底下，不會被側欄的捲動區域裁掉。 */
+/** ⋮ 按鈕打開的小選單。 */
 function SessionMenu({
   anchor,
   onClose,
@@ -370,86 +373,8 @@ function SessionMenu({
   onRename: () => void;
   onDelete: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [position, setPosition] = useState<{
-    top: number;
-    left: number;
-    above: boolean;
-  }>();
-
-  useLayoutEffect(() => {
-    const rect = anchor.getBoundingClientRect();
-    const width = ref.current?.offsetWidth ?? 160;
-    const height = ref.current?.offsetHeight ?? 88;
-    const below = rect.bottom + 4 + height <= window.innerHeight;
-    setPosition({
-      top: below ? rect.bottom + 4 : rect.top - 4 - height,
-      left: Math.max(8, rect.right - width),
-      above: !below,
-    });
-  }, [anchor]);
-
-  // 定好位置、看得到之後才能把焦點移到第一個選項。
-  useEffect(() => {
-    if (position) {
-      ref.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
-    }
-  }, [position]);
-
-  useEffect(() => {
-    const onPointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (ref.current?.contains(target) || anchor.contains(target)) return;
-      onClose();
-    };
-    // 只有側欄或整頁捲動（按鈕跟著移動）時才關閉，其他區域的捲動不管。
-    const onScroll = (event: Event) => {
-      const target = event.target;
-      if (target instanceof Node && target.contains(anchor)) onClose();
-    };
-    document.addEventListener("pointerdown", onPointer);
-    window.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onClose);
-    return () => {
-      document.removeEventListener("pointerdown", onPointer);
-      window.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onClose);
-    };
-  }, [anchor, onClose]);
-
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const items = [
-      ...(ref.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? []),
-    ];
-    const index = items.indexOf(document.activeElement as HTMLElement);
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      const step = event.key === "ArrowDown" ? 1 : -1;
-      items[(index + step + items.length) % items.length]?.focus();
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-      anchor.focus();
-    } else if (event.key === "Tab") {
-      onClose();
-    }
-  };
-
-  return createPortal(
-    <div
-      ref={ref}
-      // 在按鈕上方時從下緣展開，動畫才會從按鈕那一角長出來。
-      className={`menu ${position?.above ? "above" : ""}`}
-      role="menu"
-      aria-label="對話選項"
-      style={
-        position
-          ? { top: position.top, left: position.left }
-          : { visibility: "hidden" }
-      }
-      onKeyDown={onKeyDown}
-    >
+  return (
+    <FloatingMenu anchor={anchor} label="對話選項" onClose={onClose}>
       <button
         type="button"
         role="menuitem"
@@ -468,8 +393,7 @@ function SessionMenu({
         <TrashIcon size={15} />
         刪除
       </button>
-    </div>,
-    document.body,
+    </FloatingMenu>
   );
 }
 

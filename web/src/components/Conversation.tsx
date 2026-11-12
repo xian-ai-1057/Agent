@@ -1,4 +1,9 @@
-/** 一段對話：內容、權限確認、輸入框，以及右側的檔案面板。 */
+/**
+ * 一段對話：內容、權限確認、輸入框，以及右側的檔案面板。
+ *
+ * 伺服器支援工作資料夾時，標題底下顯示資料夾名稱，輸入框可以換資料
+ * 夾（下一則訊息開始使用）；這段對話裡讀取的檔案都在這個資料夾裡。
+ */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -9,6 +14,8 @@ import {
   type SessionOptions,
 } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
+import { isMember } from "../auth.ts";
+import { activeFolder, folderLabel } from "../folders.ts";
 import { isBusy, MODE_LABELS, STOP_NOTICES } from "../format.ts";
 import {
   loadSession,
@@ -30,6 +37,7 @@ import {
 import { ApprovalCard } from "./ApprovalCard.tsx";
 import "./chat/chat.css";
 import { Composer } from "./Composer.tsx";
+import { FolderContext } from "./chat/folder.ts";
 import {
   agentTools,
   type ComposerOptions,
@@ -54,6 +62,7 @@ import {
   ShieldIcon,
 } from "./Icons.tsx";
 import { Link } from "./Sidebar.tsx";
+import { showToast } from "./shell/toast.tsx";
 import { AttachmentChip, TurnView } from "./Transcript.tsx";
 
 type Pending = PendingMessage & { sent: boolean };
@@ -171,6 +180,7 @@ export function Conversation({ id }: { id: string }) {
       skills: [],
     };
   const currentModel = effectiveModel(optionsValue, agentInfo?.model, models);
+  const folder = activeFolder(project, optionsValue.folder);
 
   // 每一輪開始時記下用的模型，顯示在回覆底下。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 只在開始跑的時候記
@@ -230,6 +240,11 @@ export function Conversation({ id }: { id: string }) {
 
   const changeOptions = (change: Partial<SessionOptions>) => {
     const previous = optionsValue;
+    if (change.folder) {
+      showToast(
+        `已換成「${folderLabel(project?.folders, change.folder)}」，下一則訊息開始使用`,
+      );
+    }
     setOptionsOverride({ ...optionsValue, ...change });
     setOptionsError(undefined);
     api.setOptions(id, change).then(
@@ -270,6 +285,8 @@ export function Conversation({ id }: { id: string }) {
   };
 
   const projectMode = project?.permissions.mode ?? "ask";
+  // 成員不能把對話設成全部直接執行；已經是的話照樣顯示，但不能再選。
+  const member = isMember(project);
   const modeLabel = detail.mode
     ? MODE_LABELS[detail.mode]
     : MODE_LABELS[projectMode];
@@ -296,13 +313,14 @@ export function Conversation({ id }: { id: string }) {
     (approval && findApprovalStep(turns, approval.id)?.agent) ?? summary.agent;
 
   return (
-    <>
+    <FolderContext.Provider value={folder}>
       <main className="main">
         <header className="main-header">
           <div className="main-title">
             <h1>{summary.title}</h1>
             <span className="subtle mono ch-hide-narrow">
               {project?.name} · {summary.agent}
+              {folder && ` · ${folderLabel(project?.folders, folder)}`}
             </span>
           </div>
           <button
@@ -421,9 +439,23 @@ export function Conversation({ id }: { id: string }) {
               busy={busy}
               onSubmit={send}
               onStop={() => void api.stop(id)}
-              onUpload={project?.uploads ? api.upload : undefined}
+              onUpload={
+                project?.uploads
+                  ? (file) => api.upload(file, folder)
+                  : undefined
+              }
               maxUploadBytes={project?.uploads?.maxBytes}
               options={composerOptions}
+              folder={
+                folder
+                  ? {
+                      folders: project?.folders ?? [],
+                      value: folder,
+                      onChange: (next) => changeOptions({ folder: next }),
+                      nextTurn: true,
+                    }
+                  : undefined
+              }
               controls={
                 <>
                   {!composerOptions && (
@@ -442,7 +474,11 @@ export function Conversation({ id }: { id: string }) {
                         跟著專案設定（{MODE_LABELS[projectMode]}）
                       </option>
                       <option value="ask">{MODE_LABELS.ask}</option>
-                      <option value="bypass">{MODE_LABELS.bypass}</option>
+                      {(!member || detail.mode === "bypass") && (
+                        <option value="bypass" disabled={member}>
+                          {MODE_LABELS.bypass}
+                        </option>
+                      )}
                       <option value="dontAsk">{MODE_LABELS.dontAsk}</option>
                     </select>
                   </label>
@@ -470,7 +506,7 @@ export function Conversation({ id }: { id: string }) {
           onClose={() => setPanel((p) => ({ ...p, open: false }))}
         />
       )}
-    </>
+    </FolderContext.Provider>
   );
 }
 

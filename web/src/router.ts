@@ -1,6 +1,7 @@
 /** 最簡單的路由：只用 history API，不需要額外套件。 */
 
 import { useSyncExternalStore } from "react";
+import { SETTINGS_SECTIONS, type SettingsSection } from "./sections.ts";
 
 export type Route =
   | { page: "new" }
@@ -8,18 +9,20 @@ export type Route =
   | { page: "work" }
   | { page: "settings"; section: SettingsSection };
 
-export type SettingsSection = "model" | "permissions" | "tools" | "agents";
+export type { SettingsSection };
 
-const SECTIONS: SettingsSection[] = ["model", "permissions", "tools", "agents"];
+const SECTIONS = SETTINGS_SECTIONS;
 const listeners = new Set<() => void>();
 
 window.addEventListener("popstate", () => {
   for (const listener of listeners) listener();
 });
 
-export function navigate(path: string): void {
+/** replace 為 true 時取代目前的紀錄（上一頁不會回到原本的網址）。 */
+export function navigate(path: string, { replace = false } = {}): void {
   if (path === location.pathname) return;
-  history.pushState(null, "", path);
+  if (replace) history.replaceState(null, "", path);
+  else history.pushState(null, "", path);
   for (const listener of listeners) listener();
 }
 

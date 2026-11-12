@@ -11,7 +11,7 @@
  * 完成後再做一次。
  *
  * localFiles 為 true 時（伺服器支援 /api/files），圖片的 src 是相對路徑
- * （或沙盒裡的 /workspace/...）就從工作資料夾讀取。
+ * （或沙盒裡的 /workspace/...）就從這段對話的工作資料夾讀取。
  */
 
 import { memo, useEffect, useMemo, useState } from "react";
@@ -22,6 +22,7 @@ import { fileUrl } from "../api.ts";
 import "./chat/chat.css";
 import { CodeBlock } from "./chat/CodeBlock.tsx";
 import { projectPath } from "./chat/filetype.ts";
+import { useFolder } from "./chat/folder.ts";
 import { displayMath } from "./chat/math.ts";
 
 type Plugins = NonNullable<
@@ -109,20 +110,33 @@ const components: Components = {
   ),
 };
 
-/** 圖片的 src 指向專案裡的檔案時，改從 /api/files 讀取。 */
+/** 圖片的 src 指向工作資料夾裡的檔案時，改從 /api/files 讀取。 */
+function LocalImage({
+  src,
+  alt,
+  title,
+}: {
+  src?: string | Blob;
+  alt?: string;
+  title?: string;
+}) {
+  const folder = useFolder();
+  const path = typeof src === "string" ? projectPath(src) : undefined;
+  return (
+    <img
+      src={path ? fileUrl(path, false, folder) : (src as string | undefined)}
+      alt={alt ?? ""}
+      title={title}
+      loading="lazy"
+    />
+  );
+}
+
 const localComponents: Components = {
   ...components,
-  img: ({ src, alt, title }) => {
-    const path = typeof src === "string" ? projectPath(src) : undefined;
-    return (
-      <img
-        src={path ? fileUrl(path) : src}
-        alt={alt ?? ""}
-        title={title}
-        loading="lazy"
-      />
-    );
-  },
+  img: ({ src, alt, title }) => (
+    <LocalImage src={src} alt={alt} title={title} />
+  ),
 };
 
 export const Markdown = memo(function Markdown({

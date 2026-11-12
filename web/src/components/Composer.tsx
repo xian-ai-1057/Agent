@@ -8,6 +8,10 @@
  * 旁邊仍有迴紋針可以直接上傳；右下角是模型選單。送出訊息時關掉開著的
  * 選單。
  *
+ * 有提供 folder 時（Python 版的工作資料夾），迴紋針旁邊是資料夾選單。
+ * 附件上傳到當時選的資料夾；換了資料夾後，原本的附件不在新的資料夾
+ * 裡，要移除後重新附加才能送出。
+ *
  * 按下送出後輸入框立刻清空；送出失敗時把文字與附件放回來。
  */
 
@@ -24,6 +28,7 @@ import {
 import type { UploadedFile } from "../../../src/web/protocol.ts";
 import { formatBytes } from "../format.ts";
 import "./chat/chat.css";
+import { type FolderChoice, FolderMenu } from "./chat/FolderMenu.tsx";
 import { ModelMenu } from "./chat/ModelMenu.tsx";
 import type { ComposerOptions } from "./chat/options.ts";
 import { PlusMenu } from "./chat/PlusMenu.tsx";
@@ -38,7 +43,12 @@ interface Attachment {
   status: "uploading" | "done" | "error";
   path?: string;
   error?: string;
+  /** 上傳到哪個工作資料夾（有資料夾選單時）。 */
+  folder?: string;
 }
+
+/** 附件在別的資料夾時的說明。 */
+const OTHER_FOLDER = "在另一個資料夾，請移除後重新附加";
 
 let nextKey = 0;
 
@@ -54,6 +64,7 @@ export function Composer({
   onUpload,
   maxUploadBytes,
   options,
+  folder,
 }: {
   placeholder: string;
   busy: boolean;
@@ -70,10 +81,18 @@ export function Composer({
   maxUploadBytes?: number;
   /** 模型、工具、skills 選項；沒有提供時不顯示 ＋ 選單與模型選單。 */
   options?: ComposerOptions;
+  /** 工作資料夾選單；沒有提供時不顯示。 */
+  folder?: FolderChoice;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [stored, setAttachments] = useState<Attachment[]>([]);
+  // 上傳到別的資料夾的附件不能跟這則訊息一起送出。
+  const attachments = stored.map((item) =>
+    folder && item.status === "done" && item.folder !== folder.value
+      ? { ...item, status: "error" as const, error: OTHER_FOLDER }
+      : item,
+  );
   const [dragging, setDragging] = useState(false);
   // 每送出一次加一，＋ 選單與模型選單看到它改變就關起來。
   const [sent, setSent] = useState(0);
@@ -113,7 +132,7 @@ export function Composer({
     if (!canSend) return;
     setSending(true);
     setSent((count) => count + 1);
-    const saved = { text, attachments };
+    const saved = { text, attachments: stored };
     const paths = ready.map((item) => item.path ?? "");
     setText("");
     setAttachments([]);
@@ -149,6 +168,7 @@ export function Composer({
           error: tooBig
             ? `超過上限 ${formatBytes(maxUploadBytes ?? 0)}`
             : undefined,
+          folder: folder?.value,
         },
       ]);
       if (tooBig) continue;
@@ -282,6 +302,9 @@ export function Composer({
               }}
             />
           </>
+        )}
+        {folder && folder.folders.length > 0 && (
+          <FolderMenu choice={folder} closeSignal={sent} />
         )}
         {controls}
         <span className="ch-bar-gap" />

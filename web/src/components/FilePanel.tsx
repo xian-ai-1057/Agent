@@ -14,6 +14,7 @@ import "./chat/chat.css";
 import { FileBadge } from "./chat/FileBadge.tsx";
 import { FilePreview } from "./chat/FilePreview.tsx";
 import { fileName } from "./chat/filetype.ts";
+import { useFolder } from "./chat/folder.ts";
 import { DownloadIcon, ExpandIcon, ShrinkIcon } from "./chat/icons.tsx";
 import { CloseIcon } from "./Icons.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -237,6 +238,7 @@ function Empty() {
 
 /** 預覽上方：檔名、路徑、下載。 */
 function PreviewHeader({ path, canLoad }: { path: string; canLoad: boolean }) {
+  const folder = useFolder();
   return (
     <div className="file-head ch-preview-head">
       <div className="ch-preview-title">
@@ -246,7 +248,7 @@ function PreviewHeader({ path, canLoad }: { path: string; canLoad: boolean }) {
       {canLoad && (
         <a
           className="btn btn-outline ch-btn-small"
-          href={fileUrl(path, true)}
+          href={fileUrl(path, true, folder)}
           download
           aria-label={`下載 ${fileName(path)}`}
         >

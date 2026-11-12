@@ -28,6 +28,21 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 登入過期或還沒登入（多人帳號模式回 401）時要做的事，由 store 設定。
+ * 登入與改密碼本身回 401 只是帳號或密碼不對，不算登入過期。
+ */
+let onUnauthorized: (() => void) | undefined;
+const AUTH_ATTEMPTS = new Set(["/auth/login", "/auth/password"]);
+
+export function setUnauthorizedHandler(handler: () => void): void {
+  onUnauthorized = handler;
+}
+
+function checkUnauthorized(status: number, path: string): void {
+  if (status === 401 && !AUTH_ATTEMPTS.has(path)) onUnauthorized?.();
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -40,6 +55,7 @@ async function request<T>(
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    checkUnauthorized(response.status, path);
     const message = (data as { error?: string }).error ?? response.statusText;
     throw new ApiError(response.status, message);
   }
@@ -67,16 +83,19 @@ export const api = {
       text,
       attachments,
     }),
-  upload: async (file: File): Promise<UploadedFile> => {
+  /** folder 是要放進的工作資料夾（FolderInfo.id）；沒有時是「我的檔案」。 */
+  upload: async (file: File, folder?: string | null): Promise<UploadedFile> => {
     const form = new FormData();
     form.append("file", file, file.name);
-    const response = await fetch("/api/uploads", {
+    const query = folder ? `?folder=${encodeURIComponent(folder)}` : "";
+    const response = await fetch(`/api/uploads${query}`, {
       method: "POST",
       headers: { "X-Harness-Upload": "1" },
       body: form,
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+      checkUnauthorized(response.status, "/uploads");
       const message = (data as { error?: string }).error ?? response.statusText;
       throw new ApiError(response.status, message);
     }
