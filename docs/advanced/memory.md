@@ -9,7 +9,7 @@
 memory: true
 ```
 
-記憶存在 `.harness/memory.json`，可以用命令列查看與管理：
+記憶存在 `.harness/memory.json`，可以用命令列查看與管理（網頁版每個人的記憶分開，存在 `.harness/users/<識別碼>/memory.json`，見[帳號與成員](/guide/web#帳號與成員)）：
 
 ```bash
 pyharness memory                 # 列出所有記憶

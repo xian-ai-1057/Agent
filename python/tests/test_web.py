@@ -5,7 +5,6 @@ API 與事件格式要和 TypeScript 版完全相同，兩個版本共用同一�
 """
 
 import asyncio
-import base64
 import json
 import os
 import pathlib
@@ -25,6 +24,7 @@ from harness import loop
 from harness import project as project_lib
 from harness import providers
 from harness import sandbox as sandbox_lib
+from harness.web import accounts as accounts_lib
 from harness.web import config as config_lib
 from harness.web import files as files_lib
 from harness.web import server as server_lib
@@ -51,6 +51,8 @@ tools:
 """
 
 WRITE_CALL = ("write_file", {"path": "reports/a.md", "content": "# 報告\n"})
+# 本機模式（不必登入）的使用者，資料都在他的資料夾裡。
+LOCAL = accounts_lib.LOCAL_USER
 
 
 def make_project(root: pathlib.Path, extra: str = "") -> pathlib.Path:
@@ -59,6 +61,18 @@ def make_project(root: pathlib.Path, extra: str = "") -> pathlib.Path:
     (root / "harness.yaml").write_text(CONFIG + extra, encoding="utf-8")
     (root / "agents" / "main.md").write_text(AGENT, encoding="utf-8")
     return root
+
+
+def private(root: pathlib.Path) -> pathlib.Path:
+    """本機使用者的「我的檔案」：對話預設的工作資料夾。"""
+    folder = root / "private" / "local"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def sessions_dir(root: pathlib.Path) -> pathlib.Path:
+    """本機使用者存放對話紀錄的資料夾。"""
+    return root / ".harness" / "users" / "local" / "sessions"
 
 
 class Harness:
@@ -273,7 +287,7 @@ async def test_tool_needing_approval_waits_and_shows_file_preview(start):
     assert await h.decide(approval, "once") == 200
     await h.wait_for("run_end")
 
-    written = (h.root / "reports" / "a.md").read_text(encoding="utf-8")
+    written = (private(h.root) / "reports" / "a.md").read_text("utf-8")
     assert written == "# 報告\n"
 
 
@@ -484,7 +498,7 @@ async def test_subagent_progress_is_streamed_and_kept(tmp_path, fake_model):
         "你查資料。\n",
         encoding="utf-8",
     )
-    (root / "notes.md").write_text("十月賣了 192,000", encoding="utf-8")
+    (private(root) / "notes.md").write_text("十月賣了 192,000", "utf-8")
     loaded = project_lib.load_project(root)
     model = fake_model(
         [
@@ -729,7 +743,12 @@ async def test_blocked_message_keeps_notice_in_summary(tmp_path, fake_model):
 
 
 class TestServerDeployment:
-    """架在伺服器上：登入密碼、允許的主機名稱與反向代理。"""
+    """架在伺服器上：登入、允許的主機名稱與反向代理。"""
+
+    @pytest.fixture(autouse=True)
+    def fast_hash(self, monkeypatch):
+        """測試時把 scrypt 調輕一點（參數存在雜湊裡，驗證不受影響）。"""
+        monkeypatch.setattr(accounts_lib, "SCRYPT_N", 2**10)
 
     @pytest.fixture
     async def client(self, tmp_path):
@@ -750,49 +769,64 @@ class TestServerDeployment:
             loaded.close()
 
     @staticmethod
-    def _login(password, user="anyone"):
-        token = base64.b64encode(f"{user}:{password}".encode()).decode()
-        return {"Authorization": f"Basic {token}"}
+    async def _login(client, password, username="admin", headers=None):
+        """登入；回傳帶 cookie 的標頭（測試的 cookie jar 不保存 IP 網址的
+        cookie，所以自己帶）。"""
+        response = await client.post(
+            "/api/auth/login",
+            json={"username": username, "password": password},
+            headers=headers or {},
+        )
+        assert response.status == 200, await response.text()
+        token = response.cookies[server_lib.COOKIE].value
+        return {"Cookie": f"{server_lib.COOKIE}={token}"}
 
-    async def test_password_is_required_for_every_path(self, client):
+    async def test_api_needs_login_but_the_app_loads(self, client):
         c = await client(password="s3cret")
 
-        for path in ("/", "/api/project", "/api/events"):
+        for path in ("/api/project", "/api/events", "/api/sessions"):
             response = await c.get(path)
             assert response.status == 401
-            assert response.headers["WWW-Authenticate"].startswith("Basic ")
+            assert (await response.json())["error"] == "需要登入"
+        page = await c.get("/")
+        assert page.status != 401
 
-    async def test_wrong_password_is_rejected(self, client, monkeypatch):
-        monkeypatch.setattr(server_lib, "_FAILED_LOGIN_DELAY", 0)
+    async def test_legacy_password_becomes_the_admin_password(self, client):
         c = await client(password="s3cret")
 
-        response = await c.get("/api/project", headers=self._login("nope"))
-
-        assert response.status == 401
-
-    async def test_any_user_name_with_right_password_gets_in(self, client):
-        c = await client(password="s3cret")
-
-        response = await c.get(
-            "/api/project", headers=self._login("s3cret", user="王小明")
-        )
+        headers = await self._login(c, "s3cret")
+        response = await c.get("/api/project", headers=headers)
 
         assert response.status == 200
-        assert (await response.json())["name"] == "web_demo"
+        info = await response.json()
+        assert info["name"] == "web_demo"
+        assert info["auth"]["mode"] == "accounts"
+        assert info["auth"]["user"]["username"] == "admin"
+        assert info["auth"]["user"]["role"] == "admin"
 
-    async def test_with_password_any_host_is_accepted(self, client):
+    async def test_wrong_password_is_rejected(self, client):
+        c = await client(password="s3cret")
+
+        response = await c.post(
+            "/api/auth/login", json={"username": "admin", "password": "nope"}
+        )
+
+        assert response.status == 401
+        assert (await response.json())["error"] == "帳號或密碼不正確"
+
+    async def test_with_login_any_host_is_accepted(self, client):
         c = await client(password="s3cret", host="0.0.0.0")
+        headers = await self._login(c, "s3cret")
 
         response = await c.get(
-            "/api/project",
-            headers={**self._login("s3cret"), "Host": "10.0.0.5:4321"},
+            "/api/project", headers={**headers, "Host": "10.0.0.5:4321"}
         )
 
         assert response.status == 200
 
     async def test_allowed_hosts_limit_the_host_header(self, client):
         c = await client(password="s3cret", allowed_hosts=["ai.example.com"])
-        login = self._login("s3cret")
+        login = await self._login(c, "s3cret")
 
         allowed = await c.get(
             "/api/project", headers={**login, "Host": "AI.example.com"}
@@ -806,11 +840,8 @@ class TestServerDeployment:
 
     async def test_https_reverse_proxy_origin_is_accepted(self, client):
         c = await client(password="s3cret", allowed_hosts=["ai.example.com"])
-        headers = {
-            **self._login("s3cret"),
-            "Host": "ai.example.com",
-            "Origin": "https://ai.example.com",
-        }
+        headers = {"Host": "ai.example.com", "Origin": "https://ai.example.com"}
+        headers.update(await self._login(c, "s3cret", headers=headers))
 
         # 不存在的對話：通過安全檢查後才會得到 404。
         path = "/api/sessions/missing/stop"
@@ -821,6 +852,17 @@ class TestServerDeployment:
 
         assert response.status == 404
         assert foreign.status == 403
+
+    async def test_login_from_other_sites_is_refused(self, client):
+        c = await client(password="s3cret")
+
+        response = await c.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "s3cret"},
+            headers={"Origin": "https://evil.example"},
+        )
+
+        assert response.status == 403
 
     @pytest.mark.parametrize(
         "options",
@@ -837,11 +879,20 @@ class TestServerDeployment:
 
     @pytest.fixture
     def served(self, monkeypatch):
-        """把伺服器換成假的，記下 CLI 交給它的參數。"""
+        """把伺服器換成假的，記下 CLI 交給它的參數。
+
+        假的伺服器也照真的流程建立 app（建立管理者），再呼叫 on_ready。
+        """
         calls = []
 
         async def fake_serve(loaded, **options):
             calls.append(options)
+            server_lib.create_app(
+                loaded,
+                host=options["host"],
+                password=options["password"],
+                allowed_hosts=options["allowed_hosts"],
+            )
             options["on_ready"]("http://test")
 
         monkeypatch.setattr("harness.web.serve", fake_serve)
@@ -859,11 +910,32 @@ class TestServerDeployment:
         assert code == 0
         password = served[0]["password"]
         assert len(password) >= 20
-        assert password in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert password in out
+        assert "管理者帳號 admin" in out
         # 重新啟動後還是同一組，使用者不用重新登入。
         assert served[1]["password"] == password
         saved = credentials.secrets_dir(root) / credentials.PASSWORD_FILE
         assert saved.read_text("utf-8").strip() == password
+        store = accounts_lib.AccountStore.for_project(root)
+        assert store.authenticate("admin", password) is not None
+
+    def test_cli_stops_showing_the_password_after_admin_changes_it(
+        self, tmp_path, served, capsys
+    ):
+        root = make_project(tmp_path / "cli")
+        cli.main(["web", "-p", str(root), "--host", "0.0.0.0"])
+        store = accounts_lib.AccountStore.for_project(root)
+        admin = store.find_user("admin")
+        store.set_password(admin.id, "a-brand-new-password")
+        password = served[0]["password"]
+        capsys.readouterr()
+
+        cli.main(["web", "-p", str(root), "--host", "0.0.0.0"])
+
+        out = capsys.readouterr().out
+        assert password not in out
+        assert "請用自己的帳號登入" in out
 
     def test_cli_generates_password_behind_reverse_proxy(
         self, tmp_path, served
@@ -883,7 +955,9 @@ class TestServerDeployment:
         cli.main(["web", "-p", str(root), "--host", "0.0.0.0"])
 
         assert served[0]["password"] == "my-own-password"
-        assert "my-own-password" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "my-own-password" not in out
+        assert "HARNESS_WEB_PASSWORD" in out
         assert not credentials.secrets_dir(root).exists()
 
     def test_cli_needs_no_password_on_localhost(self, tmp_path, served):
@@ -893,6 +967,8 @@ class TestServerDeployment:
 
         assert served[0]["password"] is None
         assert not credentials.secrets_dir(root).exists()
+        store = accounts_lib.AccountStore.for_project(root)
+        assert store.list_users() == []
 
 
 class TestZeroConfigStart:
@@ -1233,17 +1309,17 @@ class TestUploads:
         assert body["files"] == [
             {
                 "name": "十月_業績.xlsx",
-                "path": "workspace/uploads/十月_業績.xlsx",
+                "path": "uploads/十月_業績.xlsx",
                 "size": 5,
             },
             {
                 "name": "notes.txt",
-                "path": "workspace/uploads/notes.txt",
+                "path": "uploads/notes.txt",
                 "size": 2,
             },
         ]
         assert (
-            root / "workspace/uploads/十月_業績.xlsx"
+            private(root) / "uploads/十月_業績.xlsx"
         ).read_bytes() == b"excel"
 
     async def test_same_name_gets_a_number(self, server):
@@ -1252,7 +1328,7 @@ class TestUploads:
         await self._upload(client, ("a.csv", b"1"))
         _, body = await self._upload(client, ("a.csv", b"2"))
 
-        assert body["files"][0]["path"] == "workspace/uploads/a-2.csv"
+        assert body["files"][0]["path"] == "uploads/a-2.csv"
 
     async def test_large_file_streams_past_json_body_limit(self, server):
         client, root, _ = await server(max_upload_bytes=3 * 1024 * 1024)
@@ -1261,7 +1337,7 @@ class TestUploads:
         status, _ = await self._upload(client, ("big.bin", content))
 
         assert status == 201
-        assert (root / "workspace/uploads/big.bin").stat().st_size == len(
+        assert (private(root) / "uploads/big.bin").stat().st_size == len(
             content
         )
 
@@ -1272,7 +1348,7 @@ class TestUploads:
 
         assert status == 413
         assert "超過上限" in body["error"]
-        assert list((root / "workspace/uploads").iterdir()) == []
+        assert list((private(root) / "uploads").iterdir()) == []
 
     @pytest.mark.parametrize(
         "headers",
@@ -1284,7 +1360,7 @@ class TestUploads:
         status, _ = await self._upload(client, ("a.txt", b"x"), headers=headers)
 
         assert status == 403
-        assert not (root / "workspace/uploads").exists()
+        assert not (root / "private" / "local" / "uploads").exists()
 
     async def test_attachments_are_described_in_the_message(self, server):
         client, root, model = await server(
@@ -1303,7 +1379,7 @@ class TestUploads:
         assert status == 201
         user = model.requests[0]["messages"][-1]["content"]
         assert user == (
-            "幫我分析\n\n[附件] data/uploads/sales.csv"
+            "幫我分析\n\n[附件] uploads/sales.csv"
             "（run_python 裡的路徑：/workspace/uploads/sales.csv）"
         )
 
@@ -1321,7 +1397,7 @@ class TestUploads:
         assert status == 201
         assert created["title"] == "報告.pdf"
         user = model.requests[0]["messages"][-1]["content"]
-        assert user == "[附件] workspace/uploads/報告.pdf"
+        assert user == "[附件] uploads/報告.pdf"
 
     @pytest.mark.parametrize(
         "path",
@@ -1394,7 +1470,32 @@ class TestProjectChoices:
             "sessionOptions": True,
             "feedback": True,
             "sessionApproval": True,
+            "accounts": True,
+            "folders": True,
         }
+        assert info["auth"] == {
+            "mode": "local",
+            "user": {
+                "id": "local",
+                "username": "local",
+                "displayName": "本機使用者",
+                "role": "admin",
+            },
+        }
+        assert info["folders"] == [
+            {
+                "id": "private",
+                "name": "我的檔案",
+                "kind": "private",
+                "writable": True,
+            },
+            {
+                "id": "shared:workspace",
+                "name": "共用",
+                "kind": "shared",
+                "writable": True,
+            },
+        ]
 
     async def test_models_start_with_default_and_include_config(
         self, start, monkeypatch
@@ -1487,6 +1588,7 @@ class TestSessionOptions:
             "model": "other-model",
             "tools": ["read_file"],
             "skills": ["planning"],
+            "folder": "private",
         }
 
     async def test_shared_agent_is_not_changed(self, start):
@@ -1619,7 +1721,12 @@ class TestSessionOptions:
         status, options = await h.api("PUT", path, {"tools": ["read_file"]})
 
         assert status == 200
-        assert options == {"model": "m2", "tools": ["read_file"], "skills": []}
+        assert options == {
+            "model": "m2",
+            "tools": ["read_file"],
+            "skills": [],
+            "folder": "private",
+        }
         _, listed = await h.api("GET", "/sessions")
         assert listed[0]["model"] == "m2"
 
@@ -1664,7 +1771,7 @@ class TestSessionOptions:
 
         with project_lib.load_project(h.root) as loaded:
             fresh = workspace_lib.Workspace(loaded)
-            detail = fresh.get_session(created["id"])
+            detail = fresh.get_session(LOCAL, created["id"])
 
         assert detail["options"]["model"] == "m2"
         assert detail["summary"]["model"] == "m2"
@@ -1686,8 +1793,8 @@ class TestSessionAdmin:
         assert summary["title"] == "十月報表"
         with project_lib.load_project(h.root) as loaded:
             fresh = workspace_lib.Workspace(loaded)
-            assert fresh.list_sessions()[0]["title"] == "十月報表"
-        jsonl = (loaded.sessions_dir / f"{created['id']}.jsonl").read_text()
+            assert fresh.list_sessions(LOCAL)[0]["title"] == "十月報表"
+        jsonl = (sessions_dir(h.root) / f"{created['id']}.jsonl").read_text()
         assert [json.loads(line)["role"] for line in jsonl.splitlines()] == [
             "user",
             "assistant",
@@ -1719,8 +1826,7 @@ class TestSessionAdmin:
         await h.wait_for(
             "session_deleted", lambda e: e["sessionId"] == created["id"]
         )
-        sessions_dir = h.root / ".harness" / "sessions"
-        assert list(sessions_dir.iterdir()) == []
+        assert list(sessions_dir(h.root).iterdir()) == []
         status, _ = await h.api("GET", f"/sessions/{created['id']}")
         assert status == 404
 
@@ -1760,16 +1866,13 @@ class TestSessionAdmin:
 
     async def test_search_skips_attachment_lines(self, start):
         h = await start([conftest.text_response("收到")])
-        uploads = h.root / "workspace" / "uploads"
+        uploads = private(h.root) / "uploads"
         uploads.mkdir(parents=True)
         (uploads / "secret-plan.txt").write_text("x", encoding="utf-8")
         await h.api(
             "POST",
             "/sessions",
-            {
-                "text": "看看",
-                "attachments": ["workspace/uploads/secret-plan.txt"],
-            },
+            {"text": "看看", "attachments": ["uploads/secret-plan.txt"]},
         )
         await h.wait_for("run_end")
 
@@ -1783,18 +1886,20 @@ class TestFiles:
 
     async def test_lists_folder_dirs_first_without_hidden(self, start):
         h = await start()
-        (h.root / "reports").mkdir()
-        (h.root / "reports" / "a.md").write_text("# A", encoding="utf-8")
-        (h.root / "b.txt").write_text("b", encoding="utf-8")
-        (h.root / ".env").write_text("KEY=1", encoding="utf-8")
-        (h.root / ".harness").mkdir(exist_ok=True)
+        (private(h.root) / "reports").mkdir()
+        (private(h.root) / "reports" / "a.md").write_text(
+            "# A", encoding="utf-8"
+        )
+        (private(h.root) / "b.txt").write_text("b", encoding="utf-8")
+        (private(h.root) / ".env").write_text("KEY=1", encoding="utf-8")
+        (private(h.root) / ".harness").mkdir(exist_ok=True)
 
         status, entries = await h.api("GET", "/files/list?dir=")
         _, inner = await h.api("GET", "/files/list?dir=reports")
 
         assert status == 200
         names = [item["name"] for item in entries]
-        assert names == ["agents", "reports", "b.txt", "harness.yaml"]
+        assert names == ["reports", "b.txt"]
         b = next(item for item in entries if item["name"] == "b.txt")
         assert b["kind"] == "file"
         assert b["size"] == 1
@@ -1804,7 +1909,7 @@ class TestFiles:
 
     async def test_serves_file_inline_or_as_download(self, start):
         h = await start()
-        (h.root / "報告.md").write_text("# 十月", encoding="utf-8")
+        (private(h.root) / "報告.md").write_text("# 十月", encoding="utf-8")
 
         inline = await h.client.get("/api/files", params={"path": "報告.md"})
         download = await h.client.get(
@@ -1822,7 +1927,9 @@ class TestFiles:
     @pytest.mark.parametrize("name", ["page.html", "logo.svg", "app.js"])
     async def test_runnable_files_are_served_as_text(self, start, name):
         h = await start()
-        (h.root / name).write_text("<script>alert(1)</script>", "utf-8")
+        (private(h.root) / name).write_text(
+            "<script>alert(1)</script>", "utf-8"
+        )
 
         response = await h.client.get("/api/files", params={"path": name})
 
@@ -1848,14 +1955,14 @@ class TestFiles:
         outside = h.root.parent / "outside.txt"
         outside.write_text("TOP-SECRET", encoding="utf-8")
         path = path.replace("OUTSIDE", str(outside))
-        secrets = h.root / ".harness" / "secrets"
+        secrets = private(h.root) / ".harness" / "secrets"
         secrets.mkdir(parents=True)
         (secrets / "env.json").write_text("{}", encoding="utf-8")
-        sessions = h.root / ".harness" / "sessions"
+        sessions = private(h.root) / ".harness" / "sessions"
         sessions.mkdir()
         (sessions / "x.jsonl").write_text("{}", encoding="utf-8")
-        (h.root / ".env").write_text("KEY=1", encoding="utf-8")
-        (h.root / "link-out.txt").symlink_to(outside)
+        (private(h.root) / ".env").write_text("KEY=1", encoding="utf-8")
+        (private(h.root) / "link-out.txt").symlink_to(outside)
 
         response = await h.client.get("/api/files", params={"path": path})
 
@@ -1866,8 +1973,9 @@ class TestFiles:
         h = await start()
         outside = h.root.parent / "elsewhere"
         outside.mkdir()
-        (h.root / "out").symlink_to(outside)
-        (h.root / "inside").symlink_to(h.root / "agents")
+        (private(h.root) / "out").symlink_to(outside)
+        (private(h.root) / "docs").mkdir()
+        (private(h.root) / "inside").symlink_to(private(h.root) / "docs")
 
         _, entries = await h.api("GET", "/files/list")
         status, _ = await h.api("GET", "/files/list?dir=.harness")
@@ -1881,8 +1989,8 @@ class TestFiles:
 
     async def test_symlink_loop_is_not_a_server_error(self, start):
         h = await start()
-        (h.root / "loop").symlink_to(h.root / "loop")
-        (h.root / "a.txt").write_text("a", encoding="utf-8")
+        (private(h.root) / "loop").symlink_to(private(h.root) / "loop")
+        (private(h.root) / "a.txt").write_text("a", encoding="utf-8")
 
         status, entries = await h.api("GET", "/files/list")
         served = await h.client.get("/api/files", params={"path": "loop"})
@@ -1916,6 +2024,7 @@ class TestFiles:
         h = await start()
 
         response = await h.client.get("/api/files", params={"path": "x.md"})
+        (private(h.root) / "agents").mkdir()
         folder = await h.client.get("/api/files", params={"path": "agents"})
 
         assert response.status == 404
@@ -1952,6 +2061,7 @@ class TestFeedback:
         log = (h.root / ".harness" / "feedback.jsonl").read_text("utf-8")
         record = json.loads(log)
         assert record["sessionId"] == created["id"]
+        assert record["userId"] == "local"
         assert record["index"] == 1
         assert record["rating"] == "down"
         assert record["reasons"] == ["不正確"]
@@ -1960,7 +2070,7 @@ class TestFeedback:
         assert record["timestamp"]
         with project_lib.load_project(h.root) as loaded:
             fresh = workspace_lib.Workspace(loaded)
-            assert fresh.get_session(created["id"])["feedback"] == {
+            assert fresh.get_session(LOCAL, created["id"])["feedback"] == {
                 "1": feedback
             }
 
@@ -1994,7 +2104,7 @@ class TestFeedback:
         assert json.loads(log)["model"] == "m2"
         with project_lib.load_project(h.root) as loaded:
             fresh = workspace_lib.Workspace(loaded)
-            assert fresh.get_session(created["id"])["replyModels"] == {
+            assert fresh.get_session(LOCAL, created["id"])["replyModels"] == {
                 "1": "m2"
             }
 
@@ -2003,16 +2113,14 @@ class TestFeedback:
         _, created = await h.api("POST", "/sessions", {"text": "問題"})
         await h.wait_for("run_end")
         # 這個功能加入之前的對話沒有 replyModels。
-        meta_path = (
-            h.root / ".harness" / "sessions" / f"{created['id']}.meta.json"
-        )
+        meta_path = sessions_dir(h.root) / f"{created['id']}.meta.json"
         meta = json.loads(meta_path.read_text("utf-8"))
         meta.pop("replyModels")
         meta_path.write_text(json.dumps(meta), "utf-8")
 
         with project_lib.load_project(h.root) as loaded:
             fresh = workspace_lib.Workspace(loaded)
-            fresh.set_feedback(created["id"], 1, {"rating": "down"})
+            fresh.set_feedback(LOCAL, created["id"], 1, {"rating": "down"})
 
         log = (h.root / ".harness" / "feedback.jsonl").read_text("utf-8")
         assert "model" not in json.loads(log)
@@ -2053,7 +2161,7 @@ def test_refresh_project_tells_the_browser(tmp_path):
     with project_lib.load_project(make_project(tmp_path / "r")) as loaded:
         ws = workspace_lib.Workspace(loaded)
         events = []
-        ws.subscribe(events.append)
+        ws.subscribe(LOCAL, events.append)
 
         ws.refresh_project()
 
@@ -2088,7 +2196,7 @@ class TestWebInstructions:
             ws = workspace_lib.Workspace(
                 loaded, model_fn=fake_model([conftest.text_response("好")])
             )
-            summary = ws.start_run("嗨")
+            summary = ws.start_run(LOCAL, "嗨")
             await ws._states[summary["id"]].task
 
             assert loaded.agents["main"].instructions == "你是助手。"
@@ -2100,13 +2208,15 @@ class TestEditPreview:
     @pytest.fixture
     def preview(self, tmp_path):
         root = make_project(tmp_path / "e")
-        (root / "notes.md").write_text("a\nb\nb\n", encoding="utf-8")
+        (private(root) / "notes.md").write_text("a\nb\nb\n", "utf-8")
         with project_lib.load_project(root) as loaded:
             ws = workspace_lib.Workspace(loaded)
+            state = ws._create(LOCAL, "main")
+            state.run_folder = ws.folder(LOCAL, None)
 
             def make(arguments):
                 call = datatypes.ToolCall("c1", "edit_file", arguments)
-                return ws._preview(call)
+                return ws._preview(state, call)
 
             yield make
 
@@ -2156,7 +2266,7 @@ class TestEditPreview:
         h = await start(
             [conftest.tool_response(call), conftest.text_response("好")]
         )
-        (h.root / "notes.md").write_text("a\nb\n", encoding="utf-8")
+        (private(h.root) / "notes.md").write_text("a\nb\n", "utf-8")
         await h.api("POST", "/sessions", {"text": "改一下"})
 
         approval = (await h.wait_for("approval"))["approval"]
@@ -2168,7 +2278,7 @@ class TestEditPreview:
             "before": "a\nb\n",
             "after": "a\nc\n",
         }
-        assert (h.root / "notes.md").read_text(encoding="utf-8") == "a\nc\n"
+        assert (private(h.root) / "notes.md").read_text("utf-8") == "a\nc\n"
 
 
 def _write(path: str, content: str = "x") -> tuple[str, dict]:
@@ -2206,14 +2316,12 @@ class TestSessionApproval:
 
         assert resolved["decision"] == "session"
         assert [e["type"] for e in h.events].count("approval") == 1
-        assert (h.root / "b.md").exists()
+        assert (private(h.root) / "b.md").exists()
         assert (h.root / "harness.yaml").read_text("utf-8") == config_before
         _, info = await h.api("GET", "/project")
         assert info["permissions"]["allow"] == []
         meta = json.loads(
-            (
-                h.root / ".harness" / "sessions" / f"{first['id']}.meta.json"
-            ).read_text("utf-8")
+            (sessions_dir(h.root) / f"{first['id']}.meta.json").read_text()
         )
         assert meta["sessionTools"] == ["write_file"]
 
@@ -2291,13 +2399,13 @@ class TestSessionApproval:
                 ),
             )
             events = []
-            ws.subscribe(events.append)
-            summary = ws.start_run("寫 a")
+            ws.subscribe(LOCAL, events.append)
+            summary = ws.start_run(LOCAL, "寫 a")
             state = ws._states[summary["id"]]
             await _until(lambda: state.approvals)
             [pending] = state.approvals.values()
             ws.resolve_approval(
-                summary["id"], pending.approval["id"], "session"
+                LOCAL, summary["id"], pending.approval["id"], "session"
             )
             await state.task
 
@@ -2312,12 +2420,12 @@ class TestSessionApproval:
                 ),
             )
             events = []
-            fresh.subscribe(events.append)
-            fresh.start_run("寫 b", session_id=summary["id"])
+            fresh.subscribe(LOCAL, events.append)
+            fresh.start_run(LOCAL, "寫 b", session_id=summary["id"])
             await fresh._states[summary["id"]].task
 
         assert "approval" not in [e["type"] for e in events]
-        assert (root / "b.md").exists()
+        assert (private(root) / "b.md").exists()
         assert "write_file" not in (root / "harness.yaml").read_text("utf-8")
 
     async def test_session_is_a_valid_decision_only_for_pending(self, start):
@@ -2334,9 +2442,16 @@ class TestSessionApproval:
         assert "session" in body["error"]
 
 
-def _killed_session(root: pathlib.Path, *, running: bool = True) -> str:
-    """寫出伺服器在等待確認時被停掉後留下的對話紀錄與 .meta.json。"""
-    directory = root / ".harness" / "sessions"
+def _killed_session(
+    root: pathlib.Path, *, running: bool = True, legacy: bool = False
+) -> str:
+    """寫出伺服器在等待確認時被停掉後留下的對話紀錄與 .meta.json。
+
+    legacy 為 True 時寫在多人帳號之前的位置（.harness/sessions）。
+    """
+    directory = sessions_dir(root)
+    if legacy:
+        directory = root / ".harness" / "sessions"
     directory.mkdir(parents=True, exist_ok=True)
     session_id = "20260101-120000-abcdef"
     request = conftest.tool_response(WRITE_CALL).message
@@ -2366,18 +2481,18 @@ class TestInterruptedRun:
                 loaded,
                 model_fn=fake_model([conftest.tool_response(WRITE_CALL)]),
             )
-            summary = ws.start_run("寫報告")
+            summary = ws.start_run(LOCAL, "寫報告")
             state = ws._states[summary["id"]]
             await _until(lambda: state.approvals)
 
             await ws.close()
 
-        jsonl = (loaded.sessions_dir / f"{summary['id']}.jsonl").read_text()
+        jsonl = (sessions_dir(root) / f"{summary['id']}.jsonl").read_text()
         roles = [json.loads(line)["role"] for line in jsonl.splitlines()]
         assert roles == ["user", "assistant"]
         assert loop.DENIED_RESULT not in jsonl
         meta = json.loads(
-            (loaded.sessions_dir / f"{summary['id']}.meta.json").read_text()
+            (sessions_dir(root) / f"{summary['id']}.meta.json").read_text()
         )
         assert meta["running"] is True
 
@@ -2390,7 +2505,7 @@ class TestInterruptedRun:
         with project_lib.load_project(root) as loaded:
             ws = workspace_lib.Workspace(loaded)
 
-            [summary] = ws.list_sessions()
+            [summary] = ws.list_sessions(LOCAL)
 
         assert summary["id"] == session_id
         assert summary["status"] == "stopped"
@@ -2404,12 +2519,12 @@ class TestInterruptedRun:
     ):
         root = make_project(tmp_path / "k")
         session_id = _killed_session(root)
-        path = root / ".harness" / "sessions" / f"{session_id}.jsonl"
+        path = sessions_dir(root) / f"{session_id}.jsonl"
         path.write_text(
             json.dumps({"role": "user", "content": "嗨"}) + "\n", "utf-8"
         )
         with project_lib.load_project(root) as loaded:
-            [summary] = workspace_lib.Workspace(loaded).list_sessions()
+            [summary] = workspace_lib.Workspace(loaded).list_sessions(LOCAL)
 
         assert summary["stopReason"] == "interrupted"
 
@@ -2419,7 +2534,7 @@ class TestInterruptedRun:
         await _wait_idle(h.client, created["id"])
 
         with project_lib.load_project(h.root) as loaded:
-            [summary] = workspace_lib.Workspace(loaded).list_sessions()
+            [summary] = workspace_lib.Workspace(loaded).list_sessions(LOCAL)
 
         assert summary["status"] == "idle"
         assert "stopReason" not in summary
@@ -2435,13 +2550,15 @@ class TestInterruptedRun:
         with project_lib.load_project(root) as loaded:
             ws = workspace_lib.Workspace(loaded, model_fn=model)
             events = []
-            ws.subscribe(events.append)
+            ws.subscribe(LOCAL, events.append)
 
-            ws.retry(session_id)
+            ws.retry(LOCAL, session_id)
             state = ws._states[session_id]
             await _until(lambda: state.approvals)
             [pending] = state.approvals.values()
-            ws.resolve_approval(session_id, pending.approval["id"], "once")
+            ws.resolve_approval(
+                LOCAL, session_id, pending.approval["id"], "once"
+            )
             await state.task
             summary = ws._summary(state)
 
@@ -2456,17 +2573,16 @@ class TestInterruptedRun:
         assert loop.DENIED_RESULT not in sent[-1]["content"]
         assert summary["status"] == "done"
         assert "notice" not in summary
-        assert (root / "reports" / "a.md").exists()
+        assert (private(root) / "reports" / "a.md").exists()
         meta = json.loads(
-            (
-                root / ".harness" / "sessions" / f"{session_id}.meta.json"
-            ).read_text("utf-8")
+            (sessions_dir(root) / f"{session_id}.meta.json").read_text()
         )
         assert "running" not in meta
 
     async def test_retry_over_http(self, tmp_path, fake_model):
+        # 多人帳號之前的對話：啟動時交給本機使用者，接著照常重試。
         root = make_project(tmp_path / "k")
-        session_id = _killed_session(root)
+        session_id = _killed_session(root, legacy=True)
         loaded = project_lib.load_project(root)
         model = fake_model([conftest.text_response("接著做完了")])
         app = server_lib.create_app(loaded, model_fn=model)

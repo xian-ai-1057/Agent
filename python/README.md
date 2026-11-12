@@ -41,13 +41,13 @@ Python 版的特點：
 git clone https://github.com/xian-ai-1057/AgentHarness.git
 cd AgentHarness
 docker compose up -d             # 第一次會建置映像檔，需要幾分鐘
-docker compose logs harness      # 看自動產生的登入密碼
+docker compose logs harness      # 看管理者 admin 自動產生的密碼
 ```
 
 接著：
 
-1. 用瀏覽器打開 `http://<這台電腦的位址>:4321`，登入（使用者名稱不限，
-   密碼在上面的 log 裡）。
+1. 用瀏覽器打開 `http://<這台電腦的位址>:4321`，用帳號 `admin` 登入（密碼
+   在上面的 log 裡），再到「設定 → 成員」幫其他人建立帳號。
 2. 第一次會看到「先連接模型」：選供應商、貼上金鑰，按「測試連線並儲存」。
 3. 開始對話。可以直接上傳 Excel、PDF、CSV 請它分析。
 
@@ -56,7 +56,7 @@ docker compose logs harness      # 看自動產生的登入密碼
 | 項目 | 自動的做法 | 想自己指定時 |
 |---|---|---|
 | 專案 | 建立一個通用助手：可以讀寫檔案、列計畫、讀取網頁、記住交代的事、寫程式分析上傳的檔案 | 修改 volume 裡的 `harness.yaml`、`agents/main.md`、`AGENTS.md` |
-| 登入密碼 | 第一次啟動時產生，之後每次啟動都用同一組 | `.env` 的 `HARNESS_WEB_PASSWORD` |
+| 管理者密碼 | 第一次啟動時建立帳號 `admin` 並產生密碼，之後每次啟動都會顯示（admin 改過密碼後就不顯示） | `.env` 的 `HARNESS_WEB_PASSWORD`（只在建立 admin 時使用） |
 | 模型與金鑰 | 在網頁上填寫（見[在網頁上連接模型](#在網頁上連接模型)） | `.env` 的 `ANTHROPIC_API_KEY` 等 |
 | 沙盒 | 一併建置裝好 pandas、matplotlib 等套件的映像檔 | 修改 `docker/sandbox.Dockerfile` |
 | 埠號 | 4321 | `.env` 的 `HARNESS_PORT` |
@@ -96,11 +96,12 @@ docker compose restart harness   # 改了 harness.yaml 或 agent 之後重新載
   專用的機器或虛擬機上。不需要分析檔案時，把 `docker-compose.yml` 裡
   `/var/run/docker.sock` 那一行刪掉再啟動（自動建立的助手就不會開啟
   沙盒）。
-- **登入密碼會印在 log 裡**，看得到 `docker compose logs` 的人就能登入。
+- **admin 的密碼會印在 log 裡**，看得到 `docker compose logs` 的人就能
+  以管理者登入。第一次登入後請在帳號選單改掉。
 - **這個設定是 http，沒有加密。** 只在內網或 VPN 裡使用；要從網際網路
   連線，請在前面加上 HTTPS 的反向代理（見
   [部署到伺服器](#部署到伺服器)的 nginx 設定）。
-- 其他注意事項（所有登入的人共用對話與上傳的檔案）見
+- 其他注意事項（成員與管理者的差別、共用資料夾）見
   [部署到伺服器](#部署到伺服器)最後的說明。
 
 不用 Docker 也可以：安裝後在一個空的資料夾執行 `pyharness web`，同樣會
@@ -867,7 +868,8 @@ skills: [code-review, git-commit]
 memory: true
 ```
 
-記憶存在 `.harness/memory.json`，可以用命令列查看與管理：
+記憶存在 `.harness/memory.json`（網頁版每個人分開，存在
+`.harness/users/<識別碼>/memory.json`），可以用命令列查看與管理：
 
 ```bash
 pyharness memory                 # 列出所有記憶
@@ -1259,6 +1261,9 @@ pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
 pyharness web                開啟網頁版（--port、--host、--allowed-host、
                              --max-upload-mb，見下一節）；資料夾是空的
                              時自動建立可以直接使用的助手
+pyharness user               管理網頁版的帳號：add <名稱> [--name 顯示
+                             名稱] [--admin]、list、passwd <名稱>、
+                             disable <名稱>、enable <名稱>
 pyharness sandbox            檢查沙盒（Docker）能不能正常執行程式
 
 chat 與 run 共用的選項：
@@ -1315,20 +1320,78 @@ Python 版另外會處理：
   勾選 skills 與工具，下一則訊息開始生效。要多開放幾個模型給使用者選，
   在 `harness.yaml` 寫 `models: [openai/gpt-5, ...]`（每一項也可以是
   `{name, label}`）。
+- **帳號與工作資料夾**：讓其他人使用時每個人用自己的帳號登入，對話、
+  檔案與記憶各自分開；每段對話選一個工作資料夾，agent 只看得到那裡
+  （見下方的[帳號與成員](#帳號與成員)與[工作資料夾](#工作資料夾)）。
 - **預覽檔案**：點附件或 agent 寫的檔案，右側面板直接顯示圖片、PDF、
-  CSV、Markdown 與程式碼，也可以下載。只看得到專案資料夾裡的檔案，
-  `.harness/` 與其他以點開頭的檔案一律不提供；HTML、SVG 只顯示原始碼。
+  CSV、Markdown 與程式碼，也可以下載。只看得到這段對話的工作資料夾裡的
+  檔案，以點開頭的檔案一律不提供；HTML、SVG 只顯示原始碼。
   `run_python` 新增或修改的檔案也會以檔案卡片出現。
 - **減少確認**：權限確認可以選「這段對話都允許」（只記在這段對話，
   不寫進 `harness.yaml`）；同一段對話裡同意過、參數完全相同的呼叫
-  不再重複問。`edit_file` 也會顯示修改前後的差異。
+  不再重複問。成員選「以後都允許」只記在自己的資料、只適用於自己在
+  同一個資料夾的對話。`edit_file` 也會顯示修改前後的差異。
 - **中斷後接著做**：伺服器在一輪跑到一半時重新啟動，那段對話會顯示
   被中斷，按重試接著做，中斷的工具呼叫不會被當成拒絕。
 - **網頁版說明**：從網頁執行時，agent 的指示後面會多一段說明（使用者
-  只有瀏覽器、檔案以卡片呈現、數字只引用程式印出來的值）。
+  只有瀏覽器、只看得到工作資料夾、檔案以卡片呈現、數字只引用程式印出來
+  的值）。
 - **管理對話**：⌘K 搜尋標題與內容、重新命名、刪除。
 - **回覆的評價**：讚或倒讚（可以勾選原因），同時記在
-  `.harness/feedback.jsonl`。
+  `.harness/feedback.jsonl`（含評價的人）。
+
+### 帳號與成員
+
+只在自己的電腦上用（只聽本機、沒有設定密碼、沒有任何帳號）時不必登入，
+你就是這台電腦的管理者。讓其他人使用時（聽本機以外的位址、設定了
+`HARNESS_WEB_PASSWORD`，或建立過帳號），每個人都要用自己的帳號登入：
+
+- 第一次這樣啟動時自動建立管理者 `admin`，密碼是網頁密碼（環境變數
+  `HARNESS_WEB_PASSWORD`，沒有時自動產生並印出來）。從舊版升級時原本的
+  密碼不變，使用者名稱填 `admin`。
+- 管理者在「設定 → 成員」新增成員、改角色、停用或重設密碼；伺服器產生
+  的密碼只顯示一次。成員登入後可以自己改密碼（至少 10 個字元）。也可以
+  用命令列：
+
+  ```bash
+  pyharness user add alice --name 愛麗絲   # 成員，印出產生的密碼
+  pyharness user add boss --admin          # 管理者
+  pyharness user list
+  pyharness user passwd alice              # 重設密碼，原本的登入全部失效
+  pyharness user disable alice             # 停用；enable 重新啟用
+  ```
+
+- 至少要留一位可以使用的管理者。停用的人立刻被登出。
+- 成員只看得到自己的對話、「我的檔案」與被開放的共用資料夾，不能修改
+  模型連線、全站權限與成員，也不能讓對話「全部直接執行」（bypass）。
+  成員的 `run_command` 一律在沙盒裡執行，沒有沙盒時不提供。
+- 登入用 HttpOnly、SameSite=Strict 的 cookie，12 小時沒有使用就要重新
+  登入；同一個帳號名稱加 IP 連續錯 5 次密碼暫停 30 秒。
+
+每個人的資料存在 `.harness/users/<識別碼>/`（`sessions/`、`memory.json`、
+`permissions.json`），「我的檔案」在 `private/<識別碼>/`，帳號在
+`.harness/harness.db`。第一次啟動時，舊版的對話紀錄、記憶與上傳的檔案
+交給第一位管理者（上傳的檔案放到他「我的檔案」裡同樣的相對位置，舊對話
+的附件仍然打得開），只搬一次、不覆蓋任何檔案。
+
+### 工作資料夾
+
+每段對話選一個工作資料夾（預設是自己的「我的檔案」），agent 的檔案
+工具、執行指令與沙盒都只看得到它，上傳的檔案也存在裡面。管理者可以在
+`harness.yaml` 開放共用資料夾：
+
+```yaml
+workspaces:
+  - name: 營收分析
+    path: workspace/revenue   # 相對於專案，或絕對路徑（掛載進來的資料夾）
+    members: all              # 或使用者名稱的清單；管理者都看得到
+    writable: true            # false 時 agent 不能寫入（沙盒唯讀掛載），也不能上傳
+```
+
+沒有寫 `workspaces` 時，有一個所有人都能用的「共用」資料夾：`workspace/`
+（有設定沙盒時是 `sandbox.workspace`）。共用資料夾不能和 `.harness/`、
+`private/`、`harness.yaml`、`AGENTS.md`、`agents/`、`tools/`、`skills/`
+重疊，彼此也不能互相包含，寫錯時啟動就會報錯。
 
 ### 在網頁上連接模型
 
@@ -1363,9 +1426,9 @@ agent 不建議開啟 `shell`。
 
 ### 上傳檔案
 
-上傳的檔案存在[沙盒](#在沙盒裡執行程式)的工作目錄底下的 `uploads/`（沒有
-設定沙盒時是專案的 `workspace/uploads/`），所以 agent 可以直接用
-`run_python` 解析，也可以用 `files` 工具讀取。
+上傳的檔案存在這段對話的[工作資料夾](#工作資料夾)底下的 `uploads/`。
+[沙盒](#在沙盒裡執行程式)每一輪都把工作資料夾掛載到 `/workspace`，所以
+agent 可以直接用 `run_python` 解析，也可以用 `files` 工具讀取。
 
 - 選好檔案就開始上傳，全部上傳完才能送出；只附檔案、不打字也可以送出。
 - 送出時，伺服器會在訊息後面加上每個附件的路徑，讓模型知道檔案在哪裡：
@@ -1373,14 +1436,15 @@ agent 不建議開啟 `shell`。
   ```
   幫我分析這份報表
 
-  [附件] workspace/uploads/十月_業績.xlsx（run_python 裡的路徑：/workspace/uploads/十月_業績.xlsx）
+  [附件] uploads/十月_業績.xlsx（run_python 裡的路徑：/workspace/uploads/十月_業績.xlsx）
   ```
 
   網頁上這幾行會顯示成訊息底下的檔案標籤。
 - 檔名裡的空白與特殊字元會換成底線，同名的檔案會自動加上 `-2`、`-3`。
 - 單一檔案預設最多 50 MB，用 `pyharness web --max-upload-mb 200` 調整。
   檔案邊收邊寫入磁碟，不會整個放進記憶體。
-- 上傳的檔案不會自動刪除，所有對話共用同一個 `uploads/` 資料夾。
+- 上傳的檔案不會自動刪除；同一個工作資料夾的對話共用同一個 `uploads/`。
+  唯讀的資料夾不能上傳。
 - 上傳只接受帶有特定標頭、來自同一個網站的請求，其他網站無法借用使用者
   的登入狀態上傳檔案。
 
@@ -1415,7 +1479,7 @@ python3 -m venv ~/venv
 接著把專案放到伺服器上，依上一節建立沙盒的映像檔，並執行
 `pyharness sandbox` 確認可以使用。
 
-**2. 設定登入密碼並啟動**
+**2. 設定管理者密碼並啟動**
 
 ```bash
 export HARNESS_WEB_PASSWORD='一組夠長的隨機密碼'
@@ -1425,16 +1489,23 @@ export HARNESS_MODEL=claude
 ~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com
 ```
 
-- **讓其他電腦連線時一定要有登入密碼。** 沒有設定
-  `HARNESS_WEB_PASSWORD` 時，第一次啟動會自動產生一組並印在啟動訊息裡，
-  存在專案的 `.harness/secrets/web-password`，之後每次啟動都用同一組。
-  瀏覽器會跳出登入視窗：使用者名稱不限，密碼要正確。
+- **讓其他電腦連線時一定要登入。** 第一次啟動時自動建立管理者帳號
+  `admin`，密碼是 `HARNESS_WEB_PASSWORD`；沒有設定時自動產生一組並印在
+  啟動訊息裡，存在專案的 `.harness/secrets/web-password`。之後每次啟動
+  都會再顯示，直到 admin 自己改了密碼。從舊版（只有一組密碼）升級時，
+  原本的密碼就是 admin 的密碼。
+- 環境變數只在建立 admin 時使用一次；之後改密碼請在網頁的帳號選單，
+  或用 `pyharness user passwd admin`。
+- 登入後由管理者在「設定 → 成員」或用 `pyharness user add` 新增成員，
+  每個人用自己的帳號登入，對話、檔案與記憶各自分開（見
+  [帳號與成員](#帳號與成員)、[工作資料夾](#工作資料夾)）。
 - 模型的三個環境變數也可以不設定，啟動後
-  [在網頁上連接模型](#在網頁上連接模型)。
+  [在網頁上連接模型](#在網頁上連接模型)（只有管理者能設定）。
 - `--allowed-host` 是使用者在瀏覽器網址列輸入的主機名稱（可以重複）。
-  沒有指定時，只要密碼正確，用任何網址連線都接受。
-- 密碼會以 HTTP Basic Auth 傳送，**一定要放在 HTTPS 後面**，不要讓瀏覽器
-  直接用 http 連到伺服器。
+  沒有指定時，用任何網址連線都接受（還是要登入）。
+- 登入的 cookie 是 HttpOnly、SameSite=Strict；經過 HTTPS（或反向代理送來
+  `X-Forwarded-Proto: https`）時另外加上 Secure。**一定要放在 HTTPS
+  後面**，不要讓瀏覽器直接用 http 連到伺服器傳送密碼。
 
 **3. 用反向代理加上 HTTPS**
 
@@ -1449,6 +1520,7 @@ server {
     location / {
         proxy_pass http://127.0.0.1:4321;
         proxy_set_header Host $http_host;  # 一定要傳瀏覽器送來的 Host
+        proxy_set_header X-Forwarded-Proto $scheme;  # 讓登入的 cookie 加上 Secure
         proxy_http_version 1.1;
         proxy_buffering off;               # 即時串流回覆（SSE）需要
         proxy_read_timeout 1h;
@@ -1477,8 +1549,8 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-`/etc/harness.env` 放 `HARNESS_WEB_PASSWORD`、模型設定等環境變數，權限設成
-只有 root 與 harness 能讀（`chmod 640`）。
+`/etc/harness.env` 放 `HARNESS_WEB_PASSWORD`（第一次啟動時建立 admin 用）、
+模型設定等環境變數，權限設成只有 root 與 harness 能讀（`chmod 640`）。
 
 ```bash
 sudo systemctl daemon-reload
@@ -1490,12 +1562,24 @@ sudo systemctl enable --now harness
 - **能使用 docker 指令，等於擁有主機的 root 權限。** 請用專用帳號執行
   pyharness，不要在這個帳號放其他服務。要更嚴格的話可以改用 rootless
   Docker 或 Podman（`sandbox.command: podman`）。
-- **所有登入的人共用同一組密碼、看得到同樣的對話**，也都可以在網頁上
-  同意工具執行、修改權限與模型設定。目前沒有分帳號，適合給同一個團隊
-  使用；要依使用者區分資料，請把 agent 嵌進自己的網頁服務（見
-  [嵌進既有的網頁服務](#嵌進既有的網頁服務)）。
-- **上傳的檔案所有登入的人都拿得到**（agent 可以讀 `uploads/` 裡的任何
-  檔案），也不會自動刪除。敏感文件分析完請自行清理。
+- **這是單機模式**：帳號存在專案的 `.harness/harness.db`（SQLite，密碼用
+  scrypt 加上各自的 salt，登入 token 只存雜湊），資料放在本機的檔案系統。
+  每個動作都記得是誰做的、每段對話都有擁有者，存取檢查集中在伺服器的
+  一層裡；身分（`AccountStore`）與資料夾權限（`Folders`）各自包成一個小
+  介面，之後的企業版可以換成 OIDC 單一登入與 PostgreSQL。
+- **成員看不到別人的對話與「我的檔案」**，也不能修改模型連線、全站權限
+  與成員；他們「以後都允許」的工具只適用於自己。成員的 `run_command`
+  一律在沙盒裡執行（沒有網路、只掛載工作資料夾），沒有沙盒時不提供，
+  指令不會在伺服器上替成員執行。
+- **管理者的 `run_command` 仍然在伺服器上執行**（`cwd` 限制在工作資料夾，
+  但指令本身可以做任何事，讀得到金鑰與其他人的資料）。不需要時別讓
+  agent 使用 `shell`；企業版會把管理者也移進沙盒。
+- **共用資料夾裡的檔案，所有能使用它的人都拿得到**（agent 可以讀裡面的
+  任何檔案），上傳的檔案也不會自動刪除。敏感文件請放在自己的「我的
+  檔案」，分析完自行清理。
+- 登入失敗的限制（同一個帳號名稱加 IP 連續錯 5 次暫停 30 秒）只記在
+  記憶體裡，重新啟動後歸零；放在網際網路上時，請另外在反向代理加上
+  流量限制。
 
 ## 和 TypeScript 版的差異
 
@@ -1508,8 +1592,8 @@ sudo systemctl enable --now harness
   的 `knowledge`、`memory`、`guardrails`、`compaction`、`sandbox` 區塊，
   所以同一個專案仍然可以用 TypeScript 版執行（只是沒有這些功能；agent
   的 `tools` 列了 `sandbox` 的話，TypeScript 版會因為找不到它而無法載入）。
-- **網頁版的登入密碼（`HARNESS_WEB_PASSWORD`）、`--allowed-host`、在網頁上
-  連接模型、自動建立助手專案與 Docker Compose 部署只有 Python 版支援。**
+- **網頁版的帳號與登入、工作資料夾、`--allowed-host`、在網頁上連接模型、
+  自動建立助手專案與 Docker Compose 部署只有 Python 版支援。**
   TypeScript 版的內建檔案工具同樣不能存取 `.harness/secrets/`。Python 版壓縮
   過的對話，TypeScript 版會讀取壓縮後的歷史接續。
 - 對話紀錄的格式相同，同一個專案的對話可以用任一個版本接續。
@@ -1517,6 +1601,7 @@ sudo systemctl enable --now harness
 ## 目前還沒有的功能
 
 - Slack / Telegram 等訊息平台的接口
-- 網頁版依使用者分開的帳號、對話與上傳檔案
+- 網頁版的企業模式：OIDC 單一登入、PostgreSQL，以及管理者的指令也在
+  沙盒裡執行（目前是單機模式，見[帳號與成員](#帳號與成員)）
 - 網頁版的「工作中」只列出這次啟動後跑過的對話；更早的對話仍然可以
   在列表裡打開、接著問

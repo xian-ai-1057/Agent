@@ -14,7 +14,8 @@
 
 每次執行都是全新的容器，變數不會留到下一次；要沿用結果請寫成檔案。
 執行前後比對工作目錄，新增或修改的檔案會以 PRODUCED_MARKER 開頭的行
-接在工具結果後面（路徑相對於專案根目錄），網頁版用它顯示檔案卡片。
+接在工具結果後面（路徑相對於 RunContext.workdir：命令列是專案根目錄，
+網頁版是對話的工作資料夾），網頁版用它顯示檔案卡片。
 
 pyharness 自己也跑在容器裡時（用 docker-compose.yml 部署），它看到的路徑
 不是主機上的路徑，沒辦法直接掛載。這時專案放在一個 Docker volume 裡，
@@ -22,6 +23,10 @@ pyharness 自己也跑在容器裡時（用 docker-compose.yml 部署），它�
 那個 volume 裡的工作目錄。映像檔與給模型看的說明也可以用環境變數提供
 預設值（HARNESS_SANDBOX_IMAGE、HARNESS_SANDBOX_NOTES），harness.yaml 有寫
 的話以 harness.yaml 為準。
+
+網頁版讓每段對話選自己的工作資料夾，所以每一輪都用 for_folder 複製一份
+只掛載那個資料夾的沙盒；成員的 run_command 也改在沙盒裡執行
+（command_tool），不會在伺服器上直接執行。
 """
 
 import asyncio
@@ -35,6 +40,8 @@ from typing import Any
 
 from harness import datatypes
 from harness import tools as tools_lib
+from harness.builtin import paths
+from harness.builtin import shell
 
 TOOLSET = "sandbox"
 TOOL_NAME = "run_python"
@@ -126,6 +133,7 @@ class Sandbox:
         volume: workspace 所在的 Docker volume 名稱；pyharness 本身跑在
             容器裡時使用，None 表示直接掛載主機上的資料夾。
         volume_subpath: workspace 在 volume 裡的相對路徑。
+        read_only: True 時唯讀掛載，容器裡的程式不能寫入 workspace。
     """
 
     workspace: pathlib.Path
@@ -139,6 +147,7 @@ class Sandbox:
     max_output_chars: int = 20_000
     volume: str | None = None
     volume_subpath: str = ""
+    read_only: bool = False
 
     def __post_init__(self) -> None:
         self.workspace = pathlib.Path(self.workspace).resolve()
@@ -147,11 +156,46 @@ class Sandbox:
         if self.cpus <= 0:
             raise ValueError("cpus 必須大於 0")
 
-    def docker_args(self, name: str) -> list[str]:
+    def for_folder(
+        self, root: pathlib.Path, folder: pathlib.Path, read_only: bool = False
+    ) -> "Sandbox":
+        """複製一份只掛載 folder 的沙盒，其他設定不變。
+
+        Args:
+            root: 專案根目錄；用 Docker volume 掛載時，folder 要在它裡面。
+            folder: 要掛載到 /workspace 的資料夾。
+            read_only: 是否唯讀掛載。
+
+        Returns:
+            新的沙盒。
+
+        Raises:
+            ValueError: 用 Docker volume 掛載專案，folder 卻不在專案裡。
+        """
+        changes: dict[str, Any] = {"workspace": folder, "read_only": read_only}
+        if self.volume is not None:
+            try:
+                subpath = folder.resolve().relative_to(root.resolve())
+            except ValueError as error:
+                raise ValueError(
+                    "沙盒透過 Docker volume 掛載專案，只能使用專案裡的資料夾："
+                    f"{folder}"
+                ) from error
+            changes["volume_subpath"] = subpath.as_posix()
+        return dataclasses.replace(self, **changes)
+
+    def docker_args(
+        self,
+        name: str,
+        argv: tuple[str, ...] = ("python", "-"),
+        workdir: str = CONTAINER_WORKDIR,
+    ) -> list[str]:
         """組合 docker run 的參數。
 
         Args:
             name: 容器名稱，逾時或中斷時用它停止容器。
+            argv: 在容器裡執行的指令，預設從標準輸入讀程式的 python。
+            workdir: 容器裡的工作目錄。
 
         Returns:
             完整的指令與參數。
@@ -195,17 +239,17 @@ class Sandbox:
             "PYTHONDONTWRITEBYTECODE=1",
             *self._mount_args(),
             "-w",
-            CONTAINER_WORKDIR,
+            workdir,
             self.image,
-            "python",
-            "-",
+            *argv,
         ]
         return args
 
     def _mount_args(self) -> list[str]:
         """把工作目錄掛進容器的參數。"""
         if self.volume is None:
-            return ["-v", f"{self.workspace}:{CONTAINER_WORKDIR}"]
+            suffix = ":ro" if self.read_only else ""
+            return ["-v", f"{self.workspace}:{CONTAINER_WORKDIR}{suffix}"]
         # volume-nocopy：資料夾是空的時，Docker 預設會把映像檔裡同一個
         # 位置的內容與擁有者複製過來，工作目錄會變成 root 的，之後
         # pyharness 就寫不進去（例如存不了上傳的檔案）。
@@ -215,6 +259,8 @@ class Sandbox:
         )
         if self.volume_subpath:
             mount += f",volume-subpath={self.volume_subpath}"
+        if self.read_only:
+            mount += ",readonly"
         return ["--mount", mount]
 
     async def run(self, code: str) -> Result:
@@ -229,11 +275,39 @@ class Sandbox:
         Raises:
             RuntimeError: 找不到 docker 指令。
         """
+        return await self._execute(
+            ("python", "-"), code, CONTAINER_WORKDIR, self.timeout_seconds
+        )
+
+    async def run_shell(
+        self, command: str, workdir: str, timeout: float
+    ) -> Result:
+        """在新的容器裡用 bash -lc 執行一個指令。
+
+        Args:
+            command: 要執行的指令。
+            workdir: 容器裡的工作目錄（/workspace 底下）。
+            timeout: 逾時秒數。
+
+        Returns:
+            執行結果。
+
+        Raises:
+            RuntimeError: 找不到 docker 指令。
+        """
+        return await self._execute(
+            ("bash", "-lc", command), "", workdir, timeout
+        )
+
+    async def _execute(
+        self, argv: tuple[str, ...], stdin: str, workdir: str, timeout: float
+    ) -> Result:
+        """在新的容器裡執行 argv，逾時或中斷時停掉容器。"""
         self.workspace.mkdir(parents=True, exist_ok=True)
         name = f"harness-sandbox-{uuid.uuid4().hex[:12]}"
         try:
             process = await asyncio.create_subprocess_exec(
-                *self.docker_args(name),
+                *self.docker_args(name, argv, workdir),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -244,7 +318,7 @@ class Sandbox:
             ) from error
         try:
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(code.encode()), self.timeout_seconds
+                process.communicate(stdin.encode()), timeout
             )
         except TimeoutError:
             await self._stop(name, process)
@@ -288,6 +362,66 @@ class Sandbox:
             )
         ]
 
+    def command_tool(self) -> tools_lib.Tool:
+        """在沙盒裡執行的 run_command：名稱與參數和內建的相同。
+
+        網頁版給成員使用：指令在沒有網路、有資源限制的全新容器裡執行，
+        只看得到 workspace（掛載在 /workspace），不會在伺服器上執行。
+        """
+
+        async def run_command(
+            context: datatypes.RunContext,
+            command: str,
+            cwd: str = ".",
+            timeout: int = shell.DEFAULT_TIMEOUT_SECONDS,
+        ) -> str:
+            """在沙盒裡執行一個 shell 指令。
+
+            Args:
+                command: 要執行的指令，例如 ls -la 或 wc -l data.csv。
+                cwd: 在哪個資料夾執行，相對於工作資料夾。
+                timeout: 逾時秒數，超過就終止指令（最多 600）。
+            """
+            if not command.strip():
+                raise tools_lib.ToolError("command 不能是空字串")
+            if not 1 <= timeout <= shell.MAX_TIMEOUT_SECONDS:
+                raise tools_lib.ToolError(
+                    f"timeout 必須介於 1 到 {shell.MAX_TIMEOUT_SECONDS} 秒之間"
+                )
+            folder = datatypes.RunContext("", self.workspace, "")
+            inside = paths.resolve_path(folder, cwd).relative_to(self.workspace)
+            workdir = CONTAINER_WORKDIR
+            if inside.parts:
+                workdir = f"{CONTAINER_WORKDIR}/{inside.as_posix()}"
+            before = await asyncio.to_thread(snapshot, self.workspace)
+            result = await self.run_shell(command, workdir, timeout)
+            after = await asyncio.to_thread(snapshot, self.workspace)
+            produced = produced_lines(
+                self.workspace, context.workdir, before, after
+            )
+            outcome = shell.CommandResult(
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                timed_out=result.timed_out,
+            )
+            return shell.format_result(outcome, timeout) + produced
+
+        network = "可以連網" if self.network else "沒有網路"
+        description = (
+            "在隔離的沙盒裡執行一個 shell 指令（bash -lc），回傳結束代碼、"
+            "stdout 與 stderr。指令在"
+            f"{network}的全新容器裡執行，只看得到工作資料夾（掛載在 "
+            f"{CONTAINER_WORKDIR}），不能互動，也無法安裝套件。讀寫檔案請"
+            "優先用 files 工具。"
+        )
+        return tools_lib.tool(
+            run_command,
+            name=shell.run_command.name,
+            description=description,
+            needs_approval=True,
+        )
+
     def _description(self) -> str:
         network = "可以連網" if self.network else "沒有網路"
         text = (
@@ -296,7 +430,7 @@ class Sandbox:
             f"- 程式在{network}的全新容器裡執行，工作目錄是 "
             f"{CONTAINER_WORKDIR}：要處理的檔案在這裡，產生的檔案（圖表、"
             "CSV 等）也存在這裡。新增或修改的檔案會列在結果最後"
-            f"（{PRODUCED_MARKER.strip()} 開頭的行，路徑相對於專案）。\n"
+            f"（{PRODUCED_MARKER.strip()} 開頭的行，路徑相對於工作資料夾）。\n"
             "- 每次執行都是全新的環境，變數不會保留；要沿用的結果請寫成"
             "檔案。\n"
             "- 用 print 輸出要看的結果，輸出太長會被截斷，所以只印需要的"

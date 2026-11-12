@@ -22,7 +22,7 @@ python3 -m venv ~/venv
 接著把專案放到伺服器上，依[在沙盒裡執行程式](/advanced/sandbox#準備分析用的映像檔)建立沙盒的映像檔，並執行
 `pyharness sandbox` 確認可以使用。
 
-## 2. 設定登入密碼並啟動
+## 2. 設定管理者密碼並啟動
 
 ```bash
 export HARNESS_WEB_PASSWORD='一組夠長的隨機密碼'
@@ -32,16 +32,23 @@ export HARNESS_MODEL=claude
 ~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com
 ```
 
-- **讓其他電腦連線時一定要有登入密碼。** 沒有設定
-  `HARNESS_WEB_PASSWORD` 時，第一次啟動會自動產生一組並印在啟動訊息裡，
-  存在專案的 `.harness/secrets/web-password`，之後每次啟動都用同一組。
-  瀏覽器會跳出登入視窗：使用者名稱不限，密碼要正確。
+- **讓其他電腦連線時一定要登入。** 第一次啟動時自動建立管理者帳號
+  `admin`，密碼是 `HARNESS_WEB_PASSWORD`；沒有設定時自動產生一組並印在
+  啟動訊息裡，存在專案的 `.harness/secrets/web-password`。之後每次啟動
+  都會再顯示，直到 admin 自己改了密碼。從舊版（只有一組密碼）升級時，
+  原本的密碼就是 admin 的密碼。
+- 環境變數只在建立 admin 時使用一次；之後改密碼請在網頁的帳號選單，
+  或用 `pyharness user passwd admin`。
+- 登入後由管理者在「設定 → 成員」或用 `pyharness user add` 新增成員，
+  每個人用自己的帳號登入，對話、檔案與記憶各自分開（見
+  [帳號與成員](/guide/web#帳號與成員)、[工作資料夾](/guide/web#工作資料夾)）。
 - 模型的三個環境變數也可以不設定，啟動後
-  [在網頁上連接模型](/guide/web#在網頁上連接模型)。
+  [在網頁上連接模型](/guide/web#在網頁上連接模型)（只有管理者能設定）。
 - `--allowed-host` 是使用者在瀏覽器網址列輸入的主機名稱（可以重複）。
-  沒有指定時，只要密碼正確，用任何網址連線都接受。
-- 密碼會以 HTTP Basic Auth 傳送，**一定要放在 HTTPS 後面**，不要讓瀏覽器
-  直接用 http 連到伺服器。
+  沒有指定時，用任何網址連線都接受（還是要登入）。
+- 登入的 cookie 是 HttpOnly、SameSite=Strict；經過 HTTPS（或反向代理送來
+  `X-Forwarded-Proto: https`）時另外加上 Secure。**一定要放在 HTTPS
+  後面**，不要讓瀏覽器直接用 http 連到伺服器傳送密碼。
 
 ## 3. 用反向代理加上 HTTPS
 
@@ -56,6 +63,7 @@ server {
     location / {
         proxy_pass http://127.0.0.1:4321;
         proxy_set_header Host $http_host;  # 一定要傳瀏覽器送來的 Host
+        proxy_set_header X-Forwarded-Proto $scheme;  # 讓登入的 cookie 加上 Secure
         proxy_http_version 1.1;
         proxy_buffering off;               # 即時串流回覆（SSE）需要
         proxy_read_timeout 1h;
@@ -84,8 +92,8 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-`/etc/harness.env` 放 `HARNESS_WEB_PASSWORD`、模型設定等環境變數，權限設成
-只有 root 與 harness 能讀（`chmod 640`）。
+`/etc/harness.env` 放 `HARNESS_WEB_PASSWORD`（第一次啟動時建立 admin 用）、
+模型設定等環境變數，權限設成只有 root 與 harness 能讀（`chmod 640`）。
 
 ```bash
 sudo systemctl daemon-reload
@@ -97,9 +105,21 @@ sudo systemctl enable --now harness
 - **能使用 docker 指令，等於擁有主機的 root 權限。** 請用專用帳號執行
   pyharness，不要在這個帳號放其他服務。要更嚴格的話可以改用 rootless
   Docker 或 Podman（`sandbox.command: podman`）。
-- **所有登入的人共用同一組密碼、看得到同樣的對話**，也都可以在網頁上
-  同意工具執行、修改權限與模型設定。目前沒有分帳號，適合給同一個團隊
-  使用；要依使用者區分資料，請把 agent 嵌進自己的網頁服務（見
-  [嵌進既有的網頁服務](/guide/embed#嵌進既有的網頁服務)）。
-- **上傳的檔案所有登入的人都拿得到**（agent 可以讀 `uploads/` 裡的任何
-  檔案），也不會自動刪除。敏感文件分析完請自行清理。
+- **這是單機模式**：帳號存在專案的 `.harness/harness.db`（SQLite，密碼用
+  scrypt 加上各自的 salt，登入 token 只存雜湊），資料放在本機的檔案系統。
+  每個動作都記得是誰做的、每段對話都有擁有者，存取檢查集中在伺服器的
+  一層裡；身分（`AccountStore`）與資料夾權限（`Folders`）各自包成一個小
+  介面，之後的企業版可以換成 OIDC 單一登入與 PostgreSQL。
+- **成員看不到別人的對話與「我的檔案」**，也不能修改模型連線、全站權限
+  與成員；他們「以後都允許」的工具只適用於自己。成員的 `run_command`
+  一律在沙盒裡執行（沒有網路、只掛載工作資料夾），沒有沙盒時不提供，
+  指令不會在伺服器上替成員執行。
+- **管理者的 `run_command` 仍然在伺服器上執行**（`cwd` 限制在工作資料夾，
+  但指令本身可以做任何事，讀得到金鑰與其他人的資料）。不需要時別讓
+  agent 使用 `shell`；企業版會把管理者也移進沙盒。
+- **共用資料夾裡的檔案，所有能使用它的人都拿得到**（agent 可以讀裡面的
+  任何檔案），上傳的檔案也不會自動刪除。敏感文件請放在自己的「我的
+  檔案」，分析完自行清理。
+- 登入失敗的限制（同一個帳號名稱加 IP 連續錯 5 次暫停 30 秒）只記在
+  記憶體裡，重新啟動後歸零；放在網際網路上時，請另外在反向代理加上
+  流量限制。

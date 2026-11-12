@@ -1,16 +1,14 @@
 """網頁版上傳的檔案。
 
-上傳的檔案存在沙盒工作目錄（沒有設定沙盒時是專案的 workspace/）底下的
-uploads/，所以 agent 可以用 run_python 直接處理，也可以用 files 工具讀取。
+上傳的檔案存在工作資料夾（見 folders 模組，預設是自己的「我的檔案」）
+底下的 uploads/。沙盒每一輪都把對話的工作資料夾掛載到 /workspace，所以
+agent 可以用 run_python 直接處理，也可以用 files 工具讀取。
 
 使用者送出訊息時附上檔案，訊息後面會加上一行行的附件說明：
 
-    [附件] workspace/uploads/a.xlsx（run_python 裡的路徑：
-    /workspace/uploads/a.xlsx）
+    [附件] uploads/a.xlsx（run_python 裡的路徑：/workspace/uploads/a.xlsx）
 
-（實際上是同一行。）
-
-開頭固定是「[附件] 」，接著是相對於專案根目錄的路徑（檔名已經清理過，
+開頭固定是「[附件] 」，接著是相對於工作資料夾的路徑（檔名已經清理過，
 不含空白），網頁用它把附件顯示成檔案標籤。
 """
 
@@ -21,7 +19,6 @@ import unicodedata
 import urllib.parse
 from collections.abc import AsyncIterator
 
-from harness import project as project_lib
 from harness import sandbox as sandbox_lib
 
 MARKER = "[附件] "
@@ -46,10 +43,10 @@ class UploadError(Exception):
 
 @dataclasses.dataclass
 class Uploads:
-    """一個專案的上傳資料夾。
+    """一個工作資料夾的上傳資料夾。
 
     Attributes:
-        root: 專案根目錄。
+        root: 工作資料夾；回傳與檢查的路徑都相對於它。
         directory: 存放上傳檔案的資料夾。
         sandbox_workspace: 沙盒掛載的資料夾，沒有沙盒時為 None。
         max_bytes: 單一檔案的大小上限。
@@ -61,18 +58,24 @@ class Uploads:
     max_bytes: int = DEFAULT_MAX_BYTES
 
     @classmethod
-    def for_project(
-        cls, project: project_lib.Project, max_bytes: int = DEFAULT_MAX_BYTES
+    def for_folder(
+        cls,
+        folder: pathlib.Path,
+        sandbox: bool,
+        max_bytes: int = DEFAULT_MAX_BYTES,
     ) -> "Uploads":
-        """上傳資料夾：沙盒工作目錄（或 workspace/）底下的 uploads/。"""
-        workspace = None
-        if project.sandbox is not None:
-            workspace = project.sandbox.workspace
-        base = workspace or project.root / sandbox_lib.DEFAULT_WORKSPACE
+        """工作資料夾底下的 uploads/。
+
+        Args:
+            folder: 工作資料夾。
+            sandbox: 專案有沒有沙盒；有的話附件說明會加上容器裡的路徑。
+            max_bytes: 單一檔案的大小上限。
+        """
+        folder = folder.resolve()
         return cls(
-            root=project.root,
-            directory=base / UPLOADS_DIR,
-            sandbox_workspace=workspace,
+            root=folder,
+            directory=folder / UPLOADS_DIR,
+            sandbox_workspace=folder if sandbox else None,
             max_bytes=max_bytes,
         )
 
@@ -86,7 +89,7 @@ class Uploads:
             chunks: 檔案內容，一段一段讀入，不會整個放進記憶體。
 
         Returns:
-            {"name": 檔名, "path": 相對於專案根目錄的路徑, "size": 位元組數}
+            {"name": 檔名, "path": 相對於工作資料夾的路徑, "size": 位元組數}
 
         Raises:
             UploadError: 檔案超過大小上限或是空的。

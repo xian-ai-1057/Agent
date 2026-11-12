@@ -1,10 +1,10 @@
-"""網頁版瀏覽工作資料夾（專案根目錄）裡的檔案。
+"""網頁版瀏覽工作資料夾（見 folders 模組）裡的檔案。
 
 GET /api/files/list 列出一個資料夾，GET /api/files 送出一個檔案，讓使用
 者預覽或下載 agent 產生的報告、圖表。
 
 能看到的範圍和內建檔案工具相同（見 builtin.paths.resolve_path）：只能
-在專案根目錄底下，不能碰存放金鑰的資料夾；指向外面的捷徑（symlink）
+在工作資料夾底下（伺服器先確認使用者可以使用那個資料夾），不能碰存放金鑰的資料夾；指向外面的捷徑（symlink）
 以實際位置判斷。另外不提供任何以點開頭的檔案或資料夾，包括整個
 .harness/（對話紀錄、金鑰）與 .env 這類設定檔，列出資料夾時也不會出現。
 
@@ -46,8 +46,8 @@ def resolve(root: pathlib.Path, path: str) -> pathlib.Path:
     """把網頁送來的相對路徑轉成可以存取的絕對路徑。
 
     Args:
-        root: 專案根目錄。
-        path: 相對於專案根目錄的路徑，用 / 分隔；空字串表示根目錄。
+        root: 工作資料夾。
+        path: 相對於工作資料夾的路徑，用 / 分隔；空字串表示資料夾本身。
 
     Returns:
         解析過 symlink 的絕對路徑。
@@ -83,8 +83,8 @@ def list_dir(root: pathlib.Path, directory: str) -> list[dict[str, Any]]:
     """列出一個資料夾裡的檔案與子資料夾。
 
     Args:
-        root: 專案根目錄。
-        directory: 相對於專案根目錄的資料夾；空字串表示根目錄。
+        root: 工作資料夾。
+        directory: 相對於工作資料夾的資料夾；空字串表示資料夾本身。
 
     Returns:
         FileEntry（見 src/web/protocol.ts）的列表，資料夾在前，再依名稱

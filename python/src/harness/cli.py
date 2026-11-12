@@ -7,6 +7,8 @@ pyharness memory              查看、刪除或清空長期記憶
 pyharness knowledge [查詢]    檢查知識庫的索引，或試著搜尋
 pyharness web                 開啟網頁版；資料夾是空的時，自動建立一個
                               可以直接使用的助手
+pyharness user                管理網頁版的帳號（新增、列出、重設密碼、
+                              停用與啟用）
 pyharness sandbox             檢查沙盒（Docker）能不能正常執行程式
 
 指令名稱是 pyharness，避免和 TypeScript 版的 harness 指令衝突；也可以
@@ -16,6 +18,7 @@ pyharness sandbox             檢查沙盒（Docker）能不能正常執行程�
 import argparse
 import asyncio
 import dataclasses
+import datetime
 import os
 import pathlib
 import sys
@@ -53,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "new":
         return _command_new(args)
+    if args.command == "user":
+        return _command_user(args)
     commands = {
         "memory": _command_memory,
         "knowledge": _command_knowledge,
@@ -130,6 +135,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="上傳的單一檔案大小上限（MB，預設 50）",
     )
 
+    user = commands.add_parser("user", help="管理網頁版的帳號")
+    user.add_argument("-p", "--project", default=".", help="專案資料夾")
+    user_actions = user.add_subparsers(dest="action", required=True)
+    add = user_actions.add_parser("add", help="新增帳號，印出產生的密碼")
+    add.add_argument("username", help="使用者名稱（英文字母、數字與 . _ -）")
+    add.add_argument("--name", help="顯示名稱，預設和使用者名稱相同")
+    add.add_argument("--admin", action="store_true", help="設為管理者")
+    actions_with_project = [
+        add,
+        user_actions.add_parser("list", help="列出所有帳號"),
+    ]
+    for action, text in (
+        ("passwd", "重設密碼，印出新產生的密碼"),
+        ("disable", "停用帳號（立刻登出）"),
+        ("enable", "重新啟用帳號"),
+    ):
+        command = user_actions.add_parser(action, help=text)
+        command.add_argument("username", help="使用者名稱")
+        actions_with_project.append(command)
+    # -p 寫在動作前後都可以（pyharness user -p x list 或 user list -p x）。
+    for command in actions_with_project:
+        command.add_argument(
+            "-p", "--project", default=argparse.SUPPRESS, help="專案資料夾"
+        )
+
     sandbox = commands.add_parser(
         "sandbox", help="檢查沙盒（Docker）能不能正常執行程式"
     )
@@ -202,24 +232,54 @@ def _prepare_web_project(path: str) -> None:
 def _web_password(
     args: argparse.Namespace, loaded: project_lib.Project
 ) -> tuple[str | None, str]:
-    """決定網頁版的登入密碼，回傳 (密碼, 給使用者看的說明)。
+    """決定網頁版的密碼，回傳 (密碼, 給使用者看的說明)。
 
-    只給本機使用時不需要密碼。讓其他電腦連線、又沒有用環境變數指定
-    密碼時，自動產生一組並存在專案裡，之後每次啟動都用同一組。
+    只在本機使用、也沒有任何帳號時不需要登入。否則第一次啟動時用這組
+    密碼建立管理者 admin：有設定環境變數時用它，沒有時自動產生一組並
+    存在專案裡，之後每次啟動都會再顯示（admin 自己改過密碼後就不顯示）。
     """
+    from harness.web import accounts
     from harness.web import server
 
+    store = accounts.AccountStore.for_project(loaded.root)
     password = os.environ.get(WEB_PASSWORD_ENV) or None
+    mode = server.auth_mode(
+        store,
+        host=args.host,
+        password=password,
+        allowed_hosts=args.allowed_host or [],
+    )
+    if mode == "local":
+        return None, ""
     if password:
         return password, f"密碼是環境變數 {WEB_PASSWORD_ENV} 的值。"
-    if args.host in server.LOCAL_HOSTS and not args.allowed_host:
-        return None, ""
-    password, _ = credentials.web_password(loaded.root)
+    has_admin = any(
+        user.is_admin and not user.disabled for user in store.list_users()
+    )
+    if has_admin:
+        password = credentials.stored_web_password(loaded.root)
+    else:
+        password, _ = credentials.web_password(loaded.root)
     stored = credentials.SECRETS_DIR / credentials.PASSWORD_FILE
     return password, (
         f"密碼：{password}\n"
         f"（自動產生，存在 {stored}；要用自己的密碼請設定環境變數 "
-        f"{WEB_PASSWORD_ENV}）"
+        f"{WEB_PASSWORD_ENV}，或登入後在網頁上修改）"
+    )
+
+
+def _login_note(root: pathlib.Path, password: str | None, note: str) -> str:
+    """啟動後給管理者看的登入說明。"""
+    from harness.web import accounts
+    from harness.web import server
+
+    store = accounts.AccountStore.for_project(root)
+    admin = server.ADMIN_USERNAME
+    if password and store.authenticate(admin, password) is not None:
+        return f"需要登入：管理者帳號 {admin}，{note}"
+    return (
+        "需要登入：請用自己的帳號登入。忘記密碼時，管理者可以用 "
+        "pyharness user passwd <名稱> 重設。"
     )
 
 
@@ -227,13 +287,22 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
     """啟動網頁版，直到使用者按 Ctrl-C。"""
     # aiohttp 只有網頁版用得到，延後到這裡才載入。
     from harness import web
+    from harness.web import accounts
+    from harness.web import server
 
     password, password_note = _web_password(args, loaded)
+    store = accounts.AccountStore.for_project(loaded.root)
+    mode = server.auth_mode(
+        store,
+        host=args.host,
+        password=password,
+        allowed_hosts=args.allowed_host or [],
+    )
 
     def ready(url: str) -> None:
         print(f"{loaded.name} 的網頁版已啟動：{url}")
-        if password:
-            print(f"需要登入：使用者名稱不限。{password_note}")
+        if mode == "accounts":
+            print(_login_note(loaded.root, password, password_note))
         agent = loaded.agents[loaded.default_agent]
         if not providers.is_ready(agent.model or llm.default_model()):
             print("還沒有設定模型的金鑰：打開網頁後依畫面選供應商、貼上金鑰。")
@@ -257,6 +326,78 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
         raise RuntimeError(
             f"無法在 {args.host}:{args.port} 啟動：{error}"
         ) from error
+    return 0
+
+
+def _command_user(args: argparse.Namespace) -> int:
+    """管理網頁版的帳號（存在專案的 .harness/harness.db）。"""
+    from harness.web import accounts
+
+    root = pathlib.Path(args.project)
+    if not (root / project_lib.CONFIG_FILE).exists():
+        print(
+            f"錯誤：{root.resolve()} 裡沒有 {project_lib.CONFIG_FILE}，"
+            "請用 -p 指定專案資料夾",
+            file=sys.stderr,
+        )
+        return 1
+    store = accounts.AccountStore.for_project(root)
+    try:
+        if args.action == "list":
+            return _list_users(store)
+        if args.action == "add":
+            had_users = store.has_users()
+            role = "admin" if args.admin else "member"
+            user, password = store.create_user(args.username, args.name, role)
+            label = "管理者" if user.is_admin else "成員"
+            print(f"已建立{label} {user.username}（{user.display_name}）")
+            print(f"密碼：{password}")
+            print("密碼只會顯示這一次，請交給本人；登入後可以自己修改。")
+            if not had_users:
+                print(
+                    "這是第一個帳號：網頁版之後要登入才能使用（重新啟動後"
+                    "生效）。"
+                )
+            if not had_users and not user.is_admin:
+                print(
+                    "還沒有管理者：下次啟動網頁版時會建立管理者 admin，"
+                    "密碼和目前的網頁密碼相同。"
+                )
+            return 0
+        user = store.find_user(args.username)
+        if user is None:
+            print(f"錯誤：沒有 {args.username} 這個帳號", file=sys.stderr)
+            return 1
+        if args.action == "passwd":
+            password = accounts.generate_password()
+            store.set_password(user.id, password)
+            print(f"{user.username} 的新密碼：{password}")
+            print("原本的登入都已經失效。密碼只會顯示這一次。")
+            return 0
+        disabled = args.action == "disable"
+        store.update_user(user.id, disabled=disabled)
+        print(f"已{'停用' if disabled else '啟用'} {user.username}")
+        return 0
+    except accounts.AccountError as error:
+        print(f"錯誤：{error}", file=sys.stderr)
+        return 1
+
+
+def _list_users(store) -> int:
+    """印出所有帳號。"""
+    users = store.list_users()
+    if not users:
+        print("還沒有任何帳號；網頁版只在本機使用時不需要登入。")
+        return 0
+    for user in users:
+        role = "管理者" if user.is_admin else "成員"
+        state = "（停用）" if user.disabled else ""
+        seen = "從未登入"
+        if user.last_seen_at is not None:
+            seen = "最後使用 " + datetime.datetime.fromtimestamp(
+                user.last_seen_at
+            ).strftime("%Y-%m-%d %H:%M")
+        print(f"{user.username}\t{user.display_name}\t{role}{state}\t{seen}")
     return 0
 
 
