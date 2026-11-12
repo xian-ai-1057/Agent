@@ -1954,3 +1954,58 @@
     max-width: 140px;
   }
 }
+
+/* ── 對話區與右側面板之間的分隔線 ───────────────────── */
+
+/* 夾在兩個方框之間的 8px 空隙裡：負邊距抵掉自己佔的位置。 */
+.ch-resizer {
+  flex: none;
+  width: 8px;
+  margin: 0 -8px;
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+  border-radius: var(--r-pill);
+}
+
+.ch-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 25% 3px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity var(--dur-1, 120ms) ease;
+}
+
+.ch-resizer:hover::after,
+.ch-resizer:focus-visible::after,
+body.ch-resizing .ch-resizer::after {
+  opacity: 1;
+}
+
+.ch-resizer:focus-visible {
+  outline: none;
+}
+
+/* 拖曳時整頁維持左右箭頭，也不要選到文字或讓預覽的 iframe 吃掉滑鼠。 */
+body.ch-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.ch-resizing iframe {
+  pointer-events: none;
+}
+
+/* 拖曳時寬度直接跟著滑鼠，不要有過場。 */
+body.ch-resizing .panel {
+  transition: none;
+}
+
+/* 面板浮在畫面上（較窄的視窗）時沒有並排，不能拖曳。 */
+@media (max-width: 1100px) {
+  .ch-resizer {
+    display: none;
+  }
+}
