@@ -3,6 +3,9 @@
  *
  * 窄螢幕時側欄收成抽屜，上方改顯示一條頂端列（選單、目前頁面名稱、
  * 新對話）。⌘K / Ctrl+K 打開搜尋對話（伺服器支援時）。
+ *
+ * 多人帳號模式下任何 API 回 401 時只顯示登入畫面；網址不變，登入後
+ * 回到原本的頁面。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -11,6 +14,7 @@ import { MenuIcon, PenIcon } from "./components/Icons.tsx";
 import { NewChat } from "./components/NewChat.tsx";
 import { Settings } from "./components/Settings.tsx";
 import { Link, Sidebar } from "./components/Sidebar.tsx";
+import { LocalKeyNotice, Login } from "./components/shell/Login.tsx";
 import { SearchDialog } from "./components/shell/SearchDialog.tsx";
 import { Toaster } from "./components/shell/toast.tsx";
 import { WorkView } from "./components/WorkView.tsx";
@@ -27,6 +31,22 @@ function pageTitle(route: Route, state: State): string {
 }
 
 export function App() {
+  const needsLogin = useStore((s) => s.needsLogin);
+  const needsLocalKey = useStore((s) => s.needsLocalKey === true);
+  // 要登入時不連 SSE；登入後重新連上，伺服器的 hello 會讓畫面重新讀取。
+  useEffect(() => (needsLogin ? undefined : connect()), [needsLogin]);
+  if (needsLogin) {
+    return (
+      <>
+        {needsLocalKey ? <LocalKeyNotice /> : <Login />}
+        <Toaster />
+      </>
+    );
+  }
+  return <Shell />;
+}
+
+function Shell() {
   const route = useRoute();
   const connected = useStore((s) => s.connected);
   const loadError = useStore((s) => s.loadError);
@@ -35,8 +55,6 @@ export function App() {
   const [drawer, setDrawer] = useState(false);
   const [searching, setSearching] = useState(false);
   const menuRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => connect(), []);
 
   // 換頁時收起抽屜。
   useEffect(() => subscribe(() => setDrawer(false)), []);

@@ -152,9 +152,15 @@ class RunContext:
         workdir: 專案根目錄，內建檔案工具只能存取這個目錄底下。
         session_id: 目前的 session 識別碼。
         deps: 呼叫 run 時傳進來的任意物件（資料庫連線、使用者資訊…）。
+        hidden: workdir 第一層裡內建工具看不到、也不能碰的名稱（網頁版
+            「舊資料」資料夾用來擋住別人的 private/）。
+        hide_dotfiles: True 時內建工具看不到、也不能碰任何以點開頭的檔案
+            或資料夾（含 .harness/）。
     """
 
     agent_name: str
     workdir: pathlib.Path
     session_id: str
     deps: Any = None
+    hidden: tuple[str, ...] = ()
+    hide_dotfiles: bool = False

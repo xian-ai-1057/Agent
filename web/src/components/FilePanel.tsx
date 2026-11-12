@@ -7,14 +7,21 @@
  */
 
 import { diffLines } from "diff";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { fileUrl } from "../api.ts";
 import type { FileChange } from "../transcript.ts";
 import "./chat/chat.css";
 import { FileBadge } from "./chat/FileBadge.tsx";
 import { FilePreview } from "./chat/FilePreview.tsx";
 import { fileName } from "./chat/filetype.ts";
+import { useFolder } from "./chat/folder.ts";
 import { DownloadIcon, ExpandIcon, ShrinkIcon } from "./chat/icons.tsx";
+import { PanelResizer } from "./chat/PanelResizer.tsx";
+import {
+  clampWidth,
+  loadPanelWidth,
+  savePanelWidth,
+} from "./chat/panelWidth.ts";
 import { CloseIcon } from "./Icons.tsx";
 import { Markdown } from "./Markdown.tsx";
 
@@ -64,6 +71,9 @@ export function FilePanel({
   onClose: () => void;
 }) {
   const [full, setFull] = useState(false);
+  // 拖曳分隔線調整過的寬度；null 時用 CSS 的預設寬度。
+  const [width, setWidth] = useState<number | null>(loadPanelWidth);
+  const panelRef = useRef<HTMLElement>(null);
   const change = files.find((file) => file.path === selected);
   const diffFile = change ?? files[0];
   // 預覽的對象：選到的路徑，沒有時是最新的變更或附件。
@@ -95,109 +105,145 @@ export function FilePanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [full]);
 
+  // 視窗變窄時，記住的寬度可能讓對話區太擠：跟著縮回可用範圍（不改記
+  // 住的值，視窗再放大時回到原本的寬度）。
+  const [available, setAvailable] = useState(Number.POSITIVE_INFINITY);
+  useEffect(() => {
+    const measure = () => {
+      const panel = panelRef.current;
+      const chat = panel?.parentElement?.querySelector(":scope > .main");
+      if (!panel || !chat) return;
+      setAvailable(
+        panel.getBoundingClientRect().width +
+          chat.getBoundingClientRect().width,
+      );
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  const shown = width === null ? null : clampWidth(width, available);
+
+  function changeWidth(next: number | null) {
+    setWidth(next);
+    savePanelWidth(next);
+  }
+
   return (
-    <aside
-      className={`panel anim-panel ch-panel${full ? " ch-panel-full" : ""}`}
-      aria-label="檔案"
-    >
-      <div className="panel-header">
-        <div className="tabs" role="tablist">
-          <Tab id="preview" tab={tab} onTab={onTab}>
-            預覽
-          </Tab>
-          <Tab id="diff" tab={tab} onTab={onTab}>
-            變更
-            {files.length > 0 && (
-              <span className="count-pill anim-pop">{files.length}</span>
-            )}
-          </Tab>
-          <Tab id="files" tab={tab} onTab={onTab}>
-            這段對話的檔案
-          </Tab>
-        </div>
-        <div className="ch-panel-tools">
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label={full ? "結束全螢幕" : "全螢幕"}
-            aria-pressed={full}
-            title={full ? "結束全螢幕（Esc）" : "全螢幕"}
-            onClick={() => setFull(!full)}
-          >
-            {full ? <ShrinkIcon /> : <ExpandIcon />}
-          </button>
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="關閉面板"
-            onClick={onClose}
-          >
-            <CloseIcon />
-          </button>
-        </div>
-      </div>
-
-      <div key={tab} className="ch-tab-body">
-        {tab === "files" && (
-          <FileList
-            files={files}
-            attachments={attachments}
-            produced={produced}
-            total={total}
-            onOpen={(path) => {
-              onSelect(path);
-              onTab("preview");
-            }}
-          />
-        )}
-
-        {tab === "preview" &&
-          (previewPath ? (
-            <div className="scroll">
-              <PreviewHeader path={previewPath} canLoad={canLoad} />
-              <PreviewBody
-                path={previewPath}
-                change={files.find((file) => file.path === previewPath)}
-                canLoad={canLoad}
-              />
-            </div>
-          ) : (
-            <Empty />
-          ))}
-
-        {tab === "diff" &&
-          (diffFile ? (
-            <div className="scroll">
-              {files.length > 1 && (
-                <div className="file-switch">
-                  {files.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      aria-pressed={file.path === diffFile.path}
-                      onClick={() => onSelect(file.path)}
-                    >
-                      {file.path}
-                    </button>
-                  ))}
-                </div>
+    <>
+      {!full && (
+        <PanelResizer
+          width={shown}
+          onWidth={changeWidth}
+          onReset={() => changeWidth(null)}
+        />
+      )}
+      <aside
+        ref={panelRef}
+        className={`panel anim-panel ch-panel${full ? " ch-panel-full" : ""}`}
+        style={shown === null || full ? undefined : { flex: `0 0 ${shown}px` }}
+        aria-label="檔案"
+      >
+        <div className="panel-header">
+          <div className="tabs" role="tablist">
+            <Tab id="preview" tab={tab} onTab={onTab}>
+              預覽
+            </Tab>
+            <Tab id="diff" tab={tab} onTab={onTab}>
+              變更
+              {files.length > 0 && (
+                <span className="count-pill anim-pop">{files.length}</span>
               )}
-              <FileHeader file={diffFile} />
-              <div
-                className={`file-note ${diffFile.status === "pending" ? "pending" : ""}`}
-              >
-                {NOTES[diffFile.status]}
-                {diffFile.before === undefined &&
-                  "（從對話紀錄還原，沒有原本的內容可以比較）"}
-                {diffFile.fragment && "（從對話紀錄還原，只有被取代的那一段）"}
+            </Tab>
+            <Tab id="files" tab={tab} onTab={onTab}>
+              這段對話的檔案
+            </Tab>
+          </div>
+          <div className="ch-panel-tools">
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={full ? "結束全螢幕" : "全螢幕"}
+              aria-pressed={full}
+              title={full ? "結束全螢幕（Esc）" : "全螢幕"}
+              onClick={() => setFull(!full)}
+            >
+              {full ? <ShrinkIcon /> : <ExpandIcon />}
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="關閉面板"
+              onClick={onClose}
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        </div>
+
+        <div key={tab} className="ch-tab-body">
+          {tab === "files" && (
+            <FileList
+              files={files}
+              attachments={attachments}
+              produced={produced}
+              total={total}
+              onOpen={(path) => {
+                onSelect(path);
+                onTab("preview");
+              }}
+            />
+          )}
+
+          {tab === "preview" &&
+            (previewPath ? (
+              <div className="scroll">
+                <PreviewHeader path={previewPath} canLoad={canLoad} />
+                <PreviewBody
+                  path={previewPath}
+                  change={files.find((file) => file.path === previewPath)}
+                  canLoad={canLoad}
+                />
               </div>
-              <Diff file={diffFile} key={`d-${diffFile.callId}`} />
-            </div>
-          ) : (
-            <Empty />
-          ))}
-      </div>
-    </aside>
+            ) : (
+              <Empty />
+            ))}
+
+          {tab === "diff" &&
+            (diffFile ? (
+              <div className="scroll">
+                {files.length > 1 && (
+                  <div className="file-switch">
+                    {files.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        aria-pressed={file.path === diffFile.path}
+                        onClick={() => onSelect(file.path)}
+                      >
+                        {file.path}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <FileHeader file={diffFile} />
+                <div
+                  className={`file-note ${diffFile.status === "pending" ? "pending" : ""}`}
+                >
+                  {NOTES[diffFile.status]}
+                  {diffFile.before === undefined &&
+                    "（從對話紀錄還原，沒有原本的內容可以比較）"}
+                  {diffFile.fragment &&
+                    "（從對話紀錄還原，只有被取代的那一段）"}
+                </div>
+                <Diff file={diffFile} key={`d-${diffFile.callId}`} />
+              </div>
+            ) : (
+              <Empty />
+            ))}
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -237,6 +283,7 @@ function Empty() {
 
 /** 預覽上方：檔名、路徑、下載。 */
 function PreviewHeader({ path, canLoad }: { path: string; canLoad: boolean }) {
+  const folder = useFolder();
   return (
     <div className="file-head ch-preview-head">
       <div className="ch-preview-title">
@@ -246,7 +293,7 @@ function PreviewHeader({ path, canLoad }: { path: string; canLoad: boolean }) {
       {canLoad && (
         <a
           className="btn btn-outline ch-btn-small"
-          href={fileUrl(path, true)}
+          href={fileUrl(path, true, folder)}
           download
           aria-label={`下載 ${fileName(path)}`}
         >

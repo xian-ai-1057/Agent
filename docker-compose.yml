@@ -1,7 +1,7 @@
 # 一行部署 Agent Harness：
 #
 #   docker compose up -d          建置並啟動
-#   docker compose logs harness   看網址與自動產生的登入密碼
+#   docker compose logs harness   看網址與管理者 admin 自動產生的密碼
 #
 # 不需要任何設定就能啟動。要調整的話，把 .env.example 複製成 .env 再修改
 # （埠號、登入密碼、proxy、模型金鑰）。說明見文件網站的「快速部署」（https://agent-harness-docs-ten.vercel.app/guide/deploy）。
@@ -27,21 +27,24 @@ services:
     ports:
       - "${HARNESS_PORT:-4321}:4321"
     # .env 裡的其他設定（模型金鑰、HARNESS_WEB_PASSWORD…）原樣交給容器。
+    # 前面再加一層 HTTPS 反向代理時，在 .env 寫上它連進容器的位址，例如
+    # HARNESS_TRUSTED_PROXIES=172.16.0.0/12：只有來自這些位址的請求才採信
+    # X-Forwarded-For（登入限制依它計算）與 X-Forwarded-Proto（cookie 的 Secure）。
     env_file:
       - path: .env
         required: false
     environment:
       # 執行時（呼叫模型、讀取網頁）使用的 proxy，大小寫兩種寫法都設定。
       <<: *proxy-args
-      # 沙盒：agent 寫的 Python 程式在另一個容器裡執行，只看得到
-      # harness-data 裡的 workspace/。
+      # 沙盒：agent 寫的程式（與成員執行的指令）在另一個容器裡執行，只看得到
+      # harness-data 裡這段對話的工作資料夾（private/<識別碼>/ 或共用的 shared/）。
       HARNESS_SANDBOX_IMAGE: harness-sandbox
       HARNESS_SANDBOX_VOLUME: harness-data
       HARNESS_SANDBOX_NOTES: >-
         已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、python-pptx
         （製作簡報 pptx）、matplotlib（圖表可以直接使用中文）。
     volumes:
-      # 專案、對話紀錄、上傳的檔案與金鑰都在這個 volume 裡。
+      # 專案、帳號、每個人的對話紀錄、上傳的檔案與金鑰都在這個 volume 裡。
       - harness-data:/assistant
       # 讓沙盒用主機的 Docker 啟動容器。能使用這個 socket 等於擁有主機的
       # root 權限；不需要沙盒（分析上傳的檔案）時，把這一行刪掉。
@@ -60,5 +63,5 @@ services:
 
 volumes:
   harness-data:
-    # 固定名稱：沙盒要用這個名稱掛載 workspace/。
+    # 固定名稱：沙盒要用這個名稱掛載工作資料夾。
     name: harness-data

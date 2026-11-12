@@ -150,6 +150,11 @@ export interface SessionOptions {
   tools: string[] | null;
   /** 這段對話一定要用的 skill 名稱，會在送給模型的訊息裡提示它先讀取。 */
   skills: string[];
+  /**
+   * 這段對話的工作資料夾（FolderInfo.id）；沒有時是自己的「我的檔案」。
+   * 訊息裡的附件、工具參數與 PRODUCED_MARKER 的路徑都相對於這個資料夾。
+   */
+  folder?: string | null;
 }
 
 /** 使用者對一則回覆的評價。 */
@@ -220,6 +225,72 @@ export interface ServerFeatures {
   feedback: boolean;
   /** 權限確認可以選「這段對話都允許」（ApprovalDecision 的 session）。 */
   sessionApproval?: boolean;
+  /** 多人帳號：登入、成員管理、每個人的資料分開（見 CurrentUser）。 */
+  accounts?: boolean;
+  /** 每段對話選工作資料夾（見 FolderInfo、SessionOptions.folder）。 */
+  folders?: boolean;
+}
+
+/**
+ * 登入的人（Python 版）。
+ *   admin   管理者：管理成員、模型連線、全站權限與工作資料夾
+ *   member  成員：只能使用自己的對話、檔案與記憶
+ */
+export interface CurrentUser {
+  id: string;
+  username: string;
+  displayName: string;
+  role: "admin" | "member";
+}
+
+/**
+ * 登入方式（Python 版）。
+ *   local     只在本機使用、沒有建立任何帳號：不必登入，視為一位本機管理者
+ *   accounts  要用帳號密碼登入；沒有登入時 API 一律回 401
+ * POST /api/auth/login {username, password} 成功時設定 HttpOnly cookie 並回傳
+ * CurrentUser；POST /api/auth/logout 登出；GET /api/auth/me 回傳 CurrentUser。
+ * PUT /api/auth/password {current, next} 改自己的密碼。
+ */
+export type AuthMode = "local" | "accounts";
+
+/** 成員管理頁看到的一位成員（只有管理者能讀，GET /api/admin/users）。 */
+export interface MemberInfo extends CurrentUser {
+  disabled: boolean;
+  /** 建立時間（毫秒）。 */
+  createdAt: number;
+  /** 最後一次使用的時間（毫秒）；沒有登入過時沒有。 */
+  lastSeenAt?: number;
+}
+
+/**
+ * 新增成員或重設密碼的結果。密碼由伺服器產生，只會回傳這一次，
+ * 請管理者交給成員；成員第一次登入後可以自己改。
+ *   POST  /api/admin/users {username, displayName, role}
+ *   PATCH /api/admin/users/:id {displayName?, role?, disabled?} → MemberInfo
+ *   POST  /api/admin/users/:id/password
+ */
+export interface IssuedPassword {
+  user: MemberInfo;
+  password: string;
+}
+
+/**
+ * 一個工作資料夾（Python 版）。agent 的檔案工具、執行指令與沙盒都只看得到
+ * 這段對話選的資料夾；上傳的檔案也存在裡面。
+ *   private  每個人自己的「我的檔案」，只有本人看得到。本機模式（AuthMode
+ *            為 local）沒有帳號，只有這一個，路徑是專案資料夾本身，而且
+ *            ServerFeatures.folders 為 false。
+ *   shared   管理者在 harness.yaml 的 workspaces 開放的資料夾；升級前的舊
+ *            對話另有一個 id 為 "legacy" 的「舊資料」資料夾，只有接手舊資料
+ *            的管理者看得到。
+ * 資料夾在對話開始時決定；之後 PUT /options 改 folder 會被拒絕（400）。
+ */
+export interface FolderInfo {
+  id: string;
+  name: string;
+  kind: "private" | "shared";
+  /** false 時 agent 只能讀，不能寫入或修改。 */
+  writable: boolean;
 }
 
 export interface ToolInfo {
@@ -272,6 +343,10 @@ export interface ProjectInfo {
   uploads?: { maxBytes: number };
   /** 伺服器支援哪些功能；TypeScript 版沒有這個欄位。 */
   features?: ServerFeatures;
+  /** 登入方式與目前登入的人（Python 版）。 */
+  auth?: { mode: AuthMode; user: CurrentUser };
+  /** 這個人可以使用的工作資料夾，預設的（自己的「我的檔案」）排第一個。 */
+  folders?: FolderInfo[];
   /** 輸入框可以選的模型（Python 版），預設模型排第一個。 */
   models?: ModelOption[];
   /** ＋ 選單可以選的 skills（Python 版）。 */
@@ -351,6 +426,13 @@ export const ATTACHMENT_MARKER = "[附件] ";
  * 根目錄的路徑。網頁用它顯示檔案卡片與縮圖。
  */
 export const PRODUCED_MARKER = "[產生的檔案] ";
+
+/**
+ * 不必登入的本機模式（Python 版）每次啟動會產生一把鑰匙，放在終端機顯示
+ * 的網址上（?key=…）。沒有帶鑰匙時 API 回 401，錯誤內容的 code 是這個
+ * 值：要請使用者重新打開終端機上的網址，而不是顯示登入畫面。
+ */
+export const LOCAL_KEY_REQUIRED = "local_key_required";
 
 /** 使用者拒絕工具呼叫時，交給模型的工具結果（網頁上改顯示「你拒絕了這個動作」）。 */
 export const DENIED_RESULT = "使用者沒有同意這次呼叫，請不要重試同樣的操作";

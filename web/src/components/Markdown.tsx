@@ -11,7 +11,10 @@
  * 完成後再做一次。
  *
  * localFiles 為 true 時（伺服器支援 /api/files），圖片的 src 是相對路徑
- * （或沙盒裡的 /workspace/...）就從工作資料夾讀取。
+ * （或沙盒裡的 /workspace/...）就從這段對話的工作資料夾讀取。
+ *
+ * 外部網站的圖片不載入（index.html 的 CSP 也會擋），改顯示成連結
+ * 「外部圖片：主機名稱」，被誘導的回覆就不能藉圖片網址把資料送出去。
  */
 
 import { memo, useEffect, useMemo, useState } from "react";
@@ -21,7 +24,8 @@ import remarkMath from "remark-math";
 import { fileUrl } from "../api.ts";
 import "./chat/chat.css";
 import { CodeBlock } from "./chat/CodeBlock.tsx";
-import { projectPath } from "./chat/filetype.ts";
+import { externalImageHost, projectPath } from "./chat/filetype.ts";
+import { useFolder } from "./chat/folder.ts";
 import { displayMath } from "./chat/math.ts";
 
 type Plugins = NonNullable<
@@ -96,11 +100,61 @@ function useRehypePlugins(text: string, streaming: boolean): Plugins {
   }, [math, code]);
 }
 
+/** 外部網站的圖片：顯示成連結，不載入。 */
+function ExternalImage({
+  src,
+  host,
+  alt,
+}: {
+  src: string;
+  host: string;
+  alt?: string;
+}) {
+  return (
+    <a
+      href={src}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="ch-ext-img"
+      title={alt || src}
+    >
+      外部圖片：{host}
+    </a>
+  );
+}
+
+/** 一般的圖片：外部網址改成連結，其他照原樣顯示。 */
+function PlainImage({
+  src,
+  alt,
+  title,
+}: {
+  src?: string | Blob;
+  alt?: string;
+  title?: string;
+}) {
+  const host = typeof src === "string" ? externalImageHost(src) : undefined;
+  if (host && typeof src === "string") {
+    return <ExternalImage src={src} host={host} alt={alt} />;
+  }
+  return (
+    <img
+      src={src as string | undefined}
+      alt={alt ?? ""}
+      title={title}
+      loading="lazy"
+    />
+  );
+}
+
 const components: Components = {
   a: ({ href, children }) => (
     <a href={href} target="_blank" rel="noreferrer noopener">
       {children}
     </a>
+  ),
+  img: ({ src, alt, title }) => (
+    <PlainImage src={src} alt={alt} title={title} />
   ),
   pre: ({ node, children }) => (
     <CodeBlock node={node as Parameters<typeof CodeBlock>[0]["node"]}>
@@ -109,20 +163,38 @@ const components: Components = {
   ),
 };
 
-/** 圖片的 src 指向專案裡的檔案時，改從 /api/files 讀取。 */
+/** 圖片的 src 指向工作資料夾裡的檔案時，改從 /api/files 讀取。 */
+function LocalImage({
+  src,
+  alt,
+  title,
+}: {
+  src?: string | Blob;
+  alt?: string;
+  title?: string;
+}) {
+  const folder = useFolder();
+  // 有工作資料夾時，沙盒的 /workspace 就是這個資料夾。
+  const path =
+    typeof src === "string"
+      ? projectPath(src, folder !== undefined)
+      : undefined;
+  if (!path) return <PlainImage src={src} alt={alt} title={title} />;
+  return (
+    <img
+      src={fileUrl(path, false, folder)}
+      alt={alt ?? ""}
+      title={title}
+      loading="lazy"
+    />
+  );
+}
+
 const localComponents: Components = {
   ...components,
-  img: ({ src, alt, title }) => {
-    const path = typeof src === "string" ? projectPath(src) : undefined;
-    return (
-      <img
-        src={path ? fileUrl(path) : src}
-        alt={alt ?? ""}
-        title={title}
-        loading="lazy"
-      />
-    );
-  },
+  img: ({ src, alt, title }) => (
+    <LocalImage src={src} alt={alt} title={title} />
+  ),
 };
 
 export const Markdown = memo(function Markdown({

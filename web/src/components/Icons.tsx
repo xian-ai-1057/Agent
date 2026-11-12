@@ -184,3 +184,29 @@ export const TrashIcon = (p: IconProps) => (
     <path d="M9 7V4h6v3" />
   </Svg>
 );
+
+export const KeyIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="8" cy="15" r="4" />
+    <path d="M10.8 12.2 20 3" />
+    <path d="m16 7 3 3" />
+    <path d="m14 9 2 2" />
+  </Svg>
+);
+
+export const LogoutIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    <path d="m16 17 5-5-5-5" />
+    <path d="M21 12H9" />
+  </Svg>
+);
+
+export const UserPlusIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="9" cy="8" r="4" />
+    <path d="M2 21a7 7 0 0 1 14 0" />
+    <path d="M19 8v6" />
+    <path d="M16 11h6" />
+  </Svg>
+);

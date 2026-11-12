@@ -4,7 +4,8 @@
 指定時自動產生。兩者都存在專案的 .harness/secrets/ 裡：
 
     .harness/secrets/env.json       要套用到環境變數的值（金鑰、端點網址）
-    .harness/secrets/web-password   網頁版自動產生的登入密碼
+    .harness/secrets/web-password   網頁版自動產生的登入密碼（第一次以帳號
+                                    模式啟動時，用它建立管理者 admin）
 
 資料夾只有執行 pyharness 的使用者能讀（0700 / 0600），內建的檔案工具
 也不能讀寫這個資料夾（見 builtin.paths）。
@@ -91,6 +92,19 @@ def update(root: str | pathlib.Path, values: dict[str, str | None]) -> None:
         json.dumps(saved, ensure_ascii=False, indent=2) + "\n",
     )
     _set_environment(changed)
+
+
+def stored_web_password(root: str | pathlib.Path) -> str | None:
+    """讀取之前自動產生的網頁密碼，沒有時為 None（不會產生新的）。
+
+    Args:
+        root: 專案根目錄。
+    """
+    try:
+        text = (secrets_dir(root) / PASSWORD_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return text.strip() or None
 
 
 def web_password(root: str | pathlib.Path) -> tuple[str, bool]:

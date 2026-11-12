@@ -359,10 +359,17 @@ class TestWebFetch:
         async def image(request):
             return aiohttp_web.Response(body=b"png", content_type="image/png")
 
+        async def jump(request):
+            # 轉到同一台伺服器的另一個位址（127.0.0.2 也是本機）。
+            port = request.url.port
+            target = request.query.get("to", f"http://127.0.0.2:{port}/data")
+            raise aiohttp_web.HTTPFound(target)
+
         app = aiohttp_web.Application()
         app.router.add_get("/page", page)
         app.router.add_get("/data", data)
         app.router.add_get("/image", image)
+        app.router.add_get("/jump", jump)
         runner = aiohttp_web.AppRunner(app)
         await runner.setup()
         site = aiohttp_web.TCPSite(runner, "127.0.0.1", 0)
@@ -402,3 +409,127 @@ class TestWebFetch:
     async def test_only_http_urls(self, context):
         with pytest.raises(tools.ToolError, match="只支援 http 與 https"):
             await _call(web.web_fetch, {"url": "file:///etc/passwd"}, context)
+
+
+class TestGuardedWebFetch:
+    """網頁版多人使用時的 web_fetch：不能讀內部網路。"""
+
+    @pytest.fixture(autouse=True)
+    def no_proxy(self, monkeypatch):
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            monkeypatch.delenv(name, raising=False)
+
+    base_url = TestWebFetch.base_url
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "::1",
+            "::",
+            "fd00:ec2::254",
+            "fe80::1%eth0",
+            "::ffff:127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::7f00:1",
+            "::7f00:1",
+            "2002:7f00:1::1",
+            "224.0.0.1",
+            "not-an-ip",
+        ],
+    )
+    def test_internal_addresses_are_blocked(self, address):
+        assert web.blocked_address(address)
+
+    @pytest.mark.parametrize(
+        "address", ["8.8.8.8", "2606:4700::1111", "64:ff9b::808:808"]
+    )
+    def test_public_addresses_are_allowed(self, address):
+        assert not web.blocked_address(address)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:9/x",
+            "http://localhost:9/x",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]:9/x",
+        ],
+    )
+    async def test_internal_urls_are_refused(self, context, url):
+        guarded = web.guarded_fetch_tool()
+
+        with pytest.raises(tools.ToolError, match="不能讀取內部網路"):
+            await _call(guarded, {"url": url}, context)
+
+        assert guarded.name == "web_fetch"
+        assert guarded.needs_approval
+        assert guarded.parameters == web.web_fetch.parameters
+
+    async def test_every_redirect_is_checked(
+        self, base_url, context, monkeypatch
+    ):
+        # 把 127.0.0.1 當成公開的位址，測試伺服器轉到 127.0.0.2 時要擋下。
+        monkeypatch.setattr(
+            web, "blocked_address", lambda address: address != "127.0.0.1"
+        )
+        guarded = web.guarded_fetch_tool()
+
+        inside = {"url": f"{base_url}/jump?to=/data"}
+        followed = await _call(guarded, inside, context)
+        with pytest.raises(tools.ToolError, match="127.0.0.2"):
+            await _call(guarded, {"url": f"{base_url}/jump"}, context)
+        plain = await _call(web.web_fetch, inside, context)
+
+        assert followed == f'網址：{base_url}/data\n\n{{"a": 1}}'
+        # 一般的 web_fetch（CLI 與本機模式）照舊由 aiohttp 跟著轉址。
+        assert plain == followed
+
+    # 中文網域連線時會換成 xn-- 開頭的名稱，也要檢查。
+    @pytest.mark.parametrize("host", ["rebind.test", "exämple.test"])
+    async def test_dns_answer_is_checked_when_connecting(
+        self, base_url, context, monkeypatch, host
+    ):
+        # 檢查時是公開位址、連線時才換成內部位址（DNS rebinding）。
+        checked = []
+
+        async def fake_check(url):
+            checked.append(url)
+            return host
+
+        resolved = []
+
+        async def fake_resolve(self, host, port=0, family=0):
+            resolved.append(host)
+            return [
+                {
+                    "hostname": host,
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "family": 2,
+                    "proto": 0,
+                    "flags": 0,
+                }
+            ]
+
+        monkeypatch.setattr(web, "_check_host", fake_check)
+        monkeypatch.setattr(
+            web.aiohttp.ThreadedResolver, "resolve", fake_resolve
+        )
+        port = base_url.rsplit(":", 1)[1]
+
+        with pytest.raises(tools.ToolError, match="不能讀取內部網路"):
+            await _call(
+                web.guarded_fetch_tool(),
+                {"url": f"http://{host}:{port}/data"},
+                context,
+            )
+
+        assert checked
+        assert len(resolved) == 1

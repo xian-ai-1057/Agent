@@ -10,6 +10,8 @@ export interface PendingMessage {
   attachments: string[];
   /** 送出時 messages 有幾則；之後出現的使用者訊息就是這一則。 */
   base: number;
+  /** 新對話頁選的工作資料夾（FolderInfo.id），對話內容讀回來之前用。 */
+  folder?: string;
 }
 
 const handoff = new Map<string, PendingMessage>();

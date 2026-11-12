@@ -14,7 +14,8 @@ import type {
   SessionDetail,
   SessionSummary,
 } from "../../src/web/protocol.ts";
-import { api } from "./api.ts";
+import { api, setUnauthorizedHandler } from "./api.ts";
+import { isUnauthorized } from "./auth.ts";
 import { navigate } from "./router.ts";
 
 export interface State {
@@ -26,6 +27,16 @@ export interface State {
   connected: boolean;
   /** 載入專案資訊失敗時的說明。 */
   loadError?: string;
+  /**
+   * 要先登入（多人帳號模式下任何 API 回 401）：App 只顯示登入畫面，
+   * 網址不變，登入後回到原本的頁面。
+   */
+  needsLogin: boolean;
+  /**
+   * 本機模式少了啟動時的鑰匙（例如伺服器重新啟動過）：顯示「請重新打開
+   * 終端機上的網址」，不顯示登入畫面。
+   */
+  needsLocalKey?: boolean;
 }
 
 type Listener = () => void;
@@ -35,6 +46,7 @@ let state: State = {
   details: {},
   previews: {},
   connected: false,
+  needsLogin: false,
 };
 const listeners = new Set<Listener>();
 
@@ -63,8 +75,45 @@ export async function refreshProject(): Promise<void> {
     const project = await api.project();
     setState((s) => ({ ...s, project, loadError: undefined }));
   } catch (error) {
+    // 要登入時改顯示登入畫面（由 requireLogin 處理），不算載入失敗。
+    if (isUnauthorized(error)) return;
     setState((s) => ({ ...s, loadError: (error as Error).message }));
   }
+}
+
+/**
+ * 需要登入：清掉畫面上的資料（下一位登入的人不能看到），改顯示登入
+ * 畫面。任何 API 回 401 時由 api.ts 呼叫。
+ */
+export function requireLogin(localKey = false): void {
+  if (state.needsLogin) return;
+  setState((s) => ({
+    ...s,
+    project: undefined,
+    sessions: {},
+    details: {},
+    previews: {},
+    connected: false,
+    loadError: undefined,
+    needsLogin: true,
+    needsLocalKey: localKey,
+  }));
+}
+
+setUnauthorizedHandler(requireLogin);
+
+/** 登入成功：回到原本的頁面，重新讀取專案與對話（App 會重新連上 SSE）。 */
+export function signedIn(): void {
+  setState((s) => ({ ...s, needsLogin: false }));
+  void refreshProject();
+  void refreshSessions().catch(() => undefined);
+}
+
+/** 登出後回到新對話頁，顯示登入畫面。 */
+export async function signOut(): Promise<void> {
+  await api.logout().catch(() => undefined);
+  navigate("/");
+  requireLogin();
 }
 
 export async function refreshSessions(): Promise<void> {
@@ -100,22 +149,49 @@ export function upsertSummary(summary: SessionSummary): void {
   });
 }
 
-/** 連上 SSE；斷線時 EventSource 會自己重連。 */
+/** 伺服器拒絕 SSE 連線後，多久再試一次。 */
+const RECONNECT_MS = 3000;
+
+/**
+ * 連上 SSE。一般斷線時 EventSource 會自己重連；伺服器回了錯誤（例如
+ * 登入過期的 401）時它會放棄，這時先問一次 /api/project：要登入就顯示
+ * 登入畫面（App 會關掉這條連線），不會一直重試；其他狀況稍後再連。
+ */
 export function connect(): () => void {
-  const source = new EventSource("/api/events");
-  source.onmessage = (message) => {
-    handle(JSON.parse(message.data) as ServerEvent);
+  let source: EventSource | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
+  const again = () => {
+    if (!closed && !state.needsLogin) retry = setTimeout(open, RECONNECT_MS);
   };
-  source.onerror = () => setState((s) => ({ ...s, connected: false }));
-  return () => source.close();
+  const open = () => {
+    const current = new EventSource("/api/events");
+    source = current;
+    current.onmessage = (message) => {
+      handle(JSON.parse(message.data) as ServerEvent);
+    };
+    current.onerror = () => {
+      setState((s) => ({ ...s, connected: false }));
+      if (current.readyState !== EventSource.CLOSED || closed) return;
+      api.project().then(again, again);
+    };
+  };
+  open();
+  return () => {
+    closed = true;
+    clearTimeout(retry);
+    source?.close();
+  };
 }
 
 function handle(event: ServerEvent): void {
   if (event.type === "hello") {
     setState((s) => ({ ...s, connected: true }));
     void refreshProject();
-    void refreshSessions();
-    for (const id of Object.keys(state.details)) void loadSession(id);
+    void refreshSessions().catch(() => undefined);
+    for (const id of Object.keys(state.details)) {
+      void loadSession(id).catch(() => undefined);
+    }
     return;
   }
   if (event.type === "project") {

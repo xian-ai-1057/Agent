@@ -12,6 +12,7 @@ import {
   type SessionStatus,
 } from "../../src/web/protocol.ts";
 import {
+  externalImageHost,
   isThumbnail,
   projectPath,
 } from "../../web/src/components/chat/filetype.ts";
@@ -171,6 +172,20 @@ describe("projectPath", () => {
     expect(projectPath("/workspace/out/chart.png")).toBe(
       "workspace/out/chart.png",
     );
+    expect(projectPath("/workspace/out/chart.png", false)).toBe(
+      "workspace/out/chart.png",
+    );
+  });
+
+  it("有工作資料夾時，/workspace 就是這段對話的資料夾", () => {
+    expect(projectPath("/workspace/out/chart.png", true)).toBe("out/chart.png");
+    expect(projectPath("/workspace/%E5%9C%96.png", true)).toBe("圖.png");
+    expect(projectPath("chart.png", true)).toBe("chart.png");
+    expect(projectPath("./out/a.png", true)).toBe("out/a.png");
+    expect(projectPath("/workspace", true)).toBeUndefined();
+    expect(projectPath("/workspace/", true)).toBeUndefined();
+    expect(projectPath("/etc/passwd", true)).toBeUndefined();
+    expect(projectPath("https://example.com/a.png", true)).toBeUndefined();
   });
 
   it("百分比編碼還原成原本的檔名，去掉 ? 與 # 後面", () => {
@@ -188,6 +203,28 @@ describe("projectPath", () => {
     expect(projectPath("/etc/passwd")).toBeUndefined();
     expect(projectPath("/workspace")).toBeUndefined();
     expect(projectPath("")).toBeUndefined();
+  });
+});
+
+describe("externalImageHost", () => {
+  it("外部網站的圖片回傳主機名稱", () => {
+    expect(externalImageHost("https://example.com/a.png?q=1")).toBe(
+      "example.com",
+    );
+    expect(externalImageHost("HTTP://Evil.example:8080/x")).toBe(
+      "evil.example:8080",
+    );
+    expect(externalImageHost(" //cdn.example.com/a.png")).toBe(
+      "cdn.example.com",
+    );
+  });
+
+  it("資料夾裡的檔案、data: 與其他網址不算", () => {
+    expect(externalImageHost("chart.png")).toBeUndefined();
+    expect(externalImageHost("/workspace/chart.png")).toBeUndefined();
+    expect(externalImageHost("data:image/png;base64,AAAA")).toBeUndefined();
+    expect(externalImageHost("blob:https://x/1")).toBeUndefined();
+    expect(externalImageHost("")).toBeUndefined();
   });
 });
 

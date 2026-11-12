@@ -1,4 +1,9 @@
-/** 一段對話：內容、權限確認、輸入框，以及右側的檔案面板。 */
+/**
+ * 一段對話：內容、權限確認、輸入框，以及右側的檔案面板。
+ *
+ * 伺服器支援工作資料夾時，標題與輸入框顯示資料夾名稱。資料夾在開始
+ * 對話前選定，之後不能換；這段對話裡讀取的檔案都在這個資料夾裡。
+ */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -9,6 +14,8 @@ import {
   type SessionOptions,
 } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
+import { isMember } from "../auth.ts";
+import { activeFolder, folderLabel, withoutFolder } from "../folders.ts";
 import { isBusy, MODE_LABELS, STOP_NOTICES } from "../format.ts";
 import {
   loadSession,
@@ -30,6 +37,7 @@ import {
 import { ApprovalCard } from "./ApprovalCard.tsx";
 import "./chat/chat.css";
 import { Composer } from "./Composer.tsx";
+import { FolderContext } from "./chat/folder.ts";
 import {
   agentTools,
   type ComposerOptions,
@@ -74,6 +82,8 @@ export function Conversation({ id }: { id: string }) {
     const handed = peekHandoff(id);
     return handed ? { ...handed, sent: true } : undefined;
   });
+  // 新對話頁選的資料夾，對話內容讀回來之前先用它。
+  const [handedFolder] = useState(() => peekHandoff(id)?.folder);
   const [sendError, setSendError] = useState<string>();
   const [optionsOverride, setOptionsOverride] = useState<SessionOptions>();
   const [optionsError, setOptionsError] = useState<string>();
@@ -171,6 +181,8 @@ export function Conversation({ id }: { id: string }) {
       skills: [],
     };
   const currentModel = effectiveModel(optionsValue, agentInfo?.model, models);
+  // 資料夾用伺服器記下的（開始對話後就不會變），不看暫時改的選項。
+  const folder = activeFolder(project, detail?.options?.folder ?? handedFolder);
 
   // 每一輪開始時記下用的模型，顯示在回覆底下。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 只在開始跑的時候記
@@ -228,7 +240,9 @@ export function Conversation({ id }: { id: string }) {
     await api.setMode(id, mode).catch(() => undefined);
   };
 
-  const changeOptions = (change: Partial<SessionOptions>) => {
+  const changeOptions = (input: Partial<SessionOptions>) => {
+    // 資料夾在開始對話前就選定了，這裡不會改。
+    const change = withoutFolder(input);
     const previous = optionsValue;
     setOptionsOverride({ ...optionsValue, ...change });
     setOptionsError(undefined);
@@ -270,6 +284,8 @@ export function Conversation({ id }: { id: string }) {
   };
 
   const projectMode = project?.permissions.mode ?? "ask";
+  // 成員不能把對話設成全部直接執行；已經是的話照樣顯示，但不能再選。
+  const member = isMember(project);
   const modeLabel = detail.mode
     ? MODE_LABELS[detail.mode]
     : MODE_LABELS[projectMode];
@@ -296,13 +312,14 @@ export function Conversation({ id }: { id: string }) {
     (approval && findApprovalStep(turns, approval.id)?.agent) ?? summary.agent;
 
   return (
-    <>
+    <FolderContext.Provider value={folder}>
       <main className="main">
         <header className="main-header">
           <div className="main-title">
             <h1>{summary.title}</h1>
             <span className="subtle mono ch-hide-narrow">
               {project?.name} · {summary.agent}
+              {folder && ` · ${folderLabel(project?.folders, folder)}`}
             </span>
           </div>
           <button
@@ -366,7 +383,11 @@ export function Conversation({ id }: { id: string }) {
             )}
             {showThinking && <Thinking />}
             {summary.status === "error" && !pendingShown && (
-              <ErrorCard id={id} message={summary.error ?? "未知的錯誤"} />
+              <ErrorCard
+                id={id}
+                message={summary.error ?? "未知的錯誤"}
+                canOpenSettings={!member}
+              />
             )}
             {interrupted && !pendingShown && (
               <ErrorCard
@@ -421,9 +442,21 @@ export function Conversation({ id }: { id: string }) {
               busy={busy}
               onSubmit={send}
               onStop={() => void api.stop(id)}
-              onUpload={project?.uploads ? api.upload : undefined}
+              onUpload={
+                project?.uploads
+                  ? (file) => api.upload(file, folder)
+                  : undefined
+              }
               maxUploadBytes={project?.uploads?.maxBytes}
               options={composerOptions}
+              folder={
+                folder
+                  ? {
+                      folders: project?.folders ?? [],
+                      value: folder,
+                    }
+                  : undefined
+              }
               controls={
                 <>
                   {!composerOptions && (
@@ -442,7 +475,11 @@ export function Conversation({ id }: { id: string }) {
                         跟著專案設定（{MODE_LABELS[projectMode]}）
                       </option>
                       <option value="ask">{MODE_LABELS.ask}</option>
-                      <option value="bypass">{MODE_LABELS.bypass}</option>
+                      {(!member || detail.mode === "bypass") && (
+                        <option value="bypass" disabled={member}>
+                          {MODE_LABELS.bypass}
+                        </option>
+                      )}
                       <option value="dontAsk">{MODE_LABELS.dontAsk}</option>
                     </select>
                   </label>
@@ -470,7 +507,7 @@ export function Conversation({ id }: { id: string }) {
           onClose={() => setPanel((p) => ({ ...p, open: false }))}
         />
       )}
-    </>
+    </FolderContext.Provider>
   );
 }
 
@@ -530,10 +567,13 @@ function ErrorCard({
   id,
   message,
   tone = "error",
+  canOpenSettings = false,
 }: {
   id: string;
   message: string;
   tone?: "error" | "interrupted";
+  /** 可以打開模型設定（成員看不到那一頁）。 */
+  canOpenSettings?: boolean;
 }) {
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string>();
@@ -582,7 +622,7 @@ function ErrorCard({
           <RetryIcon />
           重試
         </button>
-        {modelProblem && (
+        {modelProblem && canOpenSettings && (
           <Link to="/settings/model" className="btn btn-outline">
             開啟模型設定
           </Link>

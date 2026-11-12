@@ -8,10 +8,27 @@
 src/web/protocol.ts），兩個版本共用同一份前端。所以這裡的 dict 鍵名
 一律用 camelCase。
 
-Python 版另外支援：對話改名、刪除與搜尋，每段對話自己選模型、工具與
-skills，以及對回覆按讚或倒讚。這些資料存在對話紀錄旁邊的
+Python 版另外支援：對話改名、刪除與搜尋，每段對話自己選模型、工具、
+skills 與工作資料夾，以及對回覆按讚或倒讚。這些資料存在對話紀錄旁邊的
 <id>.meta.json，對話紀錄（JSONL）的格式不變；評價另外附加到
 .harness/feedback.jsonl，方便管理者之後檢視。
+
+多人使用時每段對話都有擁有者（見 accounts 模組）：對話紀錄存在
+.harness/users/<識別碼>/sessions/，每個公開方法的第一個參數都是發出請求
+的人，別人的對話一律當成不存在（WebError 404），事件也只送給對話的
+擁有者。每一輪都在對話選的工作資料夾裡執行（見 folders 模組）：檔案
+工具、執行指令與沙盒都只看得到那個資料夾；成員的 run_command 改在沙盒
+裡執行，沒有沙盒時不提供。工作資料夾在對話開始後就固定，不能再換。
+
+權限判斷每次都向帳號資料庫讀最新的角色（users），不用這一輪開始時的
+快照；管理者停用成員或改變角色時，伺服器呼叫 stop_runs_of 停掉那個人
+正在執行的對話。帳號模式下 web_fetch 不能讀內部網路（見
+builtin.web.guarded_fetch_tool），管理者可以在 harness.yaml 用
+web: {allowPrivateNetworks: true} 開放給自己。
+
+本機模式（auth_mode 為 local）和加入帳號之前一樣：對話紀錄與記憶在
+.harness/sessions/ 與 .harness/memory.json（和 CLI 共用），每一輪都在
+專案根目錄執行，沙盒照 harness.yaml 掛載 sandbox.workspace。
 """
 
 import asyncio
@@ -37,6 +54,7 @@ from harness import datatypes
 from harness import delegation
 from harness import llm
 from harness import loop
+from harness import memory as memory_lib
 from harness import permissions as permissions_lib
 from harness import project as project_lib
 from harness import providers
@@ -45,7 +63,13 @@ from harness import sessions as sessions_lib
 from harness import skills as skills_lib
 from harness import tools as tools_lib
 from harness.builtin import files
+from harness.builtin import paths
+from harness.builtin import shell
+from harness.builtin import web as web_tools
+from harness.web import accounts as accounts_lib
 from harness.web import config as config_lib
+from harness.web import folders as folders_lib
+from harness.web import migration
 from harness.web import uploads as uploads_lib
 
 Event = dict[str, Any]
@@ -65,8 +89,10 @@ WEB_INSTRUCTIONS = "\n".join(
         "## 網頁版說明",
         "- 使用者在瀏覽器裡和你對話，打不開伺服器上的檔案或資料夾，也不能在"
         "伺服器上執行指令。",
+        "- 你只看得到這段對話的工作資料夾：檔案工具、執行指令與沙盒都在"
+        "這個資料夾裡，路徑都相對於它。",
         "- 你寫入或產生的檔案會以檔案卡片出現在對話裡，使用者可以預覽與下載；"
-        "提到檔案時用它相對於專案的路徑。",
+        "提到檔案時用它相對於工作資料夾的路徑。",
         "- 不要叫使用者去某個資料夾找檔案、執行指令，或在自己的電腦上啟動"
         "伺服器。",
         "- 引用資料裡的數字時，只用你的程式實際印出來的值。",
@@ -87,6 +113,19 @@ RATINGS = ("up", "down")
 _COMMENT_LIMIT = 2000
 FEEDBACK_LOG = project_lib.DATA_DIR / "feedback.jsonl"
 ENDPOINT_PROVIDER = "OpenAI 相容端點"
+# 成員「以後都允許」的工具，依工作資料夾分開記（見 resolve_approval）。
+PERMISSIONS_FILE = "permissions.json"
+AUTH_MODES = ("local", "accounts")
+FOLDER_LOCKED = "資料夾只能在開始對話前選擇"
+# 管理者停用成員或改變角色時，那個人正在執行的對話停下來的說明。
+ACCOUNT_CHANGED_NOTICE = "管理者變更了你的帳號，這一輪已經停止。"
+# 「舊資料」資料夾不能執行程式或指令：告訴模型為什麼沒有這些工具。
+LEGACY_NOTE = (
+    "## 舊資料資料夾\n"
+    "- 這段對話在「舊資料（專案資料夾）」裡，為了安全只能讀檔案，不能"
+    "寫入、修改，也不能執行程式或指令（沒有 run_python 與 run_command）。"
+    "需要的話請使用者把檔案上傳到其他資料夾，開新的對話處理。"
+)
 
 
 class WebError(Exception):
@@ -117,6 +156,8 @@ class _State:
     agent: str
     title: str
     updated_at: float
+    # 擁有這段對話的使用者識別碼。
+    owner: str
     status: str = "idle"
     activity: dict[str, Any] | None = None
     started_at: float | None = None
@@ -138,6 +179,9 @@ class _State:
     # agent，用來記下每則回覆是哪個模型寫的。
     run_models: dict[str, str] = dataclasses.field(default_factory=dict)
     replying: str | None = None
+    # 這一輪是誰開始的、在哪個工作資料夾執行。
+    run_user: accounts_lib.User | None = None
+    run_folder: folders_lib.Folder | None = None
     # 以下存在 .meta.json，伺服器重新啟動後仍然保留。
     custom_title: str | None = None
     options: dict[str, Any] = dataclasses.field(
@@ -155,6 +199,8 @@ class _State:
     session_tools: set[str] = dataclasses.field(default_factory=set)
     # 使用者同意過的呼叫（工具名稱加參數的雜湊），一模一樣的呼叫不再問。
     approved_calls: set[str] = dataclasses.field(default_factory=set)
+    # 被伺服器停下時（例如帳號被停用）顯示的說明。
+    stop_notice: str | None = None
 
 
 class Workspace:
@@ -162,7 +208,9 @@ class Workspace:
 
     Attributes:
         project: 載入完成的專案。
-        uploads: 上傳檔案的資料夾。
+        folders: 工作資料夾，以及誰可以使用哪些資料夾。
+        auth_mode: local（本機使用，不必登入）或 accounts（要登入）。
+        max_upload_bytes: 上傳的單一檔案大小上限。
     """
 
     def __init__(
@@ -171,16 +219,41 @@ class Workspace:
         *,
         model_fn: llm.ModelFn | None = None,
         max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
+        auth_mode: str = "local",
+        folders: folders_lib.Folders | None = None,
+        users: Callable[[str], accounts_lib.User | None] | None = None,
     ) -> None:
+        """建立 Workspace。
+
+        Args:
+            project: 載入完成的專案。
+            model_fn: 模型函式，預設透過 litellm 呼叫。
+            max_upload_bytes: 上傳的單一檔案大小上限。
+            auth_mode: local 或 accounts。
+            folders: 工作資料夾；預設依 harness.yaml 建立。
+            users: 依識別碼查目前的帳號（帳號資料庫的 get_user）；權限
+                判斷用它讀最新的角色。None 時沿用這一輪開始時的帳號。
+
+        Raises:
+            ValueError: harness.yaml 的 workspaces 寫錯。
+        """
+        if auth_mode not in AUTH_MODES:
+            raise ValueError(f"auth_mode 必須是 {AUTH_MODES} 之一")
         self.project = project
-        self.uploads = uploads_lib.Uploads.for_project(
-            project, max_upload_bytes
+        self.auth_mode = auth_mode
+        self.folders = folders or folders_lib.Folders.for_project(
+            project,
+            local=auth_mode == "local",
+            legacy_owner=migration.legacy_owner(project.root.resolve()),
         )
+        self.max_upload_bytes = max_upload_bytes
+        self._users = users
         self._model_fn = model_fn or llm.complete
         self._states: dict[str, _State] = {}
         # close() 停下的對話保留「執行中」的記錄，下次啟動時標成中斷。
         self._closing = False
-        self._listeners: set[Listener] = set()
+        # 每個訂閱者只收到自己對話的事件，以使用者識別碼記下是誰。
+        self._listeners: dict[Listener, str] = {}
         self._settings = config_lib.read_model_settings(project.root)
         self._overrides = config_lib.read_agent_overrides(project.root)
         # 啟動時的模型設定；網頁上改過 harness.yaml 之後，沒有自己設定
@@ -193,38 +266,106 @@ class Workspace:
         self._model_choices = config_lib.read_model_choices(project.root)
         self._builtin_skills = project_lib.builtin_skills()
 
-    def subscribe(self, listener: Listener) -> Callable[[], None]:
-        """訂閱事件。
+    def subscribe(
+        self, user: accounts_lib.User, listener: Listener
+    ) -> Callable[[], None]:
+        """訂閱事件：這個人自己對話的事件，以及整個專案的事件。
 
         Args:
+            user: 訂閱的人。
             listener: 收到事件時呼叫的函式。
 
         Returns:
             取消訂閱的函式。
         """
-        self._listeners.add(listener)
-        return lambda: self._listeners.discard(listener)
+        self._listeners[listener] = user.id
+        return lambda: self._listeners.pop(listener, None)
+
+    def folder(
+        self, user: accounts_lib.User, folder_id: str | None
+    ) -> folders_lib.Folder:
+        """這個人可以使用的工作資料夾，第一次使用時建立。
+
+        Args:
+            user: 發出請求的人。
+            folder_id: FolderInfo.id；None 或空字串表示「我的檔案」。
+
+        Raises:
+            WebError: 沒有這個資料夾，或這個人不能使用（404）。
+        """
+        found = self.folders.find(user, folder_id)
+        if found is None:
+            raise WebError(404, f"找不到工作資料夾：{folder_id}")
+        folders_lib.ensure(found)
+        return found
+
+    def uploads_for(
+        self, user: accounts_lib.User, folder_id: str | None
+    ) -> uploads_lib.Uploads:
+        """上傳到某個工作資料夾的 uploads/。
+
+        Raises:
+            WebError: 不能使用這個資料夾（404），或它是唯讀的（403）。
+        """
+        found = self.folder(user, folder_id)
+        if not found.writable:
+            raise WebError(403, f"「{found.name}」是唯讀的資料夾，不能上傳檔案")
+        return self._uploads(found)
+
+    def migrate(self, owner_id: str) -> list[str]:
+        """把多人帳號之前的資料交給 owner_id（見 migration 模組）。
+
+        只在帳號模式呼叫；本機模式的資料留在原處，和 CLI 共用。
+        """
+        moved = migration.migrate(self.project.root, owner_id)
+        self.folders.legacy_owner = migration.legacy_owner(
+            self.project.root.resolve()
+        )
+        return moved
+
+    def stop_runs_of(self, user_id: str, notice: str) -> None:
+        """停掉這個人所有正在執行的對話（帳號被停用或角色改變時）。
+
+        Args:
+            user_id: 使用者識別碼。
+            notice: 顯示在對話裡的說明。
+        """
+        for state in self._states.values():
+            if state.owner == user_id and state.task is not None:
+                state.stop_notice = notice
+                state.task.cancel()
 
     def refresh_project(self) -> None:
         """通知瀏覽器重新讀取專案資訊（例如 litellm 在背景載入完成後）。"""
         self._emit({"type": "project"})
 
-    def project_info(self) -> dict[str, Any]:
-        """專案資訊、agent、toolset、權限與模型設定。"""
+    def project_info(self, user: accounts_lib.User) -> dict[str, Any]:
+        """專案資訊、agent、toolset、權限、模型設定與登入的人。
+
+        成員看不到伺服器上的路徑與連線細節（環境變數名稱、端點網址、
+        供應商清單），工具清單也只列出他實際能用的。
+        """
         project = self.project
-        return {
+        hidden = self._hidden_tools(user)
+        info = {
             "name": project.name,
-            "root": str(project.root),
+            "root": str(project.root) if user.is_admin else "",
             "runtime": "python",
-            "uploads": {"maxBytes": self.uploads.max_bytes},
+            "uploads": {"maxBytes": self.max_upload_bytes},
             "defaultAgent": project.default_agent,
-            "agents": [self._agent_info(name) for name in project.agents],
+            "agents": [
+                self._agent_info(name, hidden) for name in project.agents
+            ],
             "toolsets": [
                 {
                     "name": name,
                     "builtin": builtin.is_builtin_toolset(name, items)
                     or name == sandbox_lib.TOOLSET,
-                    "tools": [_tool_info(item) for item in items],
+                    "tools": [
+                        _tool_info(item)
+                        for item in items
+                        if id(item) not in hidden
+                    ],
                 }
                 for name, items in project.toolsets.items()
             ],
@@ -236,7 +377,14 @@ class Workspace:
                 "sessionOptions": True,
                 "feedback": True,
                 "sessionApproval": True,
+                "accounts": True,
+                "folders": self.auth_mode == "accounts",
             },
+            "auth": {
+                "mode": self.auth_mode,
+                "user": accounts_lib.current_user(user),
+            },
+            "folders": [item.info() for item in self.folders.for_user(user)],
             "models": self._model_options(),
             "skills": [
                 {
@@ -263,21 +411,48 @@ class Workspace:
                 "connection": self._connection_info(),
             },
         }
+        if not user.is_admin:
+            info["model"] = self._member_model_info(info["model"])
+        return info
 
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """所有對話的摘要，最近有動靜的排前面。"""
-        for session_id in sessions_lib.list_ids(self.project.sessions_dir):
-            self._find(session_id)
-        summaries = [self._summary(state) for state in self._states.values()]
-        return sorted(summaries, key=lambda item: -item["updatedAt"])
+    def _member_model_info(self, model: dict[str, Any]) -> dict[str, Any]:
+        """成員看到的模型設定：只留畫面需要的部分（連線是否就緒）。"""
+        return {
+            "config": model["config"],
+            "env": {
+                "model": None,
+                "baseURL": None,
+                "apiKeySet": False,
+                "keyVars": [],
+                "fallbackModel": model["env"]["fallbackModel"],
+            },
+            "connection": {
+                "ready": model["connection"]["ready"],
+                "provider": None,
+                "providers": [],
+            },
+        }
 
-    def get_session(self, session_id: str) -> dict[str, Any]:
+    def list_sessions(self, user: accounts_lib.User) -> list[dict[str, Any]]:
+        """這個人所有對話的摘要，最近有動靜的排前面。"""
+        return [self._summary(state) for state in self._own_states(user)]
+
+    def _own_states(self, user: accounts_lib.User) -> list[_State]:
+        """這個人所有的對話，最近有動靜的排前面。"""
+        for session_id in sessions_lib.list_ids(self._sessions_dir(user.id)):
+            self._find(user.id, session_id)
+        own = [s for s in self._states.values() if s.owner == user.id]
+        return sorted(own, key=lambda state: -state.updated_at)
+
+    def get_session(
+        self, user: accounts_lib.User, session_id: str
+    ) -> dict[str, Any]:
         """一段對話的完整內容，含選項、使用者對回覆的評價與回覆的模型。
 
         Raises:
-            WebError: 找不到這段對話。
+            WebError: 找不到這段對話（或它是別人的）。
         """
-        state = self._require(session_id)
+        state = self._require(user, session_id)
         return {
             "summary": self._summary(state),
             "messages": state.session.messages,
@@ -292,6 +467,7 @@ class Workspace:
 
     def start_run(
         self,
+        user: accounts_lib.User,
         text: str,
         session_id: str | None = None,
         agent: str | None = None,
@@ -301,37 +477,43 @@ class Workspace:
         """送出一則訊息並在背景開始執行。沒給 session_id 時建立新的對話。
 
         Args:
+            user: 發出請求的人，新對話的擁有者。
             text: 使用者的訊息。
             session_id: 要接續的對話；None 表示建立新的對話。
             agent: 新對話使用的 agent。
-            attachments: 上傳時回傳的檔案路徑，說明會接在訊息後面。
+            attachments: 上傳時回傳的檔案路徑（相對於對話的工作資料夾），
+                說明會接在訊息後面。
             options: 新對話的選項（見 set_options），只需要給要改的欄位。
 
         Raises:
             WebError: 訊息與附件都是空的、附件不是上傳的檔案、agent 不
-                存在、選項不合法，或這段對話還在執行。
+                存在、選項不合法、工作資料夾不能使用，或這段對話還在執行。
         """
         text = text.strip()
-        try:
-            notes = self.uploads.describe(attachments or [])
-        except uploads_lib.UploadError as error:
-            raise WebError(error.status, str(error)) from error
-        if not text and not notes:
-            raise WebError(400, "訊息不可以是空的")
+        state = None
         if session_id:
-            state = self._require(session_id)
+            state = self._require(user, session_id)
+            chosen = state.options
         else:
             agent = agent or self.project.default_agent
             if agent not in self.project.agents:
                 raise WebError(400, f"沒有 {agent} 這個 agent")
             # 先檢查選項，不合法時不會留下空的對話。
-            checked = self._checked_options(
-                options or {}, _default_options(), agent
+            chosen = self._checked_options(
+                user, options or {}, _default_options(), agent
             )
-            state = self._create(agent)
-            if checked != state.options:
-                state.options = checked
-                if checked["tools"] is not None:
+        folder = self._run_folder(user, chosen["folder"])
+        try:
+            notes = self._uploads(folder).describe(attachments or [])
+        except uploads_lib.UploadError as error:
+            raise WebError(error.status, str(error)) from error
+        if not text and not notes:
+            raise WebError(400, "訊息不可以是空的")
+        if state is None:
+            state = self._create(user, agent)
+            if chosen != state.options:
+                state.options = chosen
+                if chosen["tools"] is not None:
                     state.tools_agent = agent
                 self._save_meta(state)
         self._assert_idle(state)
@@ -340,10 +522,54 @@ class Workspace:
         if state.title == _UNTITLED:
             first = pathlib.PurePosixPath(attachments[0]).name if notes else ""
             state.title = _title(text or first)
-        self._start(state, "\n\n".join(part for part in (text, notes) if part))
+        message = "\n\n".join(part for part in (text, notes) if part)
+        self._start(state, message, user, folder)
         return self._summary(state)
 
-    def retry(self, session_id: str) -> dict[str, Any]:
+    def _run_folder(
+        self, user: accounts_lib.User, folder_id: str | None
+    ) -> folders_lib.Folder:
+        """對話這一輪要用的工作資料夾。
+
+        Raises:
+            WebError: 這個人已經不能使用這個資料夾（400）。
+        """
+        found = self.folders.find(user, folder_id)
+        if found is None:
+            raise WebError(
+                400, "這段對話的工作資料夾已經不能使用，請開始新的對話"
+            )
+        folders_lib.ensure(found)
+        return found
+
+    def _uploads(self, folder: folders_lib.Folder) -> uploads_lib.Uploads:
+        """工作資料夾的上傳資料夾。
+
+        專案根目錄的資料夾（本機模式、「舊資料」）照舊版存在
+        workspace/uploads/（有沙盒時是 sandbox.workspace/uploads/），舊
+        對話裡的附件路徑不變。
+        """
+        box = self.project.sandbox
+        if not folder.project_root:
+            return uploads_lib.Uploads.for_folder(
+                folder.path,
+                folder.path if box is not None else None,
+                self.max_upload_bytes,
+            )
+        root = self.project.root.resolve()
+        workspace = (
+            box.workspace
+            if box is not None
+            else root / sandbox_lib.DEFAULT_WORKSPACE
+        )
+        subdir = workspace.relative_to(root) / uploads_lib.UPLOADS_DIR
+        # 「舊資料」不能執行程式，附件不必說明容器裡的路徑。
+        mounted = box.workspace if box and not folder.is_legacy else None
+        return uploads_lib.Uploads.for_folder(
+            folder.path, mounted, self.max_upload_bytes, subdir.as_posix()
+        )
+
+    def retry(self, user: accounts_lib.User, session_id: str) -> dict[str, Any]:
         """不加新訊息，從對話紀錄的最後一則接著跑。
 
         用在上一輪出錯，或伺服器重新啟動讓上一輪中斷之後。中斷時還沒有
@@ -353,19 +579,23 @@ class Workspace:
         Raises:
             WebError: 對話還在執行，或最後一則已經是 agent 的回覆。
         """
-        state = self._require(session_id)
+        state = self._require(user, session_id)
         self._assert_idle(state)
         if not _resumable(state.session.messages):
             raise WebError(400, "這段對話沒有需要重試的內容")
+        folder = self._run_folder(user, state.options["folder"])
         if state.stop_reason == INTERRUPTED_STOP_REASON:
             loop.close_dangling_tool_calls(state.session, _INTERRUPTED_RESULT)
-        self._start(state, None)
+        self._start(state, None, user, folder)
         return self._summary(state)
 
-    def rename(self, session_id: str, title: str) -> dict[str, Any]:
+    def rename(
+        self, user: accounts_lib.User, session_id: str, title: str
+    ) -> dict[str, Any]:
         """幫對話改名；名稱會存檔，伺服器重新啟動後仍然保留。
 
         Args:
+            user: 發出請求的人。
             session_id: 要改名的對話。
             title: 新的名稱，前後的空白會去掉。
 
@@ -375,45 +605,49 @@ class Workspace:
         Raises:
             WebError: 找不到對話，或名稱是空的、超過 100 個字。
         """
-        state = self._require(session_id)
+        state = self._require(user, session_id)
         title = title.strip()
         if not title or len(title) > _CUSTOM_TITLE_LIMIT:
             raise WebError(400, f"名稱要有 1 到 {_CUSTOM_TITLE_LIMIT} 個字")
         state.custom_title = title
         self._save_meta(state)
         summary = self._summary(state)
-        self._emit({"type": "session", "summary": summary})
+        self._send(state, {"type": "session", "summary": summary})
         return summary
 
-    def delete(self, session_id: str) -> None:
+    def delete(self, user: accounts_lib.User, session_id: str) -> None:
         """刪除對話的紀錄與設定，並通知瀏覽器（session_deleted）。
 
         Raises:
             WebError: 找不到對話，或它還在執行、等使用者確認。
         """
-        state = self._require(session_id)
+        state = self._require(user, session_id)
         if state.task is not None or state.status in ("running", "waiting"):
             raise WebError(409, "這段對話還在執行，請先停止再刪除")
         state.session.path.unlink(missing_ok=True)
-        _meta_path(self.project, session_id).unlink(missing_ok=True)
+        _meta_path(state.session.path.parent, session_id).unlink(
+            missing_ok=True
+        )
         del self._states[session_id]
-        self._emit({"type": "session_deleted", "sessionId": session_id})
+        self._send(state, {"type": "session_deleted", "sessionId": session_id})
 
-    def search(self, query: str) -> list[dict[str, Any]]:
+    def search(
+        self, user: accounts_lib.User, query: str
+    ) -> list[dict[str, Any]]:
         """依標題與對話內容搜尋對話，最近有動靜的排前面。
 
         不分大小寫，比對標題以及使用者與 agent 的訊息（不含工具結果與
         附件說明）。
 
         Args:
+            user: 發出請求的人；只搜尋他自己的對話。
             query: 要找的文字；空的時回傳最近的 20 段對話。
 
         Returns:
             SearchResult（見 src/web/protocol.ts）的列表，最多 30 筆。
             命中訊息內容時附上含關鍵字的一小段文字。
         """
-        self.list_sessions()
-        states = sorted(self._states.values(), key=lambda s: -s.updated_at)
+        states = self._own_states(user)
         query = query.strip()
         if not query:
             return [_search_result(s, self._title(s)) for s in states][
@@ -432,31 +666,45 @@ class Workspace:
         return results
 
     def set_options(
-        self, session_id: str, changes: dict[str, Any]
+        self, user: accounts_lib.User, session_id: str, changes: dict[str, Any]
     ) -> dict[str, Any]:
-        """設定對話自己的模型、工具與 skills，下一輪開始生效。
+        """設定對話自己的模型、工具、skills 與工作資料夾，下一輪開始生效。
 
         Args:
+            user: 發出請求的人。
             session_id: 要設定的對話。
             changes: 要改的欄位：model（ProjectInfo.models 裡的名稱，null
                 表示跟著 agent）、tools（agent 的工具名稱，null 表示全部）、
-                skills（一定要用的 skill 名稱）。沒給的欄位不變。
+                skills（一定要用的 skill 名稱）、folder（FolderInfo.id，
+                null 表示「我的檔案」）。沒給的欄位不變。
 
         Returns:
             設定後完整的選項。
 
         Raises:
-            WebError: 找不到對話，或選項不合法。
+            WebError: 找不到對話、選項不合法，或對話開始後要換工作資料夾
+                （資料夾只能在開始對話前選擇：之前的檔案與附件路徑都相對
+                於它）。
         """
-        state = self._require(session_id)
+        state = self._require(user, session_id)
+        if (
+            isinstance(changes, dict)
+            and "folder" in changes
+            and state.session.messages
+            and (changes["folder"] or folders_lib.PRIVATE_ID)
+            != state.options["folder"]
+        ):
+            raise WebError(400, FOLDER_LOCKED)
         agent = self._active_agent(state).name
-        state.options = self._checked_options(changes, state.options, agent)
+        state.options = self._checked_options(
+            user, changes, state.options, agent
+        )
         if "tools" in changes:
             # 工具清單只對檢查時負責的 agent 有意義（見 _with_options）。
             tools = state.options["tools"]
             state.tools_agent = agent if tools is not None else None
         self._save_meta(state)
-        self._emit({"type": "session", "summary": self._summary(state)})
+        self._send(state, {"type": "session", "summary": self._summary(state)})
         return self._visible_options(state)
 
     def _visible_options(self, state: _State) -> dict[str, Any]:
@@ -470,13 +718,20 @@ class Workspace:
             options["tools"] = None
         return options
 
-    def set_feedback(self, session_id: str, index: Any, feedback: Any) -> None:
+    def set_feedback(
+        self,
+        user: accounts_lib.User,
+        session_id: str,
+        index: Any,
+        feedback: Any,
+    ) -> None:
         """記下使用者對一則回覆的評價；None 表示取消。
 
         評價存在對話的 .meta.json；每次送出的評價另外附加一行到
-        .harness/feedback.jsonl，給管理者之後檢視。
+        .harness/feedback.jsonl（含評價的人），給管理者之後檢視。
 
         Args:
+            user: 發出請求的人。
             session_id: 對話。
             index: 這則 assistant 訊息在 messages 裡的索引。
             feedback: {"rating": "up" | "down", "reasons": [...],
@@ -485,7 +740,7 @@ class Workspace:
         Raises:
             WebError: 找不到對話、索引不是 assistant 訊息，或評價不合法。
         """
-        state = self._require(session_id)
+        state = self._require(user, session_id)
         messages = state.session.messages
         if (
             isinstance(index, bool)
@@ -505,6 +760,7 @@ class Workspace:
         record = {
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
             "sessionId": session_id,
+            "userId": user.id,
             "index": index,
             "rating": cleaned["rating"],
             "reasons": cleaned.get("reasons", []),
@@ -519,35 +775,55 @@ class Workspace:
         with log.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def stop(self, session_id: str) -> None:
+    def stop(self, user: accounts_lib.User, session_id: str) -> None:
         """停止執行；等待中的確認一律視為拒絕。"""
-        state = self._require(session_id)
+        state = self._require(user, session_id)
         if state.task is not None:
             state.task.cancel()
 
-    def set_mode(self, session_id: str, mode: str | None) -> None:
-        """設定這段對話自己的權限模式；None 表示跟著專案設定。"""
+    def set_mode(
+        self, user: accounts_lib.User, session_id: str, mode: str | None
+    ) -> None:
+        """設定這段對話自己的權限模式；None 表示跟著專案設定。
+
+        Raises:
+            WebError: 找不到對話、模式不存在，或成員要用 bypass。
+        """
+        state = self._require(user, session_id)
         if mode is not None and mode not in permissions_lib.MODES:
             raise WebError(400, f"沒有 {mode} 這個權限模式")
-        self._require(session_id).mode = mode
+        if mode == "bypass" and not user.is_admin:
+            raise WebError(400, "只有管理者可以讓工具不經確認直接執行")
+        state.mode = mode
 
     def resolve_approval(
-        self, session_id: str, approval_id: str, decision: str
+        self,
+        user: accounts_lib.User,
+        session_id: str,
+        approval_id: str,
+        decision: str,
     ) -> None:
         """回覆一個等待中的確認。
+
+        「以後都允許」：管理者寫進 harness.yaml（所有人都適用）；成員只
+        記在自己的資料裡，只適用於他在同一個工作資料夾裡的對話。
 
         Raises:
             WebError: 決定不合法，或找不到這個等待中的確認。
         """
+        state = self._require(user, session_id)
         if decision not in DECISIONS:
             raise WebError(400, f"decision 必須是 {'、'.join(DECISIONS)}")
-        state = self._require(session_id)
         pending = state.approvals.get(approval_id)
         if pending is None or pending.future.done():
             raise WebError(404, "這個確認已經處理過，或已經失效")
         approval = pending.approval
-        if decision == "always":
+        if decision == "always" and user.is_admin:
             self._allow_always(approval["tool"])
+        elif decision == "always":
+            folder = state.run_folder
+            folder_id = folder.id if folder else state.options["folder"]
+            self._allow_for_member(user, folder_id, approval["tool"])
         elif decision == "session":
             # 只記在這段對話的 .meta.json，不寫進 harness.yaml。
             state.session_tools.add(approval["tool"])
@@ -556,13 +832,14 @@ class Workspace:
                 _call_key(approval["tool"], approval["arguments"])
             )
             self._save_meta(state)
-        self._emit(
+        self._send(
+            state,
             {
                 "type": "approval_resolved",
                 "sessionId": session_id,
                 "approvalId": approval_id,
                 "decision": decision,
-            }
+            },
         )
         pending.future.set_result(decision != "deny")
 
@@ -686,8 +963,17 @@ class Workspace:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _start(self, state: _State, text: str | None) -> None:
+    def _start(
+        self,
+        state: _State,
+        text: str | None,
+        user: accounts_lib.User,
+        folder: folders_lib.Folder,
+    ) -> None:
         """設定好執行中的狀態，再把執行放進背景。"""
+        state.run_user = user
+        state.run_folder = folder
+        state.stop_notice = None
         state.status = "running"
         state.activity = {"kind": "thinking"}
         state.started_at = _now()
@@ -710,6 +996,9 @@ class Workspace:
     async def _execute(self, state: _State, text: str | None) -> None:
         session_id = state.session.id
         project = self.project
+        user = state.run_user or accounts_lib.LOCAL_USER
+        folder = state.run_folder
+        assert folder is not None
         try:
             agent = self._run_agent(state)
             state.run_models = {
@@ -722,16 +1011,25 @@ class Workspace:
                 text,
                 session=state.session,
                 permissions=self._permissions_for(state),
-                workdir=project.root,
+                workdir=folder.path,
                 hooks=project.hooks,
-                memory=project.memory,
+                memory=self._memory_for(user),
                 compaction=project.compaction,
                 model_fn=self._model_fn,
+                hidden=folder.hidden,
+                hide_dotfiles=folder.hide_dotfiles,
             )
             async for event in events:
+                # 帳號在執行中被停用（例如用 pyharness user disable）：
+                # 不再執行任何工具，直接停下來。
+                if event.type == "tool_call" and not self._live_active(user):
+                    state.stop_notice = ACCOUNT_CHANGED_NOTICE
+                    raise asyncio.CancelledError
                 self._handle(state, event)
         except asyncio.CancelledError:
             state.status = "stopped"
+            if state.stop_notice is not None:
+                state.notice = state.stop_notice
             self._emit({"type": "run_stopped", "sessionId": session_id})
         # 模型或網路出錯時停下來讓使用者重試；錯誤種類取決於供應商。
         except Exception as error:  # noqa: BLE001
@@ -898,11 +1196,81 @@ class Workspace:
         """這段對話使用的權限設定。
 
         規則永遠讀專案目前的值，所以在設定頁或「以後都允許」改過的
-        規則，執行中的對話也會立刻套用。
+        規則，執行中的對話也會立刻套用。是不是管理者也每次向帳號資料庫
+        確認（被降級的管理者不能再用 bypass）。成員另外加上自己在這個
+        工作資料夾「以後都允許」的工具。
         """
+        user = state.run_user or accounts_lib.LOCAL_USER
+        folder = state.run_folder
+
+        def is_admin() -> bool:
+            return self._live_admin(user)
+
+        def extra_allow() -> list[str]:
+            if folder is None or is_admin():
+                return []
+            return self._member_allow(user.id).get(folder.id, [])
+
         return _LivePermissions(
-            self.project.permissions, state, self._approver(state)
+            self.project.permissions,
+            state,
+            self._approver(state),
+            extra_allow,
+            is_admin,
+            lambda: self._live_active(user),
         )
+
+    def _live_active(self, user: accounts_lib.User) -> bool:
+        """這個帳號現在還能用嗎（沒有被停用或刪除，包括從指令列改的）。"""
+        if self._users is None:
+            return True
+        current = self._users(user.id)
+        return current is not None and not current.disabled
+
+    def _live_admin(self, user: accounts_lib.User) -> bool:
+        """這個人現在是不是管理者（停用或刪除的帳號都不是）。"""
+        if self._users is None:
+            return user.is_admin
+        current = self._users(user.id)
+        return current is not None and current.is_admin and not current.disabled
+
+    def _memory_for(
+        self, user: accounts_lib.User
+    ) -> memory_lib.MemoryStore | None:
+        """這個人自己的長期記憶；專案沒有開啟記憶時為 None。"""
+        if self.project.memory is None:
+            return None
+        if self.auth_mode == "local":
+            # 本機模式和 CLI 共用 .harness/memory.json。
+            return self.project.memory
+        directory = migration.user_dir(self.project.root, user.id)
+        return memory_lib.MemoryStore(directory / "memory.json")
+
+    def _member_allow(self, user_id: str) -> dict[str, list[str]]:
+        """成員「以後都允許」的工具，以工作資料夾的識別碼為鍵。"""
+        path = migration.user_dir(self.project.root, user_id)
+        try:
+            data = json.loads((path / PERMISSIONS_FILE).read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        allow = data.get("allow") if isinstance(data, dict) else None
+        if not isinstance(allow, dict):
+            return {}
+        return {
+            key: value for key, value in allow.items() if _is_string_list(value)
+        }
+
+    def _allow_for_member(
+        self, user: accounts_lib.User, folder_id: str, tool_name: str
+    ) -> None:
+        """記下成員在這個工作資料夾「以後都允許」的工具。"""
+        allow = self._member_allow(user.id)
+        current = allow.get(folder_id, [])
+        if tool_name in current:
+            return
+        allow[folder_id] = [*current, tool_name]
+        path = migration.user_dir(self.project.root, user.id) / PERMISSIONS_FILE
+        _write_json(path, {"allow": allow})
 
     def _approver(self, state: _State) -> permissions_lib.Approver:
         async def approve(
@@ -923,7 +1291,7 @@ class Workspace:
                 "tool": target.name,
                 "arguments": call.arguments,
             }
-            preview = self._preview(call)
+            preview = self._preview(state, call)
             if preview is not None:
                 approval["preview"] = preview
             state.approvals[approval["id"]] = _Pending(approval, future)
@@ -948,7 +1316,9 @@ class Workspace:
 
         return approve
 
-    def _preview(self, call: datatypes.ToolCall) -> dict[str, Any] | None:
+    def _preview(
+        self, state: _State, call: datatypes.ToolCall
+    ) -> dict[str, Any] | None:
         """寫檔類的呼叫附上檔案修改前後的內容。
 
         參數有 path 與 content 的（write_file）直接用 content；有 path、
@@ -960,16 +1330,29 @@ class Workspace:
         path = arguments.get("path")
         if not isinstance(path, str):
             return None
-        context = datatypes.RunContext("", self.project.root, "")
+        folder = state.run_folder
+        if folder is None:
+            context = datatypes.RunContext("", self.project.root, "")
+        else:
+            context = datatypes.RunContext(
+                "",
+                folder.path,
+                "",
+                hidden=folder.hidden,
+                hide_dotfiles=folder.hide_dotfiles,
+            )
         content = arguments.get("content")
         if isinstance(content, str):
             try:
-                target = files.resolve_path(context, path)
+                paths.relative_parts(context, path)
+            except ValueError:
+                return None
+            try:
+                text = paths.read_text(context, path, errors="replace")
+                before = text[:_PREVIEW_LIMIT]
+            except FileNotFoundError:
                 before = None
-                if target.is_file():
-                    text = target.read_text(encoding="utf-8", errors="replace")
-                    before = text[:_PREVIEW_LIMIT]
-            except (tools_lib.ToolError, OSError, ValueError):
+            except (OSError, ValueError):
                 return None
             return {"path": path, "before": before, "after": content}
         return _edit_preview(context, path, arguments)
@@ -1069,8 +1452,17 @@ class Workspace:
             if "maxTurns" not in own:
                 agent.max_turns = self._settings["maxTurns"] or 20
 
-    def _agent_info(self, name: str) -> dict[str, Any]:
+    def _hidden_tools(self, user: accounts_lib.User) -> set[int]:
+        """用不到的工具（以 id() 表示）：沒有沙盒時成員不能用 run_command。"""
+        if user.is_admin or self.project.sandbox is not None:
+            return set()
+        return {id(shell.run_command)}
+
+    def _agent_info(
+        self, name: str, hidden: set[int] | None = None
+    ) -> dict[str, Any]:
         agent = self.project.agents[name]
+        hidden = hidden or set()
         own = self._overrides.get(name, {})
         env_model = os.environ.get("HARNESS_MODEL")
         if "model" in own:
@@ -1090,7 +1482,9 @@ class Workspace:
         return {
             "name": name,
             "description": agent.description,
-            "tools": [item.name for item in agent.tools],
+            "tools": [
+                item.name for item in agent.tools if id(item) not in hidden
+            ],
             "model": agent.model or llm.default_model(),
             "modelSource": model_source,
             "maxTurns": agent.max_turns,
@@ -1143,7 +1537,11 @@ class Workspace:
         return dict(sorted(found.items()))
 
     def _checked_options(
-        self, changes: Any, current: dict[str, Any], agent_name: str
+        self,
+        user: accounts_lib.User,
+        changes: Any,
+        current: dict[str, Any],
+        agent_name: str,
     ) -> dict[str, Any]:
         """檢查要改的選項，回傳合併後完整的選項。"""
         if not isinstance(changes, dict):
@@ -1163,7 +1561,10 @@ class Workspace:
             if tools is not None:
                 tools = _string_list(tools, "tools")
                 agent = self.project.agents[agent_name]
-                own = {item.name for item in agent.tools}
+                hidden = self._hidden_tools(user)
+                own = {
+                    item.name for item in agent.tools if id(item) not in hidden
+                }
                 unknown = [name for name in tools if name not in own]
                 if unknown:
                     raise WebError(
@@ -1179,6 +1580,11 @@ class Workspace:
             if unknown:
                 raise WebError(400, f"沒有這些 skill：{'、'.join(unknown)}")
             options["skills"] = chosen
+        if "folder" in changes:
+            folder_id = changes["folder"] or folders_lib.PRIVATE_ID
+            if self.folders.find(user, folder_id) is None:
+                raise WebError(400, f"沒有 {folder_id} 這個工作資料夾")
+            options["folder"] = folder_id
         return options
 
     def _active_agent(self, state: _State):
@@ -1193,9 +1599,105 @@ class Workspace:
         換成套用過選項的副本，執行到一半轉交時仍然用這段對話選的模型與
         skills。
         """
-        return self._with_options(
+        agent = self._with_options(
             state, self._active_agent(state), self._chosen_model(state), {}
         )
+        if self.auth_mode == "local":
+            # 和加入帳號之前一樣：專案根目錄、專案自己的沙盒設定。
+            return agent
+        user = state.run_user or accounts_lib.LOCAL_USER
+        assert state.run_folder is not None
+        return self._scoped_agent(agent, user, state.run_folder)
+
+    def _scoped_agent(
+        self,
+        agent: agents_lib.Agent,
+        user: accounts_lib.User,
+        folder: folders_lib.Folder,
+    ) -> agents_lib.Agent:
+        """把 agent（含 skills、subagents 與轉交對象）的工具換成這一輪的版本。
+
+        - run_python：只掛載這段對話的工作資料夾（唯讀的資料夾唯讀掛載）。
+        - run_command：成員改在沙盒裡執行；沒有沙盒時拿掉，指令絕不在
+          伺服器上替成員執行。管理者維持原樣（在伺服器上、工作資料夾裡
+          執行）。
+        - write_file、edit_file：唯讀的資料夾一律拒絕。
+        - 「舊資料」資料夾（專案根目錄）：拿掉 run_python 與 run_command，
+          並在指示裡說明原因。
+        - web_fetch：不能讀內部網路（見 _blocks_private_networks）。
+        """
+        project = self.project
+        box_tools = project.toolsets.get(sandbox_lib.TOOLSET, [])
+        box = None
+        box_error = "這個專案沒有設定沙盒"
+        legacy = folder.is_legacy
+        fetch = None
+        if self._blocks_private_networks(user):
+            fetch = web_tools.guarded_fetch_tool()
+        if project.sandbox is not None and not legacy:
+            try:
+                box = project.sandbox.for_folder(
+                    project.root, folder.path, read_only=not folder.writable
+                )
+            except ValueError as error:
+                box_error = str(error)
+        made: dict[str, tools_lib.Tool] = {}
+        # 指令在沙盒裡執行：成員一律如此；管理者在共用資料夾也是，因為
+        # 成員可以在那裡放檔案（例如 .git/config、同名的 Python 模組），
+        # 讓管理者看似無害的指令在伺服器上執行成員寫的程式。
+        sandboxed = not user.is_admin or (
+            self.auth_mode != "local" and folder.kind != "private"
+        )
+
+        def convert(item: tools_lib.Tool) -> tools_lib.Tool | None:
+            if legacy and (
+                item is shell.run_command
+                or any(item is known for known in box_tools)
+            ):
+                return None
+            if fetch is not None and item is web_tools.web_fetch:
+                return fetch
+            if any(item is known for known in box_tools):
+                if box is None:
+                    return _refusing(item, box_error)
+                if "python" not in made:
+                    made["python"] = box.tools()[0]
+                return made["python"]
+            if item is shell.run_command and sandboxed:
+                if project.sandbox is None:
+                    return None
+                if box is None:
+                    return _refusing(item, box_error)
+                if "command" not in made:
+                    made["command"] = box.command_tool()
+                return made["command"]
+            writes = (files.write_file, files.edit_file)
+            if not folder.writable and any(item is w for w in writes):
+                return _refusing(
+                    item,
+                    f"「{folder.name}」是唯讀的資料夾，不能寫入或修改檔案。"
+                    "請把結果直接回覆給使用者，或請他換一個可以寫入的資料夾。",
+                )
+            return item
+
+        scoped = _map_tools(agent, convert, {})
+        if legacy:
+            scoped.instructions = "\n\n".join(
+                part for part in (scoped.instructions, LEGACY_NOTE) if part
+            )
+        return scoped
+
+    def _blocks_private_networks(self, user: accounts_lib.User) -> bool:
+        """web_fetch 要不要擋內部網路：帳號模式一律擋，除非管理者在
+        harness.yaml 寫了 web: {allowPrivateNetworks: true}（只開放給
+        管理者自己的對話）。"""
+        if self.auth_mode == "local":
+            return False
+        if not self._live_admin(user):
+            return True
+        web = config_lib.read_config(self.project.root).get("web")
+        allowed = isinstance(web, dict) and web.get("allowPrivateNetworks")
+        return allowed is not True
 
     def _with_options(
         self,
@@ -1272,28 +1774,37 @@ class Workspace:
         names = [item["name"] for item in self._model_options()]
         return model if model in names else None
 
-    def _create(self, agent: str) -> _State:
+    def _sessions_dir(self, owner: str) -> pathlib.Path:
+        """一個人存放對話紀錄的資料夾；本機模式和 CLI 共用專案的。"""
+        if self.auth_mode == "local":
+            return self.project.sessions_dir
+        return migration.user_dir(self.project.root, owner) / "sessions"
+
+    def _create(self, user: accounts_lib.User, agent: str) -> _State:
         if agent not in self.project.agents:
             raise WebError(400, f"沒有 {agent} 這個 agent")
-        session = sessions_lib.create(self.project.sessions_dir)
-        state = self._track(session, agent, _now())
+        session = sessions_lib.create(self._sessions_dir(user.id))
+        state = self._track(session, agent, _now(), user.id)
         self._save_meta(state)
         return state
 
-    def _find(self, session_id: str) -> _State | None:
+    def _find(self, owner: str, session_id: str) -> _State | None:
+        """找出 owner 的一段對話；別人的對話一律當成不存在。"""
         if session_id in self._states:
-            return self._states[session_id]
-        directory = self.project.sessions_dir
+            state = self._states[session_id]
+            return state if state.owner == owner else None
+        directory = self._sessions_dir(owner)
         path = directory / f"{session_id}.jsonl"
         if not _SESSION_ID.match(session_id) or not path.exists():
             return None
         session = sessions_lib.load(directory, session_id)
-        meta = _read_meta(self.project, session_id)
+        meta = _read_meta(directory, session_id)
         agent = meta.get("agent")
         state = self._track(
             session,
             agent if isinstance(agent, str) else None,
             path.stat().st_mtime * 1000,
+            owner,
         )
         _restore_meta(state, meta)
         self._mark_interrupted(state, meta)
@@ -1338,19 +1849,24 @@ class Workspace:
             or state.stop_reason == INTERRUPTED_STOP_REASON
         ):
             meta["running"] = True
-        _write_meta(self.project, state.session.id, meta)
+        _write_meta(state.session.path.parent, state.session.id, meta)
 
     def _title(self, state: _State) -> str:
         return state.custom_title or state.title
 
-    def _require(self, session_id: str) -> _State:
-        state = self._find(session_id)
+    def _require(self, user: accounts_lib.User, session_id: str) -> _State:
+        """找出這個人的一段對話；別人的對話和不存在的一樣回 404。"""
+        state = self._find(user.id, session_id)
         if state is None:
             raise WebError(404, f"找不到對話：{session_id}")
         return state
 
     def _track(
-        self, session: sessions_lib.Session, agent: str | None, updated: float
+        self,
+        session: sessions_lib.Session,
+        agent: str | None,
+        updated: float,
+        owner: str,
     ) -> _State:
         entry = self.project.agents.get(
             agent or "", self.project.agents[self.project.default_agent]
@@ -1363,6 +1879,7 @@ class Workspace:
             agent=entry.name,
             title=_title(first.get("content") or "") if first else _UNTITLED,
             updated_at=updated,
+            owner=owner,
         )
         self._states[session.id] = state
         return state
@@ -1408,9 +1925,30 @@ class Workspace:
         summary.update({k: v for k, v in optional.items() if v is not None})
         return summary
 
-    def _emit(self, event: Event) -> None:
-        for listener in list(self._listeners):
-            listener(event)
+    def _send(self, state: _State, event: Event) -> None:
+        """送出一段對話的事件：只有對話的擁有者收得到。"""
+        self._emit(event, state.owner)
+
+    def _emit(self, event: Event, owner: str | None = None) -> None:
+        """送出事件。
+
+        和某段對話有關的事件（帶 sessionId 或對話摘要）只送給那段對話
+        的擁有者；找不到擁有者時不送給任何人。其他事件（例如 project）
+        送給所有人。
+        """
+        if owner is None:
+            summary = event.get("summary")
+            session_id = event.get("sessionId") or (
+                summary.get("id") if isinstance(summary, dict) else None
+            )
+            if session_id is not None:
+                state = self._states.get(session_id)
+                if state is None:
+                    return
+                owner = state.owner
+        for listener, user_id in list(self._listeners.items()):
+            if owner is None or user_id == owner:
+                listener(event)
 
 
 class _LivePermissions(permissions_lib.Permissions):
@@ -1421,22 +1959,35 @@ class _LivePermissions(permissions_lib.Permissions):
         shared: permissions_lib.Permissions,
         state: _State,
         approver: permissions_lib.Approver,
+        extra_allow: Callable[[], list[str]] = list,
+        is_admin: Callable[[], bool] = lambda: True,
+        active: Callable[[], bool] = lambda: True,
     ) -> None:
         # 不呼叫父類別的 __init__：欄位都改由 property 即時讀取。
         self._shared = shared
         self._state = state
+        self._extra_allow = extra_allow
+        self._is_admin = is_admin
+        self._active = active
         self.approver = approver
 
     @property
     def mode(self) -> str:
-        return self._state.mode or self._shared.mode
+        # 成員不能自己改成 bypass（例如在對話中被降級的管理者）。
+        mode = self._state.mode
+        if mode == "bypass" and not self._is_admin():
+            mode = None
+        return mode or self._shared.mode
 
     @property
     def allow(self) -> list[str]:
-        return self._shared.allow
+        return [*self._shared.allow, *self._extra_allow()]
 
     @property
     def deny(self) -> list[str]:
+        # 帳號被停用或刪除後，連 subagent 的工具也一律拒絕。
+        if not self._active():
+            return ["*"]
         return self._shared.deny
 
     @property
@@ -1530,11 +2081,65 @@ def _title(text: str) -> str:
     return line
 
 
-def _meta_path(project: project_lib.Project, session_id: str):
-    return project.sessions_dir / f"{session_id}.meta.json"
+def _refusing(item: tools_lib.Tool, message: str) -> tools_lib.Tool:
+    """名稱與參數相同、但一律回報 message 的工具（不需要使用者同意）。"""
+
+    async def refuse(**_: Any) -> str:
+        raise tools_lib.ToolError(message)
+
+    return dataclasses.replace(item, func=refuse, needs_approval=False)
 
 
-def _read_meta(project: project_lib.Project, session_id: str) -> dict[str, Any]:
+def _map_tools(
+    agent: agents_lib.Agent,
+    convert: Callable[[tools_lib.Tool], tools_lib.Tool | None],
+    applied: dict[int, agents_lib.Agent],
+) -> agents_lib.Agent:
+    """複製 agent，把它與 skills、subagents、轉交對象的工具都換過一次。
+
+    Args:
+        agent: 原本的 agent。
+        convert: 換工具的函式；回傳 None 表示拿掉這個工具。
+        applied: 已經複製過的 agent，以 id() 為鍵，避免循環時無限遞迴。
+
+    Returns:
+        換過工具的副本。
+    """
+    if id(agent) in applied:
+        return applied[id(agent)]
+    copy = dataclasses.replace(agent)
+    applied[id(agent)] = copy
+
+    def mapped(items: list[tools_lib.Tool]) -> list[tools_lib.Tool]:
+        return [new for item in items if (new := convert(item)) is not None]
+
+    copy.tools = mapped(agent.tools)
+    copy.skills = [
+        dataclasses.replace(item, tools=mapped(item.tools))
+        for item in agent.skills
+    ]
+    copy.subagents = [
+        _map_tools(item, convert, applied) for item in agent.subagents
+    ]
+    copy.handoffs = [
+        _map_tools(item, convert, applied) for item in agent.handoffs
+    ]
+    return copy
+
+
+def _write_json(path: pathlib.Path, data: Any) -> None:
+    """先寫到暫存檔再換掉，寫到一半當掉也不會留下壞掉的檔案。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    os.replace(temporary, path)
+
+
+def _meta_path(directory: pathlib.Path, session_id: str) -> pathlib.Path:
+    return directory / f"{session_id}.meta.json"
+
+
+def _read_meta(directory: pathlib.Path, session_id: str) -> dict[str, Any]:
     """讀取存在 session 旁邊的 .meta.json；沒有或壞掉時為空 dict。
 
     內容：agent（起始 agent）、title（使用者改過的名稱）、options、
@@ -1544,21 +2149,17 @@ def _read_meta(project: project_lib.Project, session_id: str) -> dict[str, Any]:
     結束），除了 agent 都可能沒有。
     """
     try:
-        meta = json.loads(_meta_path(project, session_id).read_text("utf-8"))
+        meta = json.loads(_meta_path(directory, session_id).read_text("utf-8"))
     except (OSError, ValueError):
         return {}
     return meta if isinstance(meta, dict) else {}
 
 
 def _write_meta(
-    project: project_lib.Project, session_id: str, meta: dict[str, Any]
+    directory: pathlib.Path, session_id: str, meta: dict[str, Any]
 ) -> None:
     """先寫到暫存檔再換掉，寫到一半當掉也不會留下壞掉的檔案。"""
-    path = _meta_path(project, session_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
-    os.replace(temporary, path)
+    _write_json(_meta_path(directory, session_id), meta)
 
 
 def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
@@ -1574,10 +2175,14 @@ def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
         model = options.get("model")
         tools = options.get("tools")
         chosen = options.get("skills")
+        folder = options.get("folder")
         state.options = {
             "model": model if isinstance(model, str) else None,
             "tools": tools if _is_string_list(tools) else None,
             "skills": chosen if _is_string_list(chosen) else [],
+            "folder": folder
+            if isinstance(folder, str) and folder
+            else folders_lib.PRIVATE_ID,
         }
     if state.options["tools"] is not None:
         # 沒有記錄的舊檔案：當時只能在起始 agent 上設定。
@@ -1659,10 +2264,8 @@ def _edit_preview(
     ):
         return None
     try:
-        target = files.resolve_path(context, path)
-        # 和 edit_file 一樣保留原本的換行字元。
-        with target.open(encoding="utf-8", newline="") as file:
-            text = file.read()
+        # 和 edit_file 一樣保留原本的換行字元；不跟著捷徑（見 paths）。
+        text = paths.read_text(context, path, newline="")
     except (tools_lib.ToolError, OSError, ValueError):
         return None
     count = text.count(old_text)
@@ -1677,7 +2280,12 @@ def _edit_preview(
 
 
 def _default_options() -> dict[str, Any]:
-    return {"model": None, "tools": None, "skills": []}
+    return {
+        "model": None,
+        "tools": None,
+        "skills": [],
+        "folder": folders_lib.PRIVATE_ID,
+    }
 
 
 def _is_string_list(value: Any) -> bool:

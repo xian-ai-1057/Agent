@@ -223,6 +223,17 @@
   border-radius: var(--r-md, 8px);
 }
 
+/* 外部網站的圖片不載入，顯示成連結。 */
+.md .ch-ext-img {
+  display: inline-flex;
+  align-items: center;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-md, 8px);
+  padding: 2px 8px;
+  font-size: 13px;
+  text-decoration: none;
+}
+
 /* ── 對話內容 ─────────────────────────────────────── */
 
 /* 新訊息淡入並上升一點點（比共用的 anim-in 短）。 */
@@ -1903,5 +1914,98 @@
   }
   .ch-dots i {
     opacity: 0.6;
+  }
+}
+
+/* ── 工作資料夾選單 ───────────────────────────────── */
+
+.ch-folder-btn {
+  max-width: 220px;
+  padding: 0 8px;
+  gap: 6px;
+}
+
+.ch-folder-btn > svg:first-child {
+  flex: none;
+  color: var(--muted);
+}
+
+.ch-folder-btn .ch-tag {
+  flex: none;
+}
+
+.ch-folder-pop {
+  width: 300px;
+}
+
+/* 對話裡的資料夾只顯示，不能點。 */
+.ch-folder-fixed,
+.ch-folder-fixed:hover {
+  background: transparent;
+  cursor: default;
+}
+
+/* 窄畫面：選單改以整個輸入框為基準靠左對齊，不會超出畫面右邊。 */
+@media (max-width: 520px) {
+  .ch-folder-anchor {
+    position: static;
+  }
+  .ch-folder-btn {
+    max-width: 140px;
+  }
+}
+
+/* ── 對話區與右側面板之間的分隔線 ───────────────────── */
+
+/* 夾在兩個方框之間的 8px 空隙裡：負邊距抵掉自己佔的位置。 */
+.ch-resizer {
+  flex: none;
+  width: 8px;
+  margin: 0 -8px;
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+  border-radius: var(--r-pill);
+}
+
+.ch-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 25% 3px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity var(--dur-1, 120ms) ease;
+}
+
+.ch-resizer:hover::after,
+.ch-resizer:focus-visible::after,
+body.ch-resizing .ch-resizer::after {
+  opacity: 1;
+}
+
+.ch-resizer:focus-visible {
+  outline: none;
+}
+
+/* 拖曳時整頁維持左右箭頭，也不要選到文字或讓預覽的 iframe 吃掉滑鼠。 */
+body.ch-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.ch-resizing iframe {
+  pointer-events: none;
+}
+
+/* 拖曳時寬度直接跟著滑鼠，不要有過場。 */
+body.ch-resizing .panel {
+  transition: none;
+}
+
+/* 面板浮在畫面上（較窄的視窗）時沒有並排，不能拖曳。 */
+@media (max-width: 1100px) {
+  .ch-resizer {
+    display: none;
   }
 }

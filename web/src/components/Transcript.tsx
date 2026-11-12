@@ -13,6 +13,7 @@ import {
 import "./chat/chat.css";
 import { FileBadge } from "./chat/FileBadge.tsx";
 import { fileName, isThumbnail } from "./chat/filetype.ts";
+import { useFolder } from "./chat/folder.ts";
 import { DownloadIcon } from "./chat/icons.tsx";
 import {
   MessageActions,
@@ -408,6 +409,7 @@ function ProducedFiles({
   canLoad: boolean;
   onOpen?: (path: string) => void;
 }) {
+  const folder = useFolder();
   const images = canLoad ? paths.filter(isThumbnail) : [];
   const others = paths.filter((path) => !images.includes(path));
   return (
@@ -424,7 +426,11 @@ function ProducedFiles({
                 disabled={!onOpen}
                 onClick={() => onOpen?.(path)}
               >
-                <img src={fileUrl(path)} alt={fileName(path)} loading="lazy" />
+                <img
+                  src={fileUrl(path, false, folder)}
+                  alt={fileName(path)}
+                  loading="lazy"
+                />
               </button>
             </li>
           ))}
@@ -448,7 +454,7 @@ function ProducedFiles({
           {canLoad && (
             <a
               className="btn btn-outline ch-btn-small"
-              href={fileUrl(path, true)}
+              href={fileUrl(path, true, folder)}
               download
               aria-label={`下載 ${fileName(path)}`}
             >

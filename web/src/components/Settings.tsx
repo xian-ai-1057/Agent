@@ -1,12 +1,16 @@
 /**
- * 設定：模型、權限、工具、agent。
+ * 設定：模型、權限、工具、agent，以及多人帳號模式的成員管理。
+ *
+ * 多人帳號模式下，成員看不到模型與權限（由管理者管理），工具與 agent
+ * 只能看；成員管理只有管理者看得到。網址指到看不到的分類時，換成第
+ * 一個看得到的分類。
  *
  * 改動先放在草稿裡，按「儲存」才寫回 harness.yaml。伺服器支援在網頁上
  * 設定連線時（Python 版），供應商、金鑰與模型用 ConnectionForm 設定；
  * 否則端點網址與金鑰來自環境變數，這裡只顯示狀態。
  */
 
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import type {
   ModelTestResult,
   PermissionMode,
@@ -15,11 +19,13 @@ import type {
   SettingSource,
 } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
+import { isMember, visibleSections } from "../auth.ts";
 import { MODE_LABELS } from "../format.ts";
-import type { SettingsSection } from "../router.ts";
+import { navigate, type SettingsSection } from "../router.ts";
 import { refreshProject, useStore } from "../store.ts";
 import { ConnectionForm } from "./ConnectionForm.tsx";
 import { CheckIcon, CloseIcon } from "./Icons.tsx";
+import { Members } from "./Members.tsx";
 import { Link } from "./Sidebar.tsx";
 import {
   getThemePreference,
@@ -35,12 +41,13 @@ interface Draft {
 
 type RuleKind = "allow" | "ask" | "deny";
 
-const SECTIONS: [SettingsSection, string][] = [
-  ["model", "模型"],
-  ["permissions", "權限"],
-  ["tools", "工具"],
-  ["agents", "Agent"],
-];
+const SECTION_LABELS: Record<SettingsSection, string> = {
+  model: "模型",
+  permissions: "權限",
+  tools: "工具",
+  agents: "Agent",
+  members: "成員",
+};
 
 const MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
   ask: "需要同意的工具，執行前先問你。預設。",
@@ -71,7 +78,17 @@ export function Settings({ section }: { section: SettingsSection }) {
     return () => clearTimeout(timer);
   }, [saved]);
 
+  const sections = visibleSections(project);
+  const shown = sections.includes(section) ? section : sections[0];
+  // 網址指到看不到的分類（例如成員打開了 /settings/model）時換掉網址。
+  useEffect(() => {
+    if (project && shown && shown !== section) {
+      navigate(`/settings/${shown}`, { replace: true });
+    }
+  }, [project, shown, section]);
+
   if (!project) return <main className="main" aria-busy="true" />;
+  const member = isMember(project);
 
   const base = toDraft(project);
   const current = draft ?? base;
@@ -119,15 +136,15 @@ export function Settings({ section }: { section: SettingsSection }) {
       <div className="scroll">
         <div className="settings">
           <nav className="settings-nav" aria-label="設定分類">
-            {SECTIONS.map(([id, label]) => (
-              <Link key={id} to={`/settings/${id}`} current={id === section}>
+            {sections.map((id) => (
+              <Link key={id} to={`/settings/${id}`} current={id === shown}>
                 <span className="bar" />
-                {label}
+                {SECTION_LABELS[id]}
               </Link>
             ))}
           </nav>
-          <div className="settings-body anim-in" key={section}>
-            {section === "model" && (
+          <div className="settings-body anim-in" key={shown}>
+            {shown === "model" && (
               <ModelSection
                 project={project}
                 draft={current}
@@ -135,15 +152,20 @@ export function Settings({ section }: { section: SettingsSection }) {
                 saveBarShown={dirty}
               />
             )}
-            {section === "permissions" && (
+            {shown === "permissions" && (
               <PermissionSection
                 project={project}
                 draft={current}
                 edit={edit}
               />
             )}
-            {section === "tools" && <ToolSection project={project} />}
-            {section === "agents" && <AgentSection project={project} />}
+            {shown === "tools" && (
+              <ToolSection project={project} note={member && <AdminNote />} />
+            )}
+            {shown === "agents" && (
+              <AgentSection project={project} note={member && <AdminNote />} />
+            )}
+            {shown === "members" && <Members />}
           </div>
         </div>
       </div>
@@ -600,7 +622,18 @@ function permissionsYaml(settings: PermissionSettings): string {
   return text;
 }
 
-function ToolSection({ project }: { project: ProjectInfo }) {
+/** 成員看的設定頁：內容只能看，不能改。 */
+function AdminNote() {
+  return <p className="settings-note">這些設定由管理者管理</p>;
+}
+
+function ToolSection({
+  project,
+  note,
+}: {
+  project: ProjectInfo;
+  note?: ReactNode;
+}) {
   return (
     <section aria-labelledby="h-tools" className="settings-body">
       <div>
@@ -609,6 +642,7 @@ function ToolSection({ project }: { project: ProjectInfo }) {
           harness.yaml 的 mcpServers、tools/ 底下的檔案，以及內建的 files。agent
           用 toolset 名稱引用一整組工具。
         </p>
+        {note}
       </div>
       {project.toolsets.map((set) => (
         <div key={set.name} className="box toolset">
@@ -638,7 +672,13 @@ function ToolSection({ project }: { project: ProjectInfo }) {
   );
 }
 
-function AgentSection({ project }: { project: ProjectInfo }) {
+function AgentSection({
+  project,
+  note,
+}: {
+  project: ProjectInfo;
+  note?: ReactNode;
+}) {
   return (
     <section aria-labelledby="h-agents" className="settings-body">
       <div>
@@ -646,6 +686,7 @@ function AgentSection({ project }: { project: ProjectInfo }) {
         <p className="lead">
           agents/ 資料夾裡的每個 Markdown 檔就是一個 agent。
         </p>
+        {note}
       </div>
       {project.agents.map((agent) => (
         <div

@@ -107,17 +107,20 @@ const EXTERNAL = /^([a-z][a-z0-9+.-]*:|\/\/)/i;
 /**
  * 沙盒容器裡的工作目錄（sandbox.py 的 CONTAINER_WORKDIR）與它在專案裡
  * 預設的位置（DEFAULT_WORKSPACE）。harness.yaml 改了 sandbox.workspace
- * 時，前端不知道新的位置，只對應預設的。
+ * 時，前端不知道新的位置，只對應預設的。有工作資料夾時，沙盒掛載的是
+ * 這段對話的資料夾本身，/workspace/x 就是資料夾裡的 x。
  */
 const CONTAINER_WORKDIR = "/workspace/";
 const PROJECT_WORKSPACE = "workspace/";
 
 /**
- * 回覆裡圖片的 src 對應到專案裡的路徑（相對於專案根目錄），可以交給
- * fileUrl 讀取。外部網址、data: 與其他絕對路徑回傳 undefined，照原樣
- * 顯示。容器裡的 /workspace/x 對應到專案的 workspace/x；開頭的 ./ 拿掉。
+ * 回覆裡圖片的 src 對應到可以交給 fileUrl 讀取的路徑。外部網址、data:
+ * 與其他絕對路徑回傳 undefined，照原樣顯示；開頭的 ./ 拿掉。
+ *
+ * 容器裡的 /workspace/x：有工作資料夾（folders 為 true）時是資料夾裡的
+ * x；沒有時（本機模式與 TypeScript 版）是專案根目錄底下的 workspace/x。
  */
-export function projectPath(src: string): string | undefined {
+export function projectPath(src: string, folders = false): string | undefined {
   let path = src.trim();
   if (!path || EXTERNAL.test(path) || path.startsWith("#")) return undefined;
   path = path.split(/[?#]/)[0] ?? "";
@@ -127,10 +130,30 @@ export function projectPath(src: string): string | undefined {
     // 不是合法的百分比編碼時照原樣使用。
   }
   if (path.startsWith(CONTAINER_WORKDIR)) {
-    path = PROJECT_WORKSPACE + path.slice(CONTAINER_WORKDIR.length);
+    const inside = path.slice(CONTAINER_WORKDIR.length);
+    path = folders ? inside : PROJECT_WORKSPACE + inside;
   } else if (path.startsWith("/")) {
     return undefined;
   }
   while (path.startsWith("./")) path = path.slice(2);
   return path || undefined;
+}
+
+/** http:、https: 或 //host 開頭的網址。 */
+const WEB_URL = /^(https?:)?\/\//i;
+
+/**
+ * 回覆裡指向外部網站的圖片的主機名稱；不是外部網址時回傳 undefined。
+ * 頁面的 CSP 不讓瀏覽器載入外部圖片（避免被誘導的回覆把資料帶在
+ * 網址裡送出去），這種圖片改顯示成連結。
+ */
+export function externalImageHost(src: string): string | undefined {
+  const value = src.trim();
+  if (!WEB_URL.test(value)) return undefined;
+  try {
+    const url = new URL(value, "https://placeholder.invalid");
+    return url.host || undefined;
+  } catch {
+    return undefined;
+  }
 }

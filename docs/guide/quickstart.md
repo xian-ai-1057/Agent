@@ -12,7 +12,7 @@ export ANTHROPIC_API_KEY=...                      # 你所用模型的金鑰
 export HARNESS_MODEL=anthropic/claude-opus-5-5    # litellm 的模型名稱
 
 pyharness chat              # 命令列聊天
-pyharness web               # 或開網頁版 http://127.0.0.1:4321
+pyharness web               # 或開網頁版（打開終端機顯示的網址）
 ```
 
 ## TypeScript 版

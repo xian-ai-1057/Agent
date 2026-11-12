@@ -20,7 +20,9 @@
 | [訊息防護](/advanced/guardrails) | 尚未支援 | ✓ |
 | [對話壓縮](/advanced/compaction) | 讀得懂壓縮紀錄，本身不壓縮 | ✓ |
 | [在沙盒（Docker）裡執行程式](/advanced/sandbox) | 尚未支援 | ✓ |
-| [架在伺服器上（登入密碼）](/advanced/server) | 尚未支援 | ✓ |
+| [架在伺服器上](/advanced/server) | 尚未支援 | ✓ |
+| [網頁帳號、成員與資料分開](/guide/web#帳號與成員) | 尚未支援（沒有登入） | ✓ |
+| [網頁每段對話選工作資料夾](/guide/web#工作資料夾) | 尚未支援 | ✓ |
 | [網頁上傳檔案](/guide/web#上傳檔案) | 尚未支援 | ✓ |
 | [在網頁上填模型的金鑰](/guide/web#在網頁上連接模型) | 尚未支援（用環境變數） | ✓ |
 | [網頁上每段對話選模型、工具與 skills](/guide/web#選擇模型工具與-skills) | 尚未支援 | ✓ |
@@ -35,6 +37,7 @@
 - **Python 版不會載入 `tools/*.ts`。**
 - TypeScript 版會忽略 agent 檔案裡的 `subagents`、`handoffs`、`skills`、`knowledge` 欄位，以及 `harness.yaml` 的 `knowledge`、`memory`、`guardrails`、`compaction`、`sandbox` 區塊。但 agent 的 `tools` 列了 `sandbox` 的話，TypeScript 版會因為找不到它而**無法載入**。
 - 兩個版本的內建檔案工具都不能存取 `.harness/secrets/`。
+- Python 版的網頁要登入時把每個人的對話存在 `.harness/users/<識別碼>/sessions/`，這些對話不會出現在 TypeScript 版或命令列裡；不必登入（本機模式）時和 TypeScript 版的網頁、兩個版本的命令列一樣用 `.harness/sessions/`。harness.yaml 的 `workspaces` 只有 Python 版使用。
 - Python 版壓縮過的對話，TypeScript 版會讀取壓縮後的歷史接續。
 
 ## 怎麼選
