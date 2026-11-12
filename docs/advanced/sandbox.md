@@ -18,7 +18,7 @@ sandbox:
   cpus: 1                       # 可用的 CPU 數，預設 1
   network: false                # 是否允許連網，預設 false
   command: docker               # 或 podman
-  notes: 已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、matplotlib。
+  notes: 已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、python-pptx、matplotlib。
 ```
 
 全部用預設值的話寫 `sandbox: true`。和內建的 `files` 一樣，agent 要在
@@ -37,6 +37,23 @@ tools: [sandbox, files]
 agent 會得到 `run_python` 工具：傳入一段 Python 程式，回傳它印出的內容；
 程式出錯時，模型會看到錯誤訊息並自己修正。`notes` 會附在工具說明後面，
 讓模型知道有哪些套件可以用。
+
+## 產生的檔案 {#產生的檔案}
+
+每次執行前後會比對工作目錄，新增或修改的檔案以 `[產生的檔案] ` 開頭的行
+接在工具結果後面，路徑相對於專案根目錄（程式出錯或逾時也一樣，部分結果
+常常還用得上）：
+
+```text
+平均營收 1,234,567
+
+[產生的檔案] workspace/charts/revenue.png
+[產生的檔案] workspace/summary.csv
+```
+
+最新的排前面，最多列 20 個；以點開頭的檔案與資料夾不列，工作目錄很大時
+只比對前 5,000 個項目。網頁版用這幾行顯示檔案卡片與縮圖，模型也看得到
+它們，可以直接用這個路徑告訴使用者。
 
 ## 隔離方式
 
@@ -64,7 +81,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
-      pandas numpy openpyxl pdfplumber python-docx matplotlib
+      pandas numpy openpyxl pdfplumber python-docx python-pptx matplotlib
 # 圖表預設用中文字型，否則中文會變成方框
 RUN printf 'font.family: Noto Sans CJK JP\naxes.unicode_minus: False\n' \
       > /etc/matplotlibrc

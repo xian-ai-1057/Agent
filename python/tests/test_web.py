@@ -19,7 +19,9 @@ from aiohttp.test_utils import TestServer
 
 from harness import cli
 from harness import credentials
+from harness import datatypes
 from harness import llm
+from harness import loop
 from harness import project as project_lib
 from harness import providers
 from harness import sandbox as sandbox_lib
@@ -239,7 +241,8 @@ async def test_follow_up_message_continues_the_session(start):
     await h.wait_for("run_end", lambda _: len(h.model.requests) == 2)
 
     contents = [m["content"] for m in h.model.requests[1]["messages"]]
-    assert contents == ["你是助手。", "第一題", "一", "第二題"]
+    assert contents[0].startswith("你是助手。")
+    assert contents[1:] == ["第一題", "一", "第二題"]
 
 
 async def test_empty_message_is_rejected(start):
@@ -1390,6 +1393,7 @@ class TestProjectChoices:
             "search": True,
             "sessionOptions": True,
             "feedback": True,
+            "sessionApproval": True,
         }
 
     async def test_models_start_with_default_and_include_config(
@@ -2054,3 +2058,489 @@ def test_refresh_project_tells_the_browser(tmp_path):
         ws.refresh_project()
 
     assert events == [{"type": "project"}]
+
+
+async def _until(predicate) -> None:
+    """等到 predicate() 成立（最多 3 秒）。"""
+    async with asyncio.timeout(3):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+class TestWebInstructions:
+    """從網頁執行時，agent 會多一段網頁版說明。"""
+
+    async def test_system_prompt_explains_the_browser(self, start):
+        h = await start([conftest.text_response("好")])
+
+        await h.api("POST", "/sessions", {"text": "嗨"})
+        await h.wait_for("run_end")
+
+        system = h.model.requests[0]["messages"][0]
+        assert system["role"] == "system"
+        assert system["content"].startswith("你是助手。")
+        assert workspace_lib.WEB_INSTRUCTIONS in system["content"]
+        assert len(workspace_lib.WEB_INSTRUCTIONS.splitlines()) <= 8
+
+    async def test_project_agent_is_not_changed(self, tmp_path, fake_model):
+        root = make_project(tmp_path / "w")
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(
+                loaded, model_fn=fake_model([conftest.text_response("好")])
+            )
+            summary = ws.start_run("嗨")
+            await ws._states[summary["id"]].task
+
+            assert loaded.agents["main"].instructions == "你是助手。"
+
+
+class TestEditPreview:
+    """edit_file 的確認畫面附上修改前後的內容。"""
+
+    @pytest.fixture
+    def preview(self, tmp_path):
+        root = make_project(tmp_path / "e")
+        (root / "notes.md").write_text("a\nb\nb\n", encoding="utf-8")
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(loaded)
+
+            def make(arguments):
+                call = datatypes.ToolCall("c1", "edit_file", arguments)
+                return ws._preview(call)
+
+            yield make
+
+    def test_single_replacement(self, preview):
+        result = preview(
+            {"path": "notes.md", "old_text": "a\n", "new_text": "z\n"}
+        )
+
+        assert result == {
+            "path": "notes.md",
+            "before": "a\nb\nb\n",
+            "after": "z\nb\nb\n",
+        }
+
+    def test_replace_all(self, preview):
+        result = preview(
+            {
+                "path": "notes.md",
+                "old_text": "b",
+                "new_text": "c",
+                "replace_all": True,
+            }
+        )
+
+        assert result["after"] == "a\nc\nc\n"
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"path": "notes.md", "old_text": "b", "new_text": "c"},
+            {"path": "notes.md", "old_text": "沒有", "new_text": "c"},
+            {"path": "notes.md", "old_text": "", "new_text": "c"},
+            {"path": "notes.md", "old_text": "a", "new_text": "a"},
+            {"path": "missing.md", "old_text": "a", "new_text": "c"},
+            {"path": "../outside.md", "old_text": "a", "new_text": "c"},
+            {"path": "../outside.md", "content": "寫到專案外面"},
+        ],
+    )
+    def test_edit_that_would_fail_has_no_preview(self, preview, arguments):
+        assert preview(arguments) is None
+
+    async def test_approval_carries_the_preview(self, start):
+        call = (
+            "edit_file",
+            {"path": "notes.md", "old_text": "b", "new_text": "c"},
+        )
+        h = await start(
+            [conftest.tool_response(call), conftest.text_response("好")]
+        )
+        (h.root / "notes.md").write_text("a\nb\n", encoding="utf-8")
+        await h.api("POST", "/sessions", {"text": "改一下"})
+
+        approval = (await h.wait_for("approval"))["approval"]
+        await h.decide(approval, "once")
+        await h.wait_for("run_end")
+
+        assert approval["preview"] == {
+            "path": "notes.md",
+            "before": "a\nb\n",
+            "after": "a\nc\n",
+        }
+        assert (h.root / "notes.md").read_text(encoding="utf-8") == "a\nc\n"
+
+
+def _write(path: str, content: str = "x") -> tuple[str, dict]:
+    return ("write_file", {"path": path, "content": content})
+
+
+class TestSessionApproval:
+    """「這段對話都允許」與同樣的呼叫不再重複問。"""
+
+    async def test_session_decision_allows_the_tool_for_this_session(
+        self, start
+    ):
+        h = await start(
+            [
+                conftest.tool_response(_write("a.md")),
+                conftest.text_response("好"),
+                conftest.tool_response(_write("b.md")),
+                conftest.text_response("好"),
+                conftest.tool_response(_write("c.md")),
+                conftest.text_response("好"),
+            ]
+        )
+        config_before = (h.root / "harness.yaml").read_text(encoding="utf-8")
+        _, first = await h.api("POST", "/sessions", {"text": "寫 a"})
+        approval = (await h.wait_for("approval"))["approval"]
+        assert await h.decide(approval, "session") == 200
+        resolved = await h.wait_for("approval_resolved")
+        await _wait_idle(h.client, first["id"])
+
+        await h.api(
+            "POST", f"/sessions/{first['id']}/messages", {"text": "寫 b"}
+        )
+        await h.wait_for("run_end", lambda _: len(h.model.requests) == 4)
+        await _wait_idle(h.client, first["id"])
+
+        assert resolved["decision"] == "session"
+        assert [e["type"] for e in h.events].count("approval") == 1
+        assert (h.root / "b.md").exists()
+        assert (h.root / "harness.yaml").read_text("utf-8") == config_before
+        _, info = await h.api("GET", "/project")
+        assert info["permissions"]["allow"] == []
+        meta = json.loads(
+            (
+                h.root / ".harness" / "sessions" / f"{first['id']}.meta.json"
+            ).read_text("utf-8")
+        )
+        assert meta["sessionTools"] == ["write_file"]
+
+        # 別的對話還是要問。
+        _, other = await h.api("POST", "/sessions", {"text": "寫 c"})
+        await h.wait_for("approval", lambda e: e["sessionId"] == other["id"])
+        await h.api("POST", f"/sessions/{other['id']}/stop", {})
+
+    async def test_same_call_is_not_asked_twice(self, start):
+        h = await start(
+            [
+                conftest.tool_response(_write("a.md")),
+                conftest.text_response("好"),
+                conftest.tool_response(_write("a.md")),
+                conftest.text_response("好"),
+                conftest.tool_response(_write("a.md", "不一樣")),
+            ]
+        )
+        _, created = await h.api("POST", "/sessions", {"text": "寫"})
+        approval = (await h.wait_for("approval"))["approval"]
+        await h.decide(approval, "once")
+        await _wait_idle(h.client, created["id"])
+
+        await h.api(
+            "POST", f"/sessions/{created['id']}/messages", {"text": "再寫"}
+        )
+        await h.wait_for("run_end", lambda _: len(h.model.requests) == 4)
+        await _wait_idle(h.client, created["id"])
+        assert [e["type"] for e in h.events].count("approval") == 1
+
+        await h.api(
+            "POST", f"/sessions/{created['id']}/messages", {"text": "改"}
+        )
+        second = await h.wait_for(
+            "approval", lambda e: e["approval"]["id"] != approval["id"]
+        )
+        assert second["approval"]["arguments"]["content"] == "不一樣"
+        await h.api("POST", f"/sessions/{created['id']}/stop", {})
+
+    async def test_denied_call_is_still_asked_again(self, start):
+        h = await start(
+            [
+                conftest.tool_response(_write("a.md")),
+                conftest.text_response("好"),
+                conftest.tool_response(_write("a.md")),
+            ]
+        )
+        _, created = await h.api("POST", "/sessions", {"text": "寫"})
+        approval = (await h.wait_for("approval"))["approval"]
+        await h.decide(approval, "deny")
+        await _wait_idle(h.client, created["id"])
+
+        await h.api(
+            "POST", f"/sessions/{created['id']}/messages", {"text": "再寫"}
+        )
+        again = await h.wait_for(
+            "approval", lambda e: e["approval"]["id"] != approval["id"]
+        )
+
+        assert again["sessionId"] == created["id"]
+        await h.api("POST", f"/sessions/{created['id']}/stop", {})
+
+    async def test_session_approval_survives_restart(
+        self, tmp_path, fake_model
+    ):
+        root = make_project(tmp_path / "s")
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(
+                loaded,
+                model_fn=fake_model(
+                    [
+                        conftest.tool_response(_write("a.md")),
+                        conftest.text_response("好"),
+                    ]
+                ),
+            )
+            events = []
+            ws.subscribe(events.append)
+            summary = ws.start_run("寫 a")
+            state = ws._states[summary["id"]]
+            await _until(lambda: state.approvals)
+            [pending] = state.approvals.values()
+            ws.resolve_approval(
+                summary["id"], pending.approval["id"], "session"
+            )
+            await state.task
+
+        with project_lib.load_project(root) as loaded:
+            fresh = workspace_lib.Workspace(
+                loaded,
+                model_fn=fake_model(
+                    [
+                        conftest.tool_response(_write("b.md")),
+                        conftest.text_response("好"),
+                    ]
+                ),
+            )
+            events = []
+            fresh.subscribe(events.append)
+            fresh.start_run("寫 b", session_id=summary["id"])
+            await fresh._states[summary["id"]].task
+
+        assert "approval" not in [e["type"] for e in events]
+        assert (root / "b.md").exists()
+        assert "write_file" not in (root / "harness.yaml").read_text("utf-8")
+
+    async def test_session_is_a_valid_decision_only_for_pending(self, start):
+        h = await start()
+        _, created = await h.api("POST", "/sessions", {"text": "嗨"})
+
+        status, body = await h.api(
+            "POST",
+            f"/sessions/{created['id']}/approvals/nope",
+            {"decision": "forever"},
+        )
+
+        assert status == 400
+        assert "session" in body["error"]
+
+
+def _killed_session(root: pathlib.Path, *, running: bool = True) -> str:
+    """寫出伺服器在等待確認時被停掉後留下的對話紀錄與 .meta.json。"""
+    directory = root / ".harness" / "sessions"
+    directory.mkdir(parents=True, exist_ok=True)
+    session_id = "20260101-120000-abcdef"
+    request = conftest.tool_response(WRITE_CALL).message
+    lines = [{"role": "user", "content": "寫報告"}, request]
+    (directory / f"{session_id}.jsonl").write_text(
+        "".join(json.dumps(m, ensure_ascii=False) + "\n" for m in lines),
+        encoding="utf-8",
+    )
+    meta = {"agent": "main"}
+    if running:
+        meta["running"] = True
+    (directory / f"{session_id}.meta.json").write_text(
+        json.dumps(meta), encoding="utf-8"
+    )
+    return session_id
+
+
+class TestInterruptedRun:
+    """伺服器在一輪執行到一半時停掉：下次啟動顯示中斷，按重試接著做。"""
+
+    async def test_shutdown_while_waiting_leaves_no_denial(
+        self, tmp_path, fake_model
+    ):
+        root = make_project(tmp_path / "k")
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(
+                loaded,
+                model_fn=fake_model([conftest.tool_response(WRITE_CALL)]),
+            )
+            summary = ws.start_run("寫報告")
+            state = ws._states[summary["id"]]
+            await _until(lambda: state.approvals)
+
+            await ws.close()
+
+        jsonl = (loaded.sessions_dir / f"{summary['id']}.jsonl").read_text()
+        roles = [json.loads(line)["role"] for line in jsonl.splitlines()]
+        assert roles == ["user", "assistant"]
+        assert loop.DENIED_RESULT not in jsonl
+        meta = json.loads(
+            (loaded.sessions_dir / f"{summary['id']}.meta.json").read_text()
+        )
+        assert meta["running"] is True
+
+    @pytest.mark.parametrize("running", [True, False])
+    async def test_killed_session_is_marked_interrupted(
+        self, tmp_path, running
+    ):
+        root = make_project(tmp_path / "k")
+        session_id = _killed_session(root, running=running)
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(loaded)
+
+            [summary] = ws.list_sessions()
+
+        assert summary["id"] == session_id
+        assert summary["status"] == "stopped"
+        assert summary["stopReason"] == "interrupted"
+        assert summary["notice"] == (
+            "服務重新啟動，這一輪中斷了。按重試可以接著做。"
+        )
+
+    async def test_running_flag_with_user_message_last_is_interrupted(
+        self, tmp_path
+    ):
+        root = make_project(tmp_path / "k")
+        session_id = _killed_session(root)
+        path = root / ".harness" / "sessions" / f"{session_id}.jsonl"
+        path.write_text(
+            json.dumps({"role": "user", "content": "嗨"}) + "\n", "utf-8"
+        )
+        with project_lib.load_project(root) as loaded:
+            [summary] = workspace_lib.Workspace(loaded).list_sessions()
+
+        assert summary["stopReason"] == "interrupted"
+
+    async def test_finished_session_is_not_interrupted(self, start):
+        h = await start([conftest.text_response("好")])
+        _, created = await h.api("POST", "/sessions", {"text": "嗨"})
+        await _wait_idle(h.client, created["id"])
+
+        with project_lib.load_project(h.root) as loaded:
+            [summary] = workspace_lib.Workspace(loaded).list_sessions()
+
+        assert summary["status"] == "idle"
+        assert "stopReason" not in summary
+
+    async def test_retry_resumes_without_a_fake_denial(
+        self, tmp_path, fake_model
+    ):
+        root = make_project(tmp_path / "k")
+        session_id = _killed_session(root)
+        model = fake_model(
+            [conftest.tool_response(WRITE_CALL), conftest.text_response("好了")]
+        )
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(loaded, model_fn=model)
+            events = []
+            ws.subscribe(events.append)
+
+            ws.retry(session_id)
+            state = ws._states[session_id]
+            await _until(lambda: state.approvals)
+            [pending] = state.approvals.values()
+            ws.resolve_approval(session_id, pending.approval["id"], "once")
+            await state.task
+            summary = ws._summary(state)
+
+        sent = model.requests[0]["messages"]
+        assert [m["role"] for m in sent] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+        ]
+        assert "服務重新啟動" in sent[-1]["content"]
+        assert loop.DENIED_RESULT not in sent[-1]["content"]
+        assert summary["status"] == "done"
+        assert "notice" not in summary
+        assert (root / "reports" / "a.md").exists()
+        meta = json.loads(
+            (
+                root / ".harness" / "sessions" / f"{session_id}.meta.json"
+            ).read_text("utf-8")
+        )
+        assert "running" not in meta
+
+    async def test_retry_over_http(self, tmp_path, fake_model):
+        root = make_project(tmp_path / "k")
+        session_id = _killed_session(root)
+        loaded = project_lib.load_project(root)
+        model = fake_model([conftest.text_response("接著做完了")])
+        app = server_lib.create_app(loaded, model_fn=model)
+        async with TestClient(TestServer(app)) as client:
+            status, _ = await _post(
+                client, f"/api/sessions/{session_id}/retry", {}
+            )
+            detail = await _wait_idle(client, session_id)
+        loaded.close()
+
+        assert status == 202
+        assert detail["summary"]["status"] == "done"
+        assert [m["role"] for m in detail["messages"]] == [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+        ]
+
+
+class TestExplainFailure:
+    """連線測試失敗的說明依例外的類別決定。"""
+
+    def test_module_not_found_is_not_a_missing_model(self):
+        error = ModuleNotFoundError("No module named 'boto3'")
+
+        text = workspace_lib._explain_failure(
+            f"ModuleNotFoundError: {error}", error
+        )
+
+        assert text.startswith("連不上模型。")
+        assert "No module named 'boto3'" in text
+
+    def test_classes_are_matched_through_inheritance(self):
+        class NotFoundError(Exception):
+            pass
+
+        class ProviderNotFound(NotFoundError):
+            pass
+
+        class AuthenticationError(Exception):
+            pass
+
+        class APIConnectionError(Exception):
+            pass
+
+        def explain(error):
+            return workspace_lib._explain_failure(str(error), error)
+
+        assert explain(ProviderNotFound("x")).startswith("找不到這個模型")
+        assert explain(AuthenticationError("401")).startswith("金鑰不正確")
+        assert explain(APIConnectionError("x")).startswith("連不到模型的伺服器")
+        assert explain(TimeoutError()).startswith("連不到模型的伺服器")
+
+    def test_message_mentioning_a_class_name_is_not_enough(self):
+        error = ValueError("NotFoundError AuthenticationError")
+
+        text = workspace_lib._explain_failure(str(error), error)
+
+        assert text.startswith("連不上模型。")
+
+    async def test_saving_connection_with_import_error(self, start):
+        async def broken(model, messages, tools, params):
+            raise ModuleNotFoundError("No module named 'boto3'")
+            yield
+
+        h = await start(model=broken)
+
+        status, body = await h.api(
+            "PUT",
+            "/settings/connection",
+            {"provider": "openai", "apiKey": "sk-x", "model": "openai/gpt-5"},
+        )
+
+        assert status == 400
+        assert body["error"].startswith("連不上模型")
+        assert "ModuleNotFoundError: No module named 'boto3'" in body["error"]

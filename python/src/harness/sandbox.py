@@ -13,6 +13,8 @@
       harness.yaml，無法藉此在主機上執行程式。
 
 每次執行都是全新的容器，變數不會留到下一次；要沿用結果請寫成檔案。
+執行前後比對工作目錄，新增或修改的檔案會以 PRODUCED_MARKER 開頭的行
+接在工具結果後面（路徑相對於專案根目錄），網頁版用它顯示檔案卡片。
 
 pyharness 自己也跑在容器裡時（用 docker-compose.yml 部署），它看到的路徑
 不是主機上的路徑，沒辦法直接掛載。這時專案放在一個 Docker volume 裡，
@@ -31,6 +33,7 @@ import subprocess
 import uuid
 from typing import Any
 
+from harness import datatypes
 from harness import tools as tools_lib
 
 TOOLSET = "sandbox"
@@ -42,6 +45,11 @@ IMAGE_ENV = "HARNESS_SANDBOX_IMAGE"
 NOTES_ENV = "HARNESS_SANDBOX_NOTES"
 VOLUME_ENV = "HARNESS_SANDBOX_VOLUME"
 NO_OUTPUT = "（程式執行完畢，沒有輸出。要看的結果請用 print 印出來）"
+# 和 src/web/protocol.ts 的 PRODUCED_MARKER 相同，兩邊要一起改。
+PRODUCED_MARKER = "[產生的檔案] "
+# 比對產生的檔案時最多看幾個項目、最多列出幾個檔案。
+_SCAN_LIMIT = 5000
+_PRODUCED_LIMIT = 20
 
 # 專案裡會被 harness 讀取或執行的位置；掛進容器的話，容器裡的程式可以
 # 改寫它們，進而在主機上執行程式。
@@ -254,14 +262,20 @@ class Sandbox:
     def tools(self) -> list[tools_lib.Tool]:
         """包成 agent 可以使用的工具（run_python）。"""
 
-        async def run_python(code: str) -> str:
+        async def run_python(context: datatypes.RunContext, code: str) -> str:
+            before = await asyncio.to_thread(snapshot, self.workspace)
             result = await self.run(code)
+            after = await asyncio.to_thread(snapshot, self.workspace)
+            # 失敗或逾時前寫出的檔案也列出來，部分結果常常還用得上。
+            produced = produced_lines(
+                self.workspace, context.workdir, before, after
+            )
             if result.timed_out:
                 raise tools_lib.ToolError(
                     f"執行超過 {self.timeout_seconds:g} 秒，已停止。請縮小資料"
-                    "範圍或改用更有效率的做法再試一次。"
+                    "範圍或改用更有效率的做法再試一次。" + produced
                 )
-            output = format_output(result)
+            output = format_output(result) + produced
             if result.exit_code != 0:
                 raise tools_lib.ToolError(
                     f"程式結束代碼 {result.exit_code}。\n{output}"
@@ -281,7 +295,8 @@ class Sandbox:
             "計算與分析資料。\n\n"
             f"- 程式在{network}的全新容器裡執行，工作目錄是 "
             f"{CONTAINER_WORKDIR}：要處理的檔案在這裡，產生的檔案（圖表、"
-            "CSV 等）也存在這裡。\n"
+            "CSV 等）也存在這裡。新增或修改的檔案會列在結果最後"
+            f"（{PRODUCED_MARKER.strip()} 開頭的行，路徑相對於專案）。\n"
             "- 每次執行都是全新的環境，變數不會保留；要沿用的結果請寫成"
             "檔案。\n"
             "- 用 print 輸出要看的結果，輸出太長會被截斷，所以只印需要的"
@@ -337,6 +352,89 @@ def format_output(result: Result) -> str:
     if result.stderr.strip():
         parts.append(f"--- stderr ---\n{result.stderr.rstrip()}")
     return "\n\n".join(parts) or NO_OUTPUT
+
+
+Snapshot = dict[str, tuple[int, int]]
+
+
+def snapshot(workspace: pathlib.Path) -> Snapshot:
+    """記下工作目錄裡每個一般檔案的修改時間與大小。
+
+    略過以 . 開頭的檔案與資料夾；最多看 5,000 個項目，避免資料夾很大
+    時拖慢每一次執行。
+
+    Args:
+        workspace: 沙盒的工作目錄。
+
+    Returns:
+        以相對於 workspace 的路徑（用 / 分隔）為鍵，值為
+        (修改時間的奈秒數, 位元組數)。
+    """
+    found: Snapshot = {}
+    pending = [(workspace, "")]
+    seen = 0
+    while pending and seen < _SCAN_LIMIT:
+        folder, prefix = pending.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for entry in entries:
+            seen += 1
+            if seen > _SCAN_LIMIT:
+                break
+            if entry.name.startswith(".") or entry.name == "__pycache__":
+                continue
+            relative = f"{prefix}{entry.name}"
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append((pathlib.Path(entry.path), f"{relative}/"))
+                elif entry.is_file(follow_symlinks=False):
+                    stat = entry.stat(follow_symlinks=False)
+                    found[relative] = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                continue
+    return found
+
+
+def produced_lines(
+    workspace: pathlib.Path,
+    root: pathlib.Path,
+    before: Snapshot,
+    after: Snapshot,
+) -> str:
+    """把這次執行新增或修改的檔案轉成要接在工具結果後面的文字。
+
+    Args:
+        workspace: 沙盒的工作目錄。
+        root: 專案根目錄；網頁只能提供這裡面的檔案，不在裡面的不列出。
+        before: 執行前的 snapshot。
+        after: 執行後的 snapshot。
+
+    Returns:
+        開頭空一行、每個檔案一行（PRODUCED_MARKER 加上相對於專案根目錄
+        的路徑），最新的排前面，最多 20 個；沒有產生檔案時為空字串。
+    """
+    changed = [
+        (stamp[0], name)
+        for name, stamp in after.items()
+        if before.get(name) != stamp
+    ]
+    if not changed:
+        return ""
+    try:
+        base = workspace.resolve().relative_to(root.resolve())
+    except ValueError:
+        return ""
+    changed.sort(reverse=True)
+    lines = [
+        f"{PRODUCED_MARKER}{(base / name).as_posix()}"
+        for _, name in changed[:_PRODUCED_LIMIT]
+    ]
+    omitted = len(changed) - _PRODUCED_LIMIT
+    if omitted > 0:
+        lines.append(f"（另外還有 {omitted} 個檔案沒有列出）")
+    return "\n\n" + "\n".join(lines)
 
 
 def from_config(root: pathlib.Path, config: Any) -> Sandbox | None:

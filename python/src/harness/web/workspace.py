@@ -18,6 +18,7 @@ import asyncio
 import dataclasses
 import datetime
 import functools
+import hashlib
 import json
 import os
 import pathlib
@@ -50,7 +51,27 @@ from harness.web import uploads as uploads_lib
 Event = dict[str, Any]
 Listener = Callable[[Event], None]
 
-DECISIONS = ("once", "always", "deny")
+DECISIONS = ("once", "session", "always", "deny")
+# 和 src/web/protocol.ts 的 INTERRUPTED_STOP_REASON 相同。
+INTERRUPTED_STOP_REASON = "interrupted"
+INTERRUPTED_NOTICE = "服務重新啟動，這一輪中斷了。按重試可以接著做。"
+# 重試被中斷的一輪時，替沒有結果的工具呼叫補上的說明（給模型看的）。
+_INTERRUPTED_RESULT = (
+    "服務重新啟動，這次工具呼叫沒有執行，也沒有結果。還需要的話請再呼叫一次。"
+)
+# 從網頁執行時接在 agent 指示後面的說明：使用者只有瀏覽器，碰不到伺服器。
+WEB_INSTRUCTIONS = "\n".join(
+    (
+        "## 網頁版說明",
+        "- 使用者在瀏覽器裡和你對話，打不開伺服器上的檔案或資料夾，也不能在"
+        "伺服器上執行指令。",
+        "- 你寫入或產生的檔案會以檔案卡片出現在對話裡，使用者可以預覽與下載；"
+        "提到檔案時用它相對於專案的路徑。",
+        "- 不要叫使用者去某個資料夾找檔案、執行指令，或在自己的電腦上啟動"
+        "伺服器。",
+        "- 引用資料裡的數字時，只用你的程式實際印出來的值。",
+    )
+)
 _UNTITLED = "新對話"
 _TITLE_LENGTH = 40
 _PREVIEW_LIMIT = 200_000
@@ -130,6 +151,10 @@ class _State:
     )
     # 產生每則回覆的模型，以 assistant 訊息的索引（字串）為鍵。
     reply_models: dict[str, str] = dataclasses.field(default_factory=dict)
+    # 使用者選了「這段對話都允許」的工具名稱。
+    session_tools: set[str] = dataclasses.field(default_factory=set)
+    # 使用者同意過的呼叫（工具名稱加參數的雜湊），一模一樣的呼叫不再問。
+    approved_calls: set[str] = dataclasses.field(default_factory=set)
 
 
 class Workspace:
@@ -153,6 +178,8 @@ class Workspace:
         )
         self._model_fn = model_fn or llm.complete
         self._states: dict[str, _State] = {}
+        # close() 停下的對話保留「執行中」的記錄，下次啟動時標成中斷。
+        self._closing = False
         self._listeners: set[Listener] = set()
         self._settings = config_lib.read_model_settings(project.root)
         self._overrides = config_lib.read_agent_overrides(project.root)
@@ -208,6 +235,7 @@ class Workspace:
                 "search": True,
                 "sessionOptions": True,
                 "feedback": True,
+                "sessionApproval": True,
             },
             "models": self._model_options(),
             "skills": [
@@ -307,6 +335,8 @@ class Workspace:
                     state.tools_agent = agent
                 self._save_meta(state)
         self._assert_idle(state)
+        if state.stop_reason == INTERRUPTED_STOP_REASON:
+            loop.close_dangling_tool_calls(state.session, _INTERRUPTED_RESULT)
         if state.title == _UNTITLED:
             first = pathlib.PurePosixPath(attachments[0]).name if notes else ""
             state.title = _title(text or first)
@@ -314,18 +344,21 @@ class Workspace:
         return self._summary(state)
 
     def retry(self, session_id: str) -> dict[str, Any]:
-        """不加新訊息，從對話紀錄的最後一則接著跑（上一輪出錯後重試）。
+        """不加新訊息，從對話紀錄的最後一則接著跑。
+
+        用在上一輪出錯，或伺服器重新啟動讓上一輪中斷之後。中斷時還沒有
+        結果的工具呼叫會先補上「沒有執行」的結果（不是拒絕），模型會
+        自己決定要不要再呼叫一次。
 
         Raises:
             WebError: 對話還在執行，或最後一則已經是 agent 的回覆。
         """
         state = self._require(session_id)
         self._assert_idle(state)
-        history = [
-            m for m in state.session.messages if not compaction_lib.is_record(m)
-        ]
-        if not history or history[-1].get("role") not in ("user", "tool"):
+        if not _resumable(state.session.messages):
             raise WebError(400, "這段對話沒有需要重試的內容")
+        if state.stop_reason == INTERRUPTED_STOP_REASON:
+            loop.close_dangling_tool_calls(state.session, _INTERRUPTED_RESULT)
         self._start(state, None)
         return self._summary(state)
 
@@ -512,8 +545,17 @@ class Workspace:
         pending = state.approvals.get(approval_id)
         if pending is None or pending.future.done():
             raise WebError(404, "這個確認已經處理過，或已經失效")
+        approval = pending.approval
         if decision == "always":
-            self._allow_always(pending.approval["tool"])
+            self._allow_always(approval["tool"])
+        elif decision == "session":
+            # 只記在這段對話的 .meta.json，不寫進 harness.yaml。
+            state.session_tools.add(approval["tool"])
+        if decision != "deny":
+            state.approved_calls.add(
+                _call_key(approval["tool"], approval["arguments"])
+            )
+            self._save_meta(state)
         self._emit(
             {
                 "type": "approval_resolved",
@@ -582,10 +624,10 @@ class Workspace:
         own = self._overrides.get(self.project.default_agent, {})
         before = {name: os.environ.get(name) for name in values}
         _set_environment(values)
-        result = await self.test_model(own.get("model") or model)
+        result, error = await self._try_model(own.get("model") or model)
         if not result["ok"]:
             _set_environment(before)
-            raise WebError(400, _explain_failure(result["message"]))
+            raise WebError(400, _explain_failure(result["message"], error))
         try:
             config_lib.save_model_settings(
                 self.project.root, model, self._settings["maxTurns"]
@@ -604,6 +646,13 @@ class Workspace:
         Args:
             model: 要測試的模型，預設是預設 agent 目前使用的模型。
         """
+        result, _ = await self._try_model(model)
+        return result
+
+    async def _try_model(
+        self, model: str | None = None
+    ) -> tuple[dict[str, Any], BaseException | None]:
+        """test_model 的本體，另外回傳失敗時的例外（逾時為 TimeoutError）。"""
         agent = self.project.agents[self.project.default_agent]
         model = model or agent.model or llm.default_model()
         messages = [{"role": "user", "content": "ping"}]
@@ -616,19 +665,22 @@ class Workspace:
 
         try:
             await asyncio.wait_for(first_item(), _MODEL_TEST_TIMEOUT)
-        except TimeoutError:
-            return {
-                "ok": False,
-                "model": model,
-                "message": f"{_MODEL_TEST_TIMEOUT} 秒內沒有回應",
-            }
+        except TimeoutError as error:
+            message = f"{_MODEL_TEST_TIMEOUT} 秒內沒有回應"
+            return {"ok": False, "model": model, "message": message}, error
         # 錯誤種類取決於模型供應商，全部轉成訊息顯示在設定頁。
         except Exception as error:  # noqa: BLE001
-            return {"ok": False, "model": model, "message": _describe(error)}
-        return {"ok": True, "model": model}
+            message = _describe(error)
+            return {"ok": False, "model": model, "message": message}, error
+        return {"ok": True, "model": model}, None
 
     async def close(self) -> None:
-        """停止所有正在執行的對話，並等它們收尾。"""
+        """停止所有正在執行的對話，並等它們收尾。
+
+        這些對話的 .meta.json 會留著「執行中」的記錄，下次啟動時顯示成
+        被中斷，可以按重試接著做（見 _mark_interrupted）。
+        """
+        self._closing = True
         tasks = [s.task for s in self._states.values() if s.task is not None]
         for task in tasks:
             task.cancel()
@@ -645,6 +697,8 @@ class Workspace:
         state.tool_errors = 0
         state.stop_reason = None
         state.partial = ""
+        # 記下「執行中」，伺服器在這一輪結束前停掉時，下次啟動才知道。
+        self._save_meta(state)
         self._emit(
             {"type": "run_start", "sessionId": state.session.id, "text": text}
         )
@@ -699,6 +753,8 @@ class Workspace:
             state.activity = None
             state.partial = ""
             state.ended_at = _now()
+            if not self._closing:
+                self._save_meta(state)
             self._touch(state)
 
     def _handle(self, state: _State, event: datatypes.Event) -> None:
@@ -852,6 +908,13 @@ class Workspace:
         async def approve(
             call: datatypes.ToolCall, target: tools_lib.Tool
         ) -> bool:
+            # 這段對話已經允許這個工具，或同意過一模一樣的呼叫：不再問。
+            key = _call_key(target.name, call.arguments)
+            if (
+                target.name in state.session_tools
+                or key in state.approved_calls
+            ):
+                return True
             future = asyncio.get_running_loop().create_future()
             approval = {
                 "id": uuid.uuid4().hex,
@@ -886,21 +949,30 @@ class Workspace:
         return approve
 
     def _preview(self, call: datatypes.ToolCall) -> dict[str, Any] | None:
-        """寫檔類的呼叫（參數有 path 與 content）附上檔案原本的內容。"""
-        path = call.arguments.get("path")
-        content = call.arguments.get("content")
-        if not isinstance(path, str) or not isinstance(content, str):
+        """寫檔類的呼叫附上檔案修改前後的內容。
+
+        參數有 path 與 content 的（write_file）直接用 content；有 path、
+        old_text 與 new_text 的（edit_file）照 edit_file 的規則算出修改
+        後的內容，改不了時（找不到原文或不只一處）不附，交給工具自己
+        回報錯誤。
+        """
+        arguments = call.arguments
+        path = arguments.get("path")
+        if not isinstance(path, str):
             return None
         context = datatypes.RunContext("", self.project.root, "")
-        try:
-            target = files.resolve_path(context, path)
-            before = None
-            if target.is_file():
-                text = target.read_text(encoding="utf-8", errors="replace")
-                before = text[:_PREVIEW_LIMIT]
-        except (tools_lib.ToolError, OSError):
-            return None
-        return {"path": path, "before": before, "after": content}
+        content = arguments.get("content")
+        if isinstance(content, str):
+            try:
+                target = files.resolve_path(context, path)
+                before = None
+                if target.is_file():
+                    text = target.read_text(encoding="utf-8", errors="replace")
+                    before = text[:_PREVIEW_LIMIT]
+            except (tools_lib.ToolError, OSError, ValueError):
+                return None
+            return {"path": path, "before": before, "after": content}
+        return _edit_preview(context, path, arguments)
 
     def _allow_always(self, tool_name: str) -> None:
         current = self._permission_settings()
@@ -1179,9 +1251,13 @@ class Workspace:
                 f"使用者指定這段對話要使用這些技能：{names}。處理工作前，"
                 f"還沒載入的先用 {skills_lib.LOAD_TOOL} 載入，照著它的指示做。"
             )
-            copy.instructions = "\n\n".join(
-                part for part in (agent.instructions, hint) if part
-            )
+        else:
+            hint = ""
+        copy.instructions = "\n\n".join(
+            part
+            for part in (agent.instructions, hint, WEB_INSTRUCTIONS)
+            if part
+        )
         copy.handoffs = [
             self._with_options(state, target, model, applied)
             for target in agent.handoffs
@@ -1220,10 +1296,28 @@ class Workspace:
             path.stat().st_mtime * 1000,
         )
         _restore_meta(state, meta)
+        self._mark_interrupted(state, meta)
         return state
 
+    def _mark_interrupted(self, state: _State, meta: dict[str, Any]) -> None:
+        """伺服器在這段對話執行到一半時停掉的話，把它標成被中斷。
+
+        執行中的對話在 .meta.json 有 running 記錄（伺服器正常停止時
+        也保留）；更早的版本沒有這個記錄，就看紀錄裡有沒有還沒有結果的
+        工具呼叫。只在還有東西可以接著做時才標記。
+        """
+        messages = state.session.messages
+        running = meta.get("running") is True
+        if not running and not loop.dangling_tool_calls(messages):
+            return
+        if not _resumable(messages):
+            return
+        state.status = "stopped"
+        state.stop_reason = INTERRUPTED_STOP_REASON
+        state.notice = INTERRUPTED_NOTICE
+
     def _save_meta(self, state: _State) -> None:
-        """把起始 agent、改過的名稱、選項、評價與回覆的模型寫進 .meta.json。"""
+        """把起始 agent、名稱、選項、評價、回覆的模型與允許過的工具存檔。"""
         meta: dict[str, Any] = {"agent": state.agent}
         if state.custom_title is not None:
             meta["title"] = state.custom_title
@@ -1235,6 +1329,15 @@ class Workspace:
             meta["feedback"] = state.feedback
         if state.reply_models:
             meta["replyModels"] = state.reply_models
+        if state.session_tools:
+            meta["sessionTools"] = sorted(state.session_tools)
+        if state.approved_calls:
+            meta["approvedCalls"] = sorted(state.approved_calls)
+        if (
+            state.status in ("running", "waiting")
+            or state.stop_reason == INTERRUPTED_STOP_REASON
+        ):
+            meta["running"] = True
         _write_meta(self.project, state.session.id, meta)
 
     def _title(self, state: _State) -> str:
@@ -1366,14 +1469,40 @@ def _checked_url(url: str) -> str:
     return url
 
 
-def _explain_failure(message: str) -> str:
-    """連線測試失敗時，在原始錯誤前面加上一句看得懂的說明。"""
+# 依例外的類別名稱分類連線失敗。litellm 的例外繼承 openai 的同名類別，
+# 所以比對整個繼承鏈；只比對完整的類別名稱，ModuleNotFoundError 之類
+# 名稱裡剛好有 NotFoundError 的例外不會被誤判。
+_AUTH_ERRORS = frozenset({"AuthenticationError", "PermissionDeniedError"})
+_NOT_FOUND_ERRORS = frozenset({"NotFoundError"})
+_CONNECTION_ERRORS = frozenset(
+    {
+        "APIConnectionError",
+        "APITimeoutError",
+        "Timeout",
+        "TimeoutError",
+        "ConnectionError",
+    }
+)
+
+
+def _explain_failure(message: str, error: BaseException | None) -> str:
+    """連線測試失敗時，在原始錯誤前面加上一句看得懂的說明。
+
+    Args:
+        message: 原始的錯誤訊息，原樣附在說明後面。
+        error: 失敗時的例外；依它的類別決定說明。
+    """
+    names = (
+        {item.__name__ for item in type(error).__mro__}
+        if error is not None
+        else set()
+    )
     hint = "連不上模型"
-    if "AuthenticationError" in message:
+    if names & _AUTH_ERRORS:
         hint = "金鑰不正確，或這把金鑰不能使用這個模型"
-    elif "NotFoundError" in message:
+    elif names & _NOT_FOUND_ERRORS:
         hint = "找不到這個模型，請確認模型名稱"
-    elif "APIConnectionError" in message or "Timeout" in message:
+    elif names & _CONNECTION_ERRORS:
         hint = "連不到模型的伺服器，請確認網址與網路（需要 proxy 時要先設定）"
     return f"{hint}。詳細訊息：{message}"
 
@@ -1410,7 +1539,9 @@ def _read_meta(project: project_lib.Project, session_id: str) -> dict[str, Any]:
 
     內容：agent（起始 agent）、title（使用者改過的名稱）、options、
     toolsAgent（options.tools 是依哪個 agent 檢查的）、feedback、
-    replyModels（產生每則回覆的模型），除了 agent 都可能沒有。
+    replyModels（產生每則回覆的模型）、sessionTools（這段對話都允許的
+    工具）、approvedCalls（同意過的呼叫的雜湊）、running（這一輪還沒
+    結束），除了 agent 都可能沒有。
     """
     try:
         meta = json.loads(_meta_path(project, session_id).read_text("utf-8"))
@@ -1468,6 +1599,13 @@ def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
             for key, value in reply_models.items()
             if isinstance(key, str) and isinstance(value, str)
         }
+    for key, field in (
+        ("sessionTools", "session_tools"),
+        ("approvedCalls", "approved_calls"),
+    ):
+        value = meta.get(key)
+        if _is_string_list(value):
+            setattr(state, field, set(value))
 
 
 def _limit_tools(
@@ -1478,6 +1616,64 @@ def _limit_tools(
         return skill
     tools = [item for item in skill.tools if item.name in allowed]
     return dataclasses.replace(skill, tools=tools)
+
+
+def _call_key(tool: str, arguments: dict[str, Any]) -> str:
+    """工具名稱加參數的雜湊；參數相同（不論鍵的順序）時結果相同。"""
+    canonical = json.dumps(
+        [tool, arguments], ensure_ascii=False, sort_keys=True, default=str
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _resumable(messages: list[datatypes.Message]) -> bool:
+    """對話是不是停在可以不加新訊息接著跑的地方。
+
+    最後一則是使用者訊息或工具結果，或還有沒有結果的工具呼叫（主迴圈
+    會先補上結果再接著跑）。
+    """
+    if loop.dangling_tool_calls(messages):
+        return True
+    history = [m for m in messages if not compaction_lib.is_record(m)]
+    return bool(history) and history[-1].get("role") in ("user", "tool")
+
+
+def _edit_preview(
+    context: datatypes.RunContext, path: str, arguments: dict[str, Any]
+) -> dict[str, Any] | None:
+    """edit_file 的預覽：照 builtin.files.edit_file 的規則算出修改後的內容。
+
+    Returns:
+        {"path", "before", "after"}；參數不是 edit_file 的格式，或這次
+        修改不會成功時為 None。
+    """
+    old_text = arguments.get("old_text")
+    new_text = arguments.get("new_text")
+    replace_all = arguments.get("replace_all", False)
+    if (
+        not isinstance(old_text, str)
+        or not isinstance(new_text, str)
+        or not isinstance(replace_all, bool)
+        or not old_text
+        or old_text == new_text
+    ):
+        return None
+    try:
+        target = files.resolve_path(context, path)
+        # 和 edit_file 一樣保留原本的換行字元。
+        with target.open(encoding="utf-8", newline="") as file:
+            text = file.read()
+    except (tools_lib.ToolError, OSError, ValueError):
+        return None
+    count = text.count(old_text)
+    if count == 0 or (count > 1 and not replace_all):
+        return None
+    after = text.replace(old_text, new_text, -1 if replace_all else 1)
+    return {
+        "path": path,
+        "before": text[:_PREVIEW_LIMIT],
+        "after": after[:_PREVIEW_LIMIT],
+    }
 
 
 def _default_options() -> dict[str, Any]:

@@ -38,8 +38,8 @@ services:
       HARNESS_SANDBOX_IMAGE: harness-sandbox
       HARNESS_SANDBOX_VOLUME: harness-data
       HARNESS_SANDBOX_NOTES: >-
-        已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、matplotlib
-        （圖表可以直接使用中文）。
+        已安裝 pandas、numpy、openpyxl、pdfplumber、python-docx、python-pptx
+        （製作簡報 pptx）、matplotlib（圖表可以直接使用中文）。
     volumes:
       # 專案、對話紀錄、上傳的檔案與金鑰都在這個 volume 裡。
       - harness-data:/assistant
