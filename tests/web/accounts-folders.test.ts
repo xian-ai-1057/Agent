@@ -24,6 +24,7 @@ import {
   defaultFolderId,
   folderLabel,
   sortFolders,
+  withoutFolder,
 } from "../../web/src/folders.ts";
 
 const FOLDERS: FolderInfo[] = [
@@ -75,6 +76,11 @@ describe("loginErrorMessage", () => {
   it("其他錯誤顯示伺服器的說明", () => {
     expect(loginErrorMessage(new ApiError(429, "嘗試太多次"))).toBe(
       "嘗試太多次",
+    );
+    // 403 是來源檢查失敗（例如反向代理設定不對），不是密碼錯。
+    expect(loginErrorMessage(new ApiError(403, "來源不符"))).toBe("來源不符");
+    expect(loginErrorMessage(new ApiError(500, "伺服器出錯"))).toBe(
+      "伺服器出錯",
     );
     expect(loginErrorMessage({})).toBe("登入失敗，請稍後再試");
   });
@@ -181,6 +187,31 @@ describe("工作資料夾", () => {
     expect(sortFolders(undefined)).toEqual([]);
   });
 
+  it("舊資料（專案資料夾）排最後", () => {
+    const legacy: FolderInfo = {
+      id: "legacy",
+      name: "舊資料（專案資料夾）",
+      kind: "shared",
+      writable: true,
+    };
+    expect(sortFolders([legacy, ...FOLDERS]).map((f) => f.id)).toEqual([
+      "private",
+      "shared:docs",
+      "shared:team",
+      "legacy",
+    ]);
+    expect(defaultFolderId([legacy, ...FOLDERS])).toBe("private");
+    expect(folderLabel([legacy], "legacy")).toBe("舊資料（專案資料夾）");
+    expect(activeFolder(accounts("admin"), "legacy")).toBe("legacy");
+  });
+
+  it("對話裡改選項時不送出資料夾", () => {
+    expect(withoutFolder({ model: "m", folder: "shared:team" })).toEqual({
+      model: "m",
+    });
+    expect(withoutFolder({ skills: [] })).toEqual({ skills: [] });
+  });
+
   it("沒有選時用我的檔案", () => {
     expect(defaultFolderId(FOLDERS)).toBe("private");
     expect(defaultFolderId(undefined)).toBe("private");
@@ -188,6 +219,10 @@ describe("工作資料夾", () => {
 
   it("伺服器不支援時不帶資料夾", () => {
     expect(activeFolder(project(), "shared:docs")).toBeUndefined();
+    // 本機模式：有帳號功能但 folders 是 false，對話在專案根目錄跑。
+    expect(
+      activeFolder(project({ accounts: true, folders: false }), "private"),
+    ).toBeUndefined();
     expect(activeFolder(accounts("member"), null)).toBe("private");
     expect(activeFolder(accounts("member"), "shared:team")).toBe("shared:team");
   });

@@ -25,10 +25,14 @@ export function isUnauthorized(error: unknown): boolean {
   );
 }
 
-/** 登入失敗時顯示的文字：帳號密碼不對一律同一句，不透露是哪一個錯。 */
+/**
+ * 登入失敗時顯示的文字：帳號密碼不對（400、401）一律同一句，不透露是
+ * 哪一個錯。其他狀況（403 來源檢查失敗、429 失敗太多次…）顯示伺服器
+ * 的說明，管理者才知道問題在哪。
+ */
 export function loginErrorMessage(error: unknown): string {
   const status = (error as { status?: unknown } | null)?.status;
-  if (status === 400 || status === 401 || status === 403) {
+  if (status === 400 || status === 401) {
     return "帳號或密碼不正確";
   }
   const message = (error as { message?: unknown } | null)?.message;

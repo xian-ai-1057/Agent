@@ -2,7 +2,8 @@
  * 新對話：打招呼、輸入框，以及幾個建議。
  *
  * 送出後先在畫面上顯示訊息與「思考中」，建立好對話再切到對話頁。
- * 第一次使用、還沒連接模型時，改成顯示連線設定。
+ * 第一次使用、還沒連接模型時，改成顯示連線設定；成員不能設定模型，
+ * 只顯示請管理者設定的說明。
  *
  * 伺服器支援工作資料夾時，輸入框可以選資料夾：上傳的檔案放進那個
  * 資料夾，建立對話時一起送出（SessionOptions.folder）。
@@ -11,6 +12,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { SessionOptions } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
+import { isMember } from "../auth.ts";
 import { activeFolder, foldersEnabled } from "../folders.ts";
 import { navigate } from "../router.ts";
 import { upsertSummary, useStore } from "../store.ts";
@@ -27,7 +29,7 @@ import {
 } from "./chat/options.ts";
 import { handOff } from "./chat/pending.ts";
 import { Thinking } from "./chat/Thinking.tsx";
-import { ChevronDownIcon } from "./Icons.tsx";
+import { AlertIcon, ChevronDownIcon } from "./Icons.tsx";
 
 /** 輸入框底下的建議：點了把文字填進輸入框。 */
 const SUGGESTIONS = [
@@ -65,6 +67,26 @@ export function NewChat() {
   if (!agent) return <main className="main" />;
 
   const { connection } = project.model;
+  if (connection && !connection.ready && isMember(project)) {
+    return (
+      <main className="main">
+        <div className="new-chat ch-new">
+          <div className="new-chat-inner ch-new-inner anim-in">
+            <section className="error-card ch-interrupted" role="status">
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <span className="ch-error-icon">
+                  <AlertIcon />
+                </span>
+                <p className="body" style={{ margin: 0 }}>
+                  還沒有連接模型，請管理者到設定 → 模型完成設定。
+                </p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+    );
+  }
   if (connection && !connection.ready) {
     return (
       <main className="main">
@@ -115,7 +137,7 @@ export function NewChat() {
         sessionOptions,
       );
       upsertSummary(summary);
-      handOff(summary.id, { text, attachments, base: 0 });
+      handOff(summary.id, { text, attachments, base: 0, folder });
       navigate(`/s/${summary.id}`);
       return true;
     } catch (failure) {

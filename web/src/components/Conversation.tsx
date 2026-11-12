@@ -1,8 +1,8 @@
 /**
  * 一段對話：內容、權限確認、輸入框，以及右側的檔案面板。
  *
- * 伺服器支援工作資料夾時，標題底下顯示資料夾名稱，輸入框可以換資料
- * 夾（下一則訊息開始使用）；這段對話裡讀取的檔案都在這個資料夾裡。
+ * 伺服器支援工作資料夾時，標題與輸入框顯示資料夾名稱。資料夾在開始
+ * 對話前選定，之後不能換；這段對話裡讀取的檔案都在這個資料夾裡。
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -15,7 +15,7 @@ import {
 } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
 import { isMember } from "../auth.ts";
-import { activeFolder, folderLabel } from "../folders.ts";
+import { activeFolder, folderLabel, withoutFolder } from "../folders.ts";
 import { isBusy, MODE_LABELS, STOP_NOTICES } from "../format.ts";
 import {
   loadSession,
@@ -62,7 +62,6 @@ import {
   ShieldIcon,
 } from "./Icons.tsx";
 import { Link } from "./Sidebar.tsx";
-import { showToast } from "./shell/toast.tsx";
 import { AttachmentChip, TurnView } from "./Transcript.tsx";
 
 type Pending = PendingMessage & { sent: boolean };
@@ -83,6 +82,8 @@ export function Conversation({ id }: { id: string }) {
     const handed = peekHandoff(id);
     return handed ? { ...handed, sent: true } : undefined;
   });
+  // 新對話頁選的資料夾，對話內容讀回來之前先用它。
+  const [handedFolder] = useState(() => peekHandoff(id)?.folder);
   const [sendError, setSendError] = useState<string>();
   const [optionsOverride, setOptionsOverride] = useState<SessionOptions>();
   const [optionsError, setOptionsError] = useState<string>();
@@ -180,7 +181,8 @@ export function Conversation({ id }: { id: string }) {
       skills: [],
     };
   const currentModel = effectiveModel(optionsValue, agentInfo?.model, models);
-  const folder = activeFolder(project, optionsValue.folder);
+  // 資料夾用伺服器記下的（開始對話後就不會變），不看暫時改的選項。
+  const folder = activeFolder(project, detail?.options?.folder ?? handedFolder);
 
   // 每一輪開始時記下用的模型，顯示在回覆底下。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 只在開始跑的時候記
@@ -238,13 +240,10 @@ export function Conversation({ id }: { id: string }) {
     await api.setMode(id, mode).catch(() => undefined);
   };
 
-  const changeOptions = (change: Partial<SessionOptions>) => {
+  const changeOptions = (input: Partial<SessionOptions>) => {
+    // 資料夾在開始對話前就選定了，這裡不會改。
+    const change = withoutFolder(input);
     const previous = optionsValue;
-    if (change.folder) {
-      showToast(
-        `已換成「${folderLabel(project?.folders, change.folder)}」，下一則訊息開始使用`,
-      );
-    }
     setOptionsOverride({ ...optionsValue, ...change });
     setOptionsError(undefined);
     api.setOptions(id, change).then(
@@ -384,7 +383,11 @@ export function Conversation({ id }: { id: string }) {
             )}
             {showThinking && <Thinking />}
             {summary.status === "error" && !pendingShown && (
-              <ErrorCard id={id} message={summary.error ?? "未知的錯誤"} />
+              <ErrorCard
+                id={id}
+                message={summary.error ?? "未知的錯誤"}
+                canOpenSettings={!member}
+              />
             )}
             {interrupted && !pendingShown && (
               <ErrorCard
@@ -451,8 +454,6 @@ export function Conversation({ id }: { id: string }) {
                   ? {
                       folders: project?.folders ?? [],
                       value: folder,
-                      onChange: (next) => changeOptions({ folder: next }),
-                      nextTurn: true,
                     }
                   : undefined
               }
@@ -566,10 +567,13 @@ function ErrorCard({
   id,
   message,
   tone = "error",
+  canOpenSettings = false,
 }: {
   id: string;
   message: string;
   tone?: "error" | "interrupted";
+  /** 可以打開模型設定（成員看不到那一頁）。 */
+  canOpenSettings?: boolean;
 }) {
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string>();
@@ -618,7 +622,7 @@ function ErrorCard({
           <RetryIcon />
           重試
         </button>
-        {modelProblem && (
+        {modelProblem && canOpenSettings && (
           <Link to="/settings/model" className="btn btn-outline">
             開啟模型設定
           </Link>

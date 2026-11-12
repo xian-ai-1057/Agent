@@ -6,7 +6,11 @@
  * undefined，網址就不帶 folder 參數，和以前一樣。
  */
 
-import type { FolderInfo, ProjectInfo } from "../../src/web/protocol.ts";
+import type {
+  FolderInfo,
+  ProjectInfo,
+  SessionOptions,
+} from "../../src/web/protocol.ts";
 
 /** 每個人自己的「我的檔案」的 id（伺服器沒有列出資料夾時用）。 */
 export const PRIVATE_FOLDER = "private";
@@ -15,13 +19,32 @@ export function foldersEnabled(project: ProjectInfo | undefined): boolean {
   return project?.features?.folders === true;
 }
 
-/** 選單裡的順序：我的檔案在最前面，其他照伺服器給的順序。 */
+/** 搬過來的舊對話所在的資料夾（舊資料（專案資料夾））的 id。 */
+export const LEGACY_FOLDER = "legacy";
+
+/**
+ * 選單裡的順序：我的檔案在最前面，舊資料在最後，其他照伺服器給的
+ * 順序。
+ */
 export function sortFolders(folders: FolderInfo[] | undefined): FolderInfo[] {
   const list = folders ?? [];
+  const legacy = (folder: FolderInfo) => folder.id === LEGACY_FOLDER;
   return [
-    ...list.filter((folder) => folder.kind === "private"),
-    ...list.filter((folder) => folder.kind !== "private"),
+    ...list.filter((folder) => folder.kind === "private" && !legacy(folder)),
+    ...list.filter((folder) => folder.kind !== "private" && !legacy(folder)),
+    ...list.filter(legacy),
   ];
+}
+
+/**
+ * 對話裡改選項時要送出的內容：拿掉 folder。資料夾在開始對話前選定，
+ * 對話開始後伺服器也不接受更改。
+ */
+export function withoutFolder(
+  change: Partial<SessionOptions>,
+): Partial<Omit<SessionOptions, "folder">> {
+  const { folder: _folder, ...rest } = change;
+  return rest;
 }
 
 /** 沒有選資料夾時用的：自己的「我的檔案」。 */

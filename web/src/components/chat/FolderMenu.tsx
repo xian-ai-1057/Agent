@@ -1,6 +1,8 @@
 /**
  * 輸入框左下角的工作資料夾選單（Python 版，features.folders）：列出
  * 我的檔案與管理者開放的共用資料夾，唯讀的加上標籤。
+ *
+ * 資料夾只能在開始對話前選；對話裡只顯示名稱（fixed），不能換。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -13,10 +15,12 @@ export interface FolderChoice {
   folders: FolderInfo[];
   /** 目前的資料夾 id。 */
   value: string;
-  onChange: (id: string) => void;
-  /** 在對話裡換資料夾要等下一則訊息才生效，選單裡要說明。 */
-  nextTurn?: boolean;
+  /** 沒有提供時（對話已經開始）只顯示名稱，不能換。 */
+  onChange?: (id: string) => void;
 }
+
+/** 對話裡資料夾名稱的說明。 */
+export const FOLDER_FIXED_HINT = "資料夾在開始對話前選定";
 
 export function FolderMenu({
   choice,
@@ -36,11 +40,27 @@ export function FolderMenu({
   const current = findFolder(list, choice.value);
   const label = folderLabel(list, choice.value);
   const readOnly = current?.writable === false;
+  const onChange = choice.onChange;
   const choose = (id: string) => {
-    if (id !== choice.value) choice.onChange(id);
+    if (id !== choice.value) onChange?.(id);
     focusTrigger(anchor);
     close();
   };
+
+  if (!onChange) {
+    return (
+      <div className="ch-anchor ch-folder-anchor">
+        <span
+          className="ch-model-btn ch-folder-btn ch-folder-fixed"
+          title={`工作資料夾：${label}（${FOLDER_FIXED_HINT}）`}
+        >
+          <FolderIcon size={15} />
+          <span className="ch-model-name">{label}</span>
+          {readOnly && <span className="ch-tag ch-hide-narrow">唯讀</span>}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="ch-anchor ch-folder-anchor" ref={anchor}>
@@ -93,8 +113,7 @@ export function FolderMenu({
           })}
         </div>
         <div className="ch-pop-note">
-          agent 只能讀寫這個資料夾裡的檔案
-          {choice.nextTurn && "。換了之後，下一則訊息開始使用"}
+          agent 只能讀寫這個資料夾裡的檔案。開始對話後就不能換了
         </div>
       </Popover>
     </div>

@@ -190,18 +190,21 @@ export function Members() {
 
       {menu && menuMember && (
         <FloatingMenu anchor={menu.anchor} label="成員選項" onClose={closeMenu}>
-          <button
-            type="button"
-            role="menuitem"
-            className="menu-item"
-            onClick={() => {
-              closeMenu();
-              setPending({ kind: "reset", member: menuMember });
-            }}
-          >
-            <KeyIcon size={15} />
-            重設密碼
-          </button>
+          {/* 自己的密碼到使用者選單的「修改密碼」改。 */}
+          {menuMember.id !== me?.id && (
+            <button
+              type="button"
+              role="menuitem"
+              className="menu-item"
+              onClick={() => {
+                closeMenu();
+                setPending({ kind: "reset", member: menuMember });
+              }}
+            >
+              <KeyIcon size={15} />
+              重設密碼
+            </button>
+          )}
           <button
             type="button"
             role="menuitem"

@@ -223,6 +223,17 @@
   border-radius: var(--r-md, 8px);
 }
 
+/* 外部網站的圖片不載入，顯示成連結。 */
+.md .ch-ext-img {
+  display: inline-flex;
+  align-items: center;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-md, 8px);
+  padding: 2px 8px;
+  font-size: 13px;
+  text-decoration: none;
+}
+
 /* ── 對話內容 ─────────────────────────────────────── */
 
 /* 新訊息淡入並上升一點點（比共用的 anim-in 短）。 */
@@ -1925,6 +1936,13 @@
 
 .ch-folder-pop {
   width: 300px;
+}
+
+/* 對話裡的資料夾只顯示，不能點。 */
+.ch-folder-fixed,
+.ch-folder-fixed:hover {
+  background: transparent;
+  cursor: default;
 }
 
 /* 窄畫面：選單改以整個輸入框為基準靠左對齊，不會超出畫面右邊。 */
