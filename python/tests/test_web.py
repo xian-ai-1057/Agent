@@ -790,6 +790,37 @@ class TestServerDeployment:
         page = await c.get("/")
         assert page.status != 401
 
+    async def test_local_mode_needs_the_launch_key(self, client):
+        # 沒有加轉送標頭的反向代理或 ssh 轉送，看起來和本機的瀏覽器一樣：
+        # 不必登入的網頁版要帶啟動時產生的鑰匙。
+        c = await client(local_key="launch-key")
+        cookie = f"harness_local_{c.port}"
+
+        refused = await c.get("/api/project")
+        page = await c.get("/")
+        wrong = await c.get("/?key=nope", allow_redirects=False)
+        opened = await c.get("/?key=launch-key&x=1", allow_redirects=False)
+        key = opened.cookies[cookie]
+        headers = {"Cookie": f"{cookie}={key.value}"}
+        allowed = await c.get("/api/project", headers=headers)
+        c.session.cookie_jar.clear()
+        # 鑰匙只在打開頁面時換成 cookie，API 不收網址上的鑰匙。
+        api_key = await c.get("/api/project?key=launch-key")
+
+        assert refused.status == 401
+        assert await refused.json() == {
+            "error": server_lib._LOCAL_KEY_NEEDED,  # noqa: SLF001
+            "code": "local_key_required",
+        }
+        assert page.status == 401
+        assert wrong.status == 401
+        assert opened.status == 302
+        assert opened.headers["Location"] == "/?x=1"
+        assert key["httponly"]
+        assert key["samesite"] == "Strict"
+        assert allowed.status == 200
+        assert api_key.status == 401
+
     async def test_legacy_password_becomes_the_admin_password(self, client):
         c = await client(password="s3cret")
 

@@ -14,7 +14,7 @@ import { MenuIcon, PenIcon } from "./components/Icons.tsx";
 import { NewChat } from "./components/NewChat.tsx";
 import { Settings } from "./components/Settings.tsx";
 import { Link, Sidebar } from "./components/Sidebar.tsx";
-import { Login } from "./components/shell/Login.tsx";
+import { LocalKeyNotice, Login } from "./components/shell/Login.tsx";
 import { SearchDialog } from "./components/shell/SearchDialog.tsx";
 import { Toaster } from "./components/shell/toast.tsx";
 import { WorkView } from "./components/WorkView.tsx";
@@ -32,12 +32,13 @@ function pageTitle(route: Route, state: State): string {
 
 export function App() {
   const needsLogin = useStore((s) => s.needsLogin);
+  const needsLocalKey = useStore((s) => s.needsLocalKey === true);
   // 要登入時不連 SSE；登入後重新連上，伺服器的 hello 會讓畫面重新讀取。
   useEffect(() => (needsLogin ? undefined : connect()), [needsLogin]);
   if (needsLogin) {
     return (
       <>
-        <Login />
+        {needsLocalKey ? <LocalKeyNotice /> : <Login />}
         <Toaster />
       </>
     );

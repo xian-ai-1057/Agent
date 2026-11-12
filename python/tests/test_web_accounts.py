@@ -20,8 +20,10 @@ from aiohttp.test_utils import TestServer
 from aiohttp.test_utils import make_mocked_request
 
 from harness import cli
+from harness import permissions as permissions_lib
 from harness import project as project_lib
 from harness import sandbox as sandbox_lib
+from harness import tools as tools_lib
 from harness.builtin import shell
 from harness.builtin import web as web_tools
 from harness.web import accounts as accounts_lib
@@ -327,42 +329,60 @@ class TestAccountStore:
         assert throttle.reserve(username, address) == 0
         throttle.release(username, address, False)
 
-    def test_throttle_backs_off_per_username_from_any_ip(self):
+    def test_throttle_backs_off_per_username_and_ip(self):
         now = [0.0]
         throttle = accounts_lib.LoginThrottle(clock=lambda: now[0])
 
-        for index in range(accounts_lib.MAX_FAILURES):
-            self._fail(throttle, "Alice", f"10.0.0.{index}")
+        for _ in range(accounts_lib.MAX_FAILURES):
+            self._fail(throttle, "Alice", "6.6.6.6")
 
-        # 換 IP 也一樣要等；其他帳號名稱不受影響。
-        first = throttle.reserve("alice", "5.6.7.8")
+        # 同一個 IP 要等；其他 IP 上真正的使用者、其他帳號名稱不受影響。
+        first = throttle.reserve("alice", "6.6.6.6")
         assert first == accounts_lib.BACKOFF_SECONDS
-        assert throttle.reserve("bob", "1.2.3.4") == 0
-        throttle.release("bob", "1.2.3.4", True)
+        assert throttle.reserve("alice", "1.2.3.4") == 0
+        throttle.release("alice", "1.2.3.4", True)
+        assert throttle.reserve("bob", "6.6.6.6") == 0
+        throttle.release("bob", "6.6.6.6", True)
         now[0] += first
-        self._fail(throttle, "alice", "5.6.7.8")
-        # 每次失敗等待加倍，但有上限：真正的使用者不會被擋太久。
-        assert throttle.reserve("alice", "1.1.1.1") == 2 * first
+        self._fail(throttle, "alice", "6.6.6.6")
+        # 每次失敗等待加倍，但有上限。
+        assert throttle.reserve("alice", "6.6.6.6") == 2 * first
         for _ in range(20):
             now[0] += accounts_lib.MAX_BACKOFF_SECONDS
-            self._fail(throttle, "alice", "1.1.1.1")
+            self._fail(throttle, "alice", "6.6.6.6")
         assert (
-            throttle.reserve("alice", "1.1.1.1")
+            throttle.reserve("alice", "6.6.6.6")
             == accounts_lib.MAX_BACKOFF_SECONDS
         )
         now[0] += accounts_lib.MAX_BACKOFF_SECONDS
-        assert throttle.reserve("alice", "1.1.1.1") == 0
-        throttle.release("alice", "1.1.1.1", True)
+        assert throttle.reserve("alice", "6.6.6.6") == 0
+        throttle.release("alice", "6.6.6.6", True)
         # 成功登入後歸零。
-        assert throttle.reserve("alice", "1.1.1.1") == 0
+        assert throttle.reserve("alice", "6.6.6.6") == 0
+
+    def test_many_ips_guessing_one_username_are_capped(self, monkeypatch):
+        monkeypatch.setattr(accounts_lib, "MAX_NAME_FAILURES", 12)
+        now = [0.0]
+        throttle = accounts_lib.LoginThrottle(clock=lambda: now[0])
+
+        for index in range(12):
+            self._fail(throttle, "alice", f"10.0.0.{index}")
+
+        assert throttle.reserve("alice", "10.9.9.9") > 0
+        assert throttle.reserve("bob", "10.9.9.9") == 0
+        now[0] += accounts_lib.IP_WINDOW_SECONDS
+        assert throttle.reserve("alice", "10.9.9.9") == 0
 
     def test_attempts_in_flight_count_before_they_finish(self):
         throttle = accounts_lib.LoginThrottle(clock=lambda: 0.0)
 
-        reserved = [throttle.reserve("alice", f"10.0.0.{i}") for i in range(20)]
+        reserved = [throttle.reserve("alice", "10.0.0.1") for _ in range(20)]
+        # 同一個 IP 同時試很多帳號名稱，也只有剩下的次數會被檢查。
+        spray = [throttle.reserve(f"u{i}", "10.0.0.2") for i in range(200)]
 
         assert reserved.count(0) == accounts_lib.MAX_FAILURES
         assert all(wait > 0 for wait in reserved[accounts_lib.MAX_FAILURES :])
+        assert spray.count(0) == accounts_lib.MAX_IP_FAILURES
 
     def test_one_ip_cannot_spray_many_usernames(self):
         now = [0.0]
@@ -1552,6 +1572,45 @@ class TestMemberCommands:
         assert "run_command" in names(s.model.requests[1])
         assert refused == 400
 
+    async def test_admin_commands_in_shared_folders_use_the_sandbox(
+        self, site, monkeypatch
+    ):
+        # 成員可以在共用資料夾放檔案，管理者在那裡的指令也不在伺服器上跑。
+        runs = []
+
+        async def fake_execute(self, argv, stdin, workdir, timeout):
+            runs.append(self.workspace)
+            return sandbox_lib.Result(0, "ok\n", "")
+
+        async def never(*args, **kwargs):
+            raise AssertionError("共用資料夾的指令不能在伺服器上執行")
+
+        monkeypatch.setattr(sandbox_lib.Sandbox, "_execute", fake_execute)
+        monkeypatch.setattr(shell, "execute", never)
+        call = ("run_command", {"command": "git status"})
+        s = await site(
+            [conftest.tool_response(call), conftest.text_response("好")],
+            extra="sandbox: true\n",
+            agent=SANDBOX_AGENT,
+        )
+        boss = await s.login("boss", password_of("boss"))
+        await boss.listen()
+
+        _, created = await boss.api(
+            "POST",
+            "/sessions",
+            {"text": "跑", "options": {"folder": "shared:shared"}},
+        )
+        approval = (await boss.wait_for("approval"))["approval"]
+        await boss.api(
+            "POST",
+            f"/sessions/{created['id']}/approvals/{approval['id']}",
+            {"decision": "once"},
+        )
+        await boss.wait_idle(created["id"])
+
+        assert runs == [(s.root / "shared").resolve()]
+
 
 class TestWorkspacesConfig:
     """harness.yaml 的 workspaces。"""
@@ -1830,25 +1889,25 @@ class TestHardening:
         assert calls == []
         assert throttle._names == {}  # noqa: SLF001
 
-    async def test_lockout_follows_the_username_through_a_trusted_proxy(
+    async def test_lockout_uses_the_real_client_behind_a_trusted_proxy(
         self, site
     ):
         s = await site(trusted_proxies=["127.0.0.1"])
         wrong = {"username": "alice", "password": "wrong-password"}
 
         statuses = []
-        for index in range(accounts_lib.MAX_FAILURES + 1):
-            # 每次都換一個（偽造的）IP：鎖定跟著帳號名稱，換 IP 沒有用。
+        for _ in range(accounts_lib.MAX_FAILURES + 1):
             response = await s.client.post(
                 "/api/auth/login",
                 json=wrong,
-                headers={"X-Forwarded-For": f"198.51.100.{index}"},
+                headers={"X-Forwarded-For": "198.51.100.3"},
             )
             statuses.append(response.status)
+        # 經過代理伺服器時看的是真正的來源：別的地方的使用者不會被一起擋下。
         other = await s.client.post(
             "/api/auth/login",
-            json={"username": "bob", "password": password_of("bob")},
-            headers={"X-Forwarded-For": "198.51.100.1"},
+            json={"username": "alice", "password": password_of("alice")},
+            headers={"X-Forwarded-For": "198.51.100.4"},
         )
 
         assert statuses[-1] == 429
@@ -1965,6 +2024,60 @@ class TestHardening:
         assert before == "bypass"
         assert demoted == "ask"
         assert removed == "ask"
+
+    def test_disabled_accounts_cannot_run_any_tool(self, tmp_path):
+        # 從指令列停用（pyharness user disable）不會經過網頁：每次執行
+        # 工具前都重新確認帳號。
+        root = make_project(tmp_path / "p")
+        carol, _ = store_of(root).create_user("carol", None, "member", "pw")
+        current = {"user": carol}
+        read = tools_lib.Tool(
+            name="read_file",
+            description="",
+            parameters={},
+            func=lambda: None,
+        )
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(
+                loaded,
+                auth_mode="accounts",
+                users=lambda _: current["user"],
+            )
+            state = ws._create(carol, "main")  # noqa: SLF001
+            state.run_user = carol
+            state.run_folder = ws.folder(carol, None)
+            permissions = ws._permissions_for(state)  # noqa: SLF001
+
+            before = permissions_lib.check(permissions, read)
+            current["user"] = dataclasses.replace(carol, disabled=True)
+            disabled = permissions_lib.check(permissions, read)
+
+        assert before == "allow"
+        assert disabled == "deny"
+
+    async def test_resetting_a_password_stops_running_turns(self, site):
+        s = await site(
+            [conftest.tool_response(WRITE), conftest.text_response("好")],
+            users=(("boss", "admin"), ("carol", "admin")),
+        )
+        carol = await s.login("carol", password_of("carol"))
+        boss = await s.login("boss", password_of("boss"))
+        await carol.listen()
+        _, created = await carol.api("POST", "/sessions", {"text": "寫"})
+        await carol.wait_for("approval")
+
+        status, _ = await boss.api(
+            "POST", f"/admin/users/{user_id(s.root, 'carol')}/password", {}
+        )
+        workspace = _app(s)[server_lib._WORKSPACE]  # noqa: SLF001
+        state = workspace._states[created["id"]]  # noqa: SLF001
+        async with asyncio.timeout(3):
+            while state.task is not None:
+                await asyncio.sleep(0.01)
+
+        assert status == 200
+        assert state.status == "stopped"
+        assert state.notice == workspace_lib.ACCOUNT_CHANGED_NOTICE
 
     @pytest.mark.parametrize(
         ("username", "config", "guarded"),

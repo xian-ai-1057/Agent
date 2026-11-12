@@ -427,6 +427,13 @@ export const ATTACHMENT_MARKER = "[附件] ";
  */
 export const PRODUCED_MARKER = "[產生的檔案] ";
 
+/**
+ * 不必登入的本機模式（Python 版）每次啟動會產生一把鑰匙，放在終端機顯示
+ * 的網址上（?key=…）。沒有帶鑰匙時 API 回 401，錯誤內容的 code 是這個
+ * 值：要請使用者重新打開終端機上的網址，而不是顯示登入畫面。
+ */
+export const LOCAL_KEY_REQUIRED = "local_key_required";
+
 /** 使用者拒絕工具呼叫時，交給模型的工具結果（網頁上改顯示「你拒絕了這個動作」）。 */
 export const DENIED_RESULT = "使用者沒有同意這次呼叫，請不要重試同樣的操作";
 

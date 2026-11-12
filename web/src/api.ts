@@ -18,6 +18,7 @@ import type {
   SessionSummary,
   UploadedFile,
 } from "../../src/web/protocol.ts";
+import { LOCAL_KEY_REQUIRED } from "../../src/web/protocol.ts";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -32,15 +33,19 @@ export class ApiError extends Error {
  * 登入過期或還沒登入（多人帳號模式回 401）時要做的事，由 store 設定。
  * 登入與改密碼本身回 401 只是帳號或密碼不對，不算登入過期。
  */
-let onUnauthorized: (() => void) | undefined;
+let onUnauthorized: ((localKey: boolean) => void) | undefined;
 const AUTH_ATTEMPTS = new Set(["/auth/login", "/auth/password"]);
 
-export function setUnauthorizedHandler(handler: () => void): void {
+export function setUnauthorizedHandler(
+  handler: (localKey: boolean) => void,
+): void {
   onUnauthorized = handler;
 }
 
-function checkUnauthorized(status: number, path: string): void {
-  if (status === 401 && !AUTH_ATTEMPTS.has(path)) onUnauthorized?.();
+function checkUnauthorized(status: number, path: string, data: unknown): void {
+  if (status !== 401 || AUTH_ATTEMPTS.has(path)) return;
+  const code = (data as { code?: unknown } | null)?.code;
+  onUnauthorized?.(code === LOCAL_KEY_REQUIRED);
 }
 
 async function request<T>(
@@ -55,7 +60,7 @@ async function request<T>(
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    checkUnauthorized(response.status, path);
+    checkUnauthorized(response.status, path, data);
     const message = (data as { error?: string }).error ?? response.statusText;
     throw new ApiError(response.status, message);
   }
@@ -95,7 +100,7 @@ export const api = {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      checkUnauthorized(response.status, "/uploads");
+      checkUnauthorized(response.status, "/uploads", data);
       const message = (data as { error?: string }).error ?? response.statusText;
       throw new ApiError(response.status, message);
     }

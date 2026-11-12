@@ -63,11 +63,13 @@ Origin 標頭，避免其他網站透過瀏覽器呼叫這裡的 API。
 
 import asyncio
 import contextlib
+import hmac
 import importlib
 import ipaddress
 import json
 import os
 import pathlib
+import secrets
 import urllib.parse
 from collections.abc import Iterable
 from typing import Any
@@ -101,6 +103,16 @@ LOGIN_CONCURRENCY = 4
 TRUSTED_PROXIES_ENV = "HARNESS_TRUSTED_PROXIES"
 # 本機模式不接受的標頭：有這些標頭表示請求是經過反向代理轉來的。
 _PROXY_HEADERS = ("X-Forwarded-For", "Forwarded", "X-Forwarded-Host", "Via")
+# 本機模式啟動時產生的鑰匙：網址上的 ?key=…，打開後記在 cookie。
+LOCAL_KEY_PARAM = "key"
+# 少了鑰匙時 API 回應的 code（和 protocol.ts 的 LOCAL_KEY_REQUIRED 一致）。
+LOCAL_KEY_REQUIRED = "local_key_required"
+_LOCAL_COOKIE = "harness_local"
+_LOCAL_KEY_NEEDED = (
+    "請用啟動網頁版時終端機顯示的完整網址（含 ?key=…）打開。不必登入的"
+    "網頁版每次啟動都會產生新的鑰匙，避免其他程式或透過轉送連進來的人"
+    "直接使用。"
+)
 _LOCAL_ONLY = (
     "沒有設定密碼的網頁版只接受從這台電腦直接連線。要透過反向代理或從"
     "其他電腦使用，請設定環境變數 HARNESS_WEB_PASSWORD（或用 pyharness "
@@ -121,6 +133,7 @@ _THROTTLE = web.AppKey("throttle", accounts_lib.LoginThrottle)
 _STREAMS = web.AppKey("streams", set)
 _LOGINS = web.AppKey("logins", asyncio.Semaphore)
 _PROXIES = web.AppKey("proxies", tuple)
+_LOCAL_KEY = web.AppKey("local_key", object)
 # 登入的人（aiohttp 3.13 之後建議用 RequestKey，較舊的版本用字串）。
 _USER: Any = (
     web.RequestKey("user", accounts_lib.User)
@@ -228,6 +241,7 @@ def create_app(
     allowed_hosts: Iterable[str] = (),
     max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
     trusted_proxies: Iterable[str] = (),
+    local_key: str | None = None,
 ) -> web.Application:
     """建立網頁版的 aiohttp 應用程式。
 
@@ -246,6 +260,8 @@ def create_app(
             反向代理的網域）。帳號模式且沒有指定時接受任何 Host。
         max_upload_bytes: 上傳的單一檔案大小上限。
         trusted_proxies: 信任的反向代理（IP 或網段），見模組說明。
+        local_key: 本機模式要求的鑰匙（見 serve）；None 表示不要求，
+            只給測試或自己另外把關的程式使用。帳號模式不使用。
 
     Returns:
         aiohttp 的 Application。
@@ -279,6 +295,11 @@ def create_app(
             _error_middleware,
             _guard_middleware(host, allowed_hosts, mode == "accounts"),
             *([_local_only_middleware] if mode == "local" else []),
+            *(
+                [_local_key_middleware(local_key)]
+                if mode == "local" and local_key
+                else []
+            ),
             _auth_middleware(mode, store),
         ],
     )
@@ -288,6 +309,7 @@ def create_app(
     app[_STREAMS] = set()
     app[_LOGINS] = asyncio.Semaphore(LOGIN_CONCURRENCY)
     app[_PROXIES] = proxies
+    app[_LOCAL_KEY] = local_key if mode == "local" else None
     routes = web.RouteTableDef()
     _session_routes(routes)
     _file_routes(routes)
@@ -583,9 +605,14 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
         response = _json(
             {"user": accounts_lib.member_info(user), "password": password}
         )
-        # 重設自己的密碼會登出所有地方，這個瀏覽器重新登入。
+        # 重設自己的密碼會登出所有地方，這個瀏覽器重新登入。重設別人的
+        # 密碼通常是帳號可能外洩：那個人正在執行的對話也停下來。
         if user_id == _user(request).id:
             _set_cookie(request, response, store.create_login(user_id))
+        else:
+            _ws(request).stop_runs_of(
+                user_id, workspace_lib.ACCOUNT_CHANGED_NOTICE
+            )
         return response
 
 
@@ -658,6 +685,9 @@ async def serve(
         allowed_hosts=allowed_hosts,
         max_upload_bytes=max_upload_bytes,
         trusted_proxies=trusted_proxies,
+        # 不必登入時，光看連線來源分不出是本機的瀏覽器，還是沒有加轉送
+        # 標頭的反向代理或 ssh 轉送：每次啟動產生一把鑰匙放在網址上。
+        local_key=secrets.token_urlsafe(24),
     )
     runner = web.AppRunner(app, handle_signals=False)
     await runner.setup()
@@ -670,8 +700,12 @@ async def serve(
     warm_up.add_done_callback(lambda _: workspace.refresh_project())
     actual = site._server.sockets[0].getsockname()[1]  # noqa: SLF001
     shown = f"[{host}]" if ":" in host else host
+    url = f"http://{shown}:{actual}"
+    key = app[_LOCAL_KEY]
+    if key:
+        url += f"/?{urllib.parse.urlencode({LOCAL_KEY_PARAM: key})}"
     if on_ready is not None:
-        on_ready(f"http://{shown}:{actual}")
+        on_ready(url)
     try:
         await asyncio.Event().wait()
     finally:
@@ -1000,6 +1034,59 @@ async def _local_only_middleware(request: web.Request, handler):
     if proxied or not _loopback(remote):
         raise workspace_lib.WebError(403, _LOCAL_ONLY)
     return await handler(request)
+
+
+def _local_key_middleware(key: str):
+    """本機模式要帶啟動時產生的鑰匙。
+
+    打開 /?key=… 時記進 cookie（HttpOnly、SameSite=Strict），並轉到不含
+    鑰匙的網址；之後的請求都看 cookie。cookie 名稱含埠號，同時開好幾個
+    網頁版不會互相蓋掉。
+    """
+
+    @web.middleware
+    async def check(request: web.Request, handler):
+        cookie = f"{_LOCAL_COOKIE}_{request.url.port or 0}"
+        given = request.query.get(LOCAL_KEY_PARAM)
+        if (
+            given is not None
+            and request.method == "GET"
+            and not request.path.startswith("/api/")
+            and hmac.compare_digest(given.encode(), key.encode())
+        ):
+            rest = {
+                name: value
+                for name, value in request.query.items()
+                if name != LOCAL_KEY_PARAM
+            }
+            target = request.rel_url.with_query(rest or None)
+            response = web.Response(
+                status=302, headers={"Location": str(target)}
+            )
+            response.set_cookie(
+                cookie, key, path="/", httponly=True, samesite="Strict"
+            )
+            return response
+        held = request.cookies.get(cookie, "")
+        if hmac.compare_digest(held.encode(), key.encode()):
+            return await handler(request)
+        if request.path.startswith("/api/"):
+            # code 讓已經打開的頁面顯示「請重新打開網址」而不是登入畫面。
+            return _json(
+                {"error": _LOCAL_KEY_NEEDED, "code": LOCAL_KEY_REQUIRED},
+                status=401,
+            )
+        return web.Response(
+            status=401,
+            text=(
+                '<!doctype html><meta charset="utf-8"><title>Harness</title>'
+                f'<p style="font:16px/1.6 sans-serif;margin:3em auto;'
+                f'max-width:36em;padding:0 16px">{_LOCAL_KEY_NEEDED}</p>'
+            ),
+            content_type="text/html",
+        )
+
+    return check
 
 
 def _loopback(address: str) -> bool:

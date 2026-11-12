@@ -174,9 +174,23 @@ def blocked_address(address: str) -> bool:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
         return True
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if any(ip in network for network in _EMBEDDED_IPV4):
+            # NAT64 與 IPv4 相容位址最後 32 位元就是 IPv4，照 IPv4 判斷。
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
     return not ip.is_global or ip.is_multicast
+
+
+# 最後 32 位元是 IPv4 位址的 IPv6 範圍：NAT64（RFC 6052、8215）與已廢除的
+# IPv4 相容位址（::a.b.c.d）。is_global 會把它們當成公開位址。
+_EMBEDDED_IPV4 = tuple(
+    ipaddress.IPv6Network(network)
+    for network in ("64:ff9b::/96", "64:ff9b:1::/48", "::/96")
+)
 
 
 class _Blocked(OSError):
@@ -186,17 +200,18 @@ class _Blocked(OSError):
 class _PinnedResolver(aiohttp.abc.AbstractResolver):
     """解析網址的主機時再檢查一次位址，連線只會連到檢查過的 IP。
 
-    只檢查要讀取的主機（hosts）；經過代理伺服器時，代理伺服器本身可以
-    在內網。
+    每一個要連線的主機都檢查（主機名稱可能被改寫成別的形式，例如中文
+    網域會變成 xn-- 開頭的名稱，所以不靠名稱比對）；只有環境變數設定的
+    代理伺服器本身可以在內網。
     """
 
     def __init__(self) -> None:
-        self.hosts: set[str] = set()
+        self.proxies = _proxy_hosts()
         self._inner = aiohttp.ThreadedResolver()
 
     async def resolve(self, host, port=0, family=socket.AF_INET):
         results = await self._inner.resolve(host, port, family)
-        if host.lower() in self.hosts:
+        if host.lower() not in self.proxies:
             for item in results:
                 if blocked_address(item["host"]):
                     raise _Blocked(_blocked_message(host, item["host"]))
@@ -241,6 +256,16 @@ async def _check_host(url: str) -> str:
         if blocked_address(address):
             raise tools.ToolError(_blocked_message(host, address))
     return host
+
+
+def _proxy_hosts() -> frozenset[str]:
+    """環境變數（HTTP_PROXY 等）設定的代理伺服器主機名稱（小寫）。"""
+    hosts = set()
+    for address in urllib.request.getproxies().values():
+        host = urllib.parse.urlsplit(address).hostname
+        if host:
+            hosts.add(host.lower())
+    return frozenset(hosts)
 
 
 def _uses_proxy(url: str, host: str) -> bool:
@@ -295,7 +320,7 @@ async def _follow(
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
         if resolver is not None:
-            resolver.hosts.add(await _check_host(current))
+            await _check_host(current)
         async with session.get(
             current, allow_redirects=resolver is None
         ) as response:

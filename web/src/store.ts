@@ -32,6 +32,11 @@ export interface State {
    * 網址不變，登入後回到原本的頁面。
    */
   needsLogin: boolean;
+  /**
+   * 本機模式少了啟動時的鑰匙（例如伺服器重新啟動過）：顯示「請重新打開
+   * 終端機上的網址」，不顯示登入畫面。
+   */
+  needsLocalKey?: boolean;
 }
 
 type Listener = () => void;
@@ -80,7 +85,7 @@ export async function refreshProject(): Promise<void> {
  * 需要登入：清掉畫面上的資料（下一位登入的人不能看到），改顯示登入
  * 畫面。任何 API 回 401 時由 api.ts 呼叫。
  */
-export function requireLogin(): void {
+export function requireLogin(localKey = false): void {
   if (state.needsLogin) return;
   setState((s) => ({
     ...s,
@@ -91,6 +96,7 @@ export function requireLogin(): void {
     connected: false,
     loadError: undefined,
     needsLogin: true,
+    needsLocalKey: localKey,
   }));
 }
 

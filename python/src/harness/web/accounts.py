@@ -42,14 +42,18 @@ SESSION_LIFETIME = 14 * 24 * 3600
 IDLE_TIMEOUT = 12 * 3600
 MIN_PASSWORD_LENGTH = 10
 # 登入失敗的限制（見 LoginThrottle）。
-# 同一個帳號名稱連續失敗 MAX_FAILURES 次後，每次失敗都要等一段時間才能
-# 再試：BACKOFF_SECONDS 秒起跳、每次加倍，最多 MAX_BACKOFF_SECONDS 秒。
+# 同一個帳號名稱從同一個 IP 連續失敗 MAX_FAILURES 次後，每次失敗都要等
+# 一段時間才能再試：BACKOFF_SECONDS 秒起跳、每次加倍，最多
+# MAX_BACKOFF_SECONDS 秒。
 MAX_FAILURES = 5
 BACKOFF_SECONDS = 2
 MAX_BACKOFF_SECONDS = 60
 # 同一個 IP 在 IP_WINDOW_SECONDS 秒內最多失敗幾次（不分帳號名稱）。
 MAX_IP_FAILURES = 50
 IP_WINDOW_SECONDS = 10 * 60
+# 同一個帳號名稱在 IP_WINDOW_SECONDS 秒內，所有 IP 加起來最多失敗幾次。
+# 刻意設得高：至少要從好幾個 IP 一起猜才會碰到，避免別人輕易把帳號鎖住。
+MAX_NAME_FAILURES = 200
 # 這麼久沒有失敗的記錄就忘掉；記錄的總數也有上限。
 FORGET_SECONDS = 15 * 60
 MAX_THROTTLE_ENTRIES = 10_000
@@ -549,14 +553,16 @@ class _Attempts:
 class LoginThrottle:
     """記在記憶體裡的登入限制，拖慢線上猜密碼。
 
-    - 帳號名稱：連續失敗 MAX_FAILURES 次之後，每次失敗都要等一段時間
-      （BACKOFF_SECONDS 秒起跳、每次加倍，最多 MAX_BACKOFF_SECONDS 秒）
-      才能再試，換 IP 也一樣；成功登入後歸零。等待時間很短，所以真正
-      的使用者不會因為別人亂試而被擋在外面太久。
+    - 帳號名稱＋IP：同一個 IP 對同一個帳號名稱連續失敗 MAX_FAILURES 次之
+      後，每次失敗都要等一段時間（BACKOFF_SECONDS 秒起跳、每次加倍，最
+      多 MAX_BACKOFF_SECONDS 秒）才能再試；成功登入後歸零。只看同一個
+      IP，所以別人從其他地方亂試，不會把真正的使用者擋在外面。
     - IP：IP_WINDOW_SECONDS 秒內最多失敗 MAX_IP_FAILURES 次，避免同一個
       來源一次試很多帳號名稱。
-    - 同時進行：還沒有結果的登入也算一次（reserve 時先占位），所以同時
-      送出一大堆密碼也只有剩下的次數會被檢查。
+    - 帳號名稱：IP_WINDOW_SECONDS 秒內所有 IP 加起來最多失敗
+      MAX_NAME_FAILURES 次，擋下從很多 IP 一起猜同一個帳號。
+    - 同時進行：還沒有結果的登入也算一次失敗（reserve 時先占位），所以
+      同時送出一大堆密碼也只有剩下的次數會被檢查。
 
     記錄 FORGET_SECONDS 秒沒有動靜就忘掉，總數最多 MAX_THROTTLE_ENTRIES
     筆。伺服器重新啟動後歸零；目的只是拖慢線上猜密碼，不是完整的防護。
@@ -566,6 +572,7 @@ class LoginThrottle:
 
     def __init__(self, clock=time.monotonic) -> None:
         self._clock = clock
+        self._pairs: dict[tuple[str, str], _Attempts] = {}
         self._names: dict[str, _Attempts] = {}
         self._addresses: dict[str, _Attempts] = {}
         self._pruned = 0.0
@@ -581,21 +588,24 @@ class LoginThrottle:
         """
         now = self._clock()
         self._prune(now)
-        name = self._names.setdefault(_name_key(username), _Attempts())
-        source = self._addresses.setdefault(address, _Attempts())
-        if now - source.window >= IP_WINDOW_SECONDS:
-            source.failures = 0
-            source.window = now
+        pair, name, source = self._records(username, address)
         wait = 0.0
-        if now < name.until:
-            wait = name.until - now
-        elif name.in_flight >= max(1, MAX_FAILURES - name.failures):
+        if now < pair.until:
+            wait = pair.until - now
+        elif pair.in_flight >= max(1, MAX_FAILURES - pair.failures):
             wait = 1.0
-        if source.failures >= MAX_IP_FAILURES:
-            wait = max(wait, source.window + IP_WINDOW_SECONDS - now)
+        for record, limit in (
+            (name, MAX_NAME_FAILURES),
+            (source, MAX_IP_FAILURES),
+        ):
+            if now - record.window >= IP_WINDOW_SECONDS:
+                record.failures = 0
+                record.window = now
+            if record.failures + record.in_flight >= limit:
+                wait = max(wait, record.window + IP_WINDOW_SECONDS - now, 1.0)
         if wait > 0:
             return max(1, math.ceil(wait))
-        for record in (name, source):
+        for record in (pair, name, source):
             record.in_flight += 1
             record.seen = now
         return 0
@@ -612,31 +622,42 @@ class LoginThrottle:
                 不算一次失敗。
         """
         now = self._clock()
-        name = self._names.setdefault(_name_key(username), _Attempts())
-        source = self._addresses.setdefault(address, _Attempts())
-        for record in (name, source):
+        pair, name, source = self._records(username, address)
+        for record in (pair, name, source):
             record.in_flight = max(0, record.in_flight - 1)
             record.seen = now
         if succeeded is None:
             return
         if succeeded:
-            name.failures = 0
-            name.until = 0.0
+            pair.failures = 0
+            pair.until = 0.0
             return
-        name.failures += 1
-        if name.failures >= MAX_FAILURES:
-            extra = name.failures - MAX_FAILURES
+        pair.failures += 1
+        if pair.failures >= MAX_FAILURES:
+            extra = pair.failures - MAX_FAILURES
             delay = BACKOFF_SECONDS * 2 ** min(extra, 16)
-            name.until = now + min(delay, MAX_BACKOFF_SECONDS)
+            pair.until = now + min(delay, MAX_BACKOFF_SECONDS)
+        name.failures += 1
         source.failures += 1
+
+    def _records(
+        self, username: str, address: str
+    ) -> tuple[_Attempts, _Attempts, _Attempts]:
+        key = _name_key(username)
+        return (
+            self._pairs.setdefault((key, address), _Attempts()),
+            self._names.setdefault(key, _Attempts()),
+            self._addresses.setdefault(address, _Attempts()),
+        )
 
     def _prune(self, now: float) -> None:
         """忘掉太久沒有動靜的記錄；太多時從最舊的開始忘。"""
-        total = len(self._names) + len(self._addresses)
+        tables = (self._pairs, self._names, self._addresses)
+        total = sum(len(table) for table in tables)
         if total <= MAX_THROTTLE_ENTRIES and now - self._pruned < 60:
             return
         self._pruned = now
-        for table in (self._names, self._addresses):
+        for table in tables:
             idle = [
                 key
                 for key, record in table.items()
@@ -646,7 +667,7 @@ class LoginThrottle:
             ]
             for key in idle:
                 del table[key]
-            excess = len(table) - MAX_THROTTLE_ENTRIES // 2
+            excess = len(table) - MAX_THROTTLE_ENTRIES // 3
             if excess > 0:
                 # 還在等待中的記錄最後才忘。
                 oldest = sorted(

@@ -436,6 +436,10 @@ class TestGuardedWebFetch:
             "fd00:ec2::254",
             "fe80::1%eth0",
             "::ffff:127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::7f00:1",
+            "::7f00:1",
+            "2002:7f00:1::1",
             "224.0.0.1",
             "not-an-ip",
         ],
@@ -443,7 +447,9 @@ class TestGuardedWebFetch:
     def test_internal_addresses_are_blocked(self, address):
         assert web.blocked_address(address)
 
-    @pytest.mark.parametrize("address", ["8.8.8.8", "2606:4700::1111"])
+    @pytest.mark.parametrize(
+        "address", ["8.8.8.8", "2606:4700::1111", "64:ff9b::808:808"]
+    )
     def test_public_addresses_are_allowed(self, address):
         assert not web.blocked_address(address)
 
@@ -485,15 +491,17 @@ class TestGuardedWebFetch:
         # 一般的 web_fetch（CLI 與本機模式）照舊由 aiohttp 跟著轉址。
         assert plain == followed
 
+    # 中文網域連線時會換成 xn-- 開頭的名稱，也要檢查。
+    @pytest.mark.parametrize("host", ["rebind.test", "exämple.test"])
     async def test_dns_answer_is_checked_when_connecting(
-        self, base_url, context, monkeypatch
+        self, base_url, context, monkeypatch, host
     ):
         # 檢查時是公開位址、連線時才換成內部位址（DNS rebinding）。
         checked = []
 
         async def fake_check(url):
             checked.append(url)
-            return "rebind.test"
+            return host
 
         resolved = []
 
@@ -519,9 +527,9 @@ class TestGuardedWebFetch:
         with pytest.raises(tools.ToolError, match="不能讀取內部網路"):
             await _call(
                 web.guarded_fetch_tool(),
-                {"url": f"http://rebind.test:{port}/data"},
+                {"url": f"http://{host}:{port}/data"},
                 context,
             )
 
         assert checked
-        assert resolved == ["rebind.test"]
+        assert len(resolved) == 1

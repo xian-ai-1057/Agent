@@ -1020,6 +1020,11 @@ class Workspace:
                 hide_dotfiles=folder.hide_dotfiles,
             )
             async for event in events:
+                # 帳號在執行中被停用（例如用 pyharness user disable）：
+                # 不再執行任何工具，直接停下來。
+                if event.type == "tool_call" and not self._live_active(user):
+                    state.stop_notice = ACCOUNT_CHANGED_NOTICE
+                    raise asyncio.CancelledError
                 self._handle(state, event)
         except asyncio.CancelledError:
             state.status = "stopped"
@@ -1212,7 +1217,15 @@ class Workspace:
             self._approver(state),
             extra_allow,
             is_admin,
+            lambda: self._live_active(user),
         )
+
+    def _live_active(self, user: accounts_lib.User) -> bool:
+        """這個帳號現在還能用嗎（沒有被停用或刪除，包括從指令列改的）。"""
+        if self._users is None:
+            return True
+        current = self._users(user.id)
+        return current is not None and not current.disabled
 
     def _live_admin(self, user: accounts_lib.User) -> bool:
         """這個人現在是不是管理者（停用或刪除的帳號都不是）。"""
@@ -1629,6 +1642,12 @@ class Workspace:
             except ValueError as error:
                 box_error = str(error)
         made: dict[str, tools_lib.Tool] = {}
+        # 指令在沙盒裡執行：成員一律如此；管理者在共用資料夾也是，因為
+        # 成員可以在那裡放檔案（例如 .git/config、同名的 Python 模組），
+        # 讓管理者看似無害的指令在伺服器上執行成員寫的程式。
+        sandboxed = not user.is_admin or (
+            self.auth_mode != "local" and folder.kind != "private"
+        )
 
         def convert(item: tools_lib.Tool) -> tools_lib.Tool | None:
             if legacy and (
@@ -1644,7 +1663,7 @@ class Workspace:
                 if "python" not in made:
                     made["python"] = box.tools()[0]
                 return made["python"]
-            if item is shell.run_command and not user.is_admin:
+            if item is shell.run_command and sandboxed:
                 if project.sandbox is None:
                     return None
                 if box is None:
@@ -1942,12 +1961,14 @@ class _LivePermissions(permissions_lib.Permissions):
         approver: permissions_lib.Approver,
         extra_allow: Callable[[], list[str]] = list,
         is_admin: Callable[[], bool] = lambda: True,
+        active: Callable[[], bool] = lambda: True,
     ) -> None:
         # 不呼叫父類別的 __init__：欄位都改由 property 即時讀取。
         self._shared = shared
         self._state = state
         self._extra_allow = extra_allow
         self._is_admin = is_admin
+        self._active = active
         self.approver = approver
 
     @property
@@ -1964,6 +1985,9 @@ class _LivePermissions(permissions_lib.Permissions):
 
     @property
     def deny(self) -> list[str]:
+        # 帳號被停用或刪除後，連 subagent 的工具也一律拒絕。
+        if not self._active():
+            return ["*"]
         return self._shared.deny
 
     @property

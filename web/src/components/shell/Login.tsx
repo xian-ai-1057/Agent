@@ -95,3 +95,25 @@ export function Login() {
     </main>
   );
 }
+
+/**
+ * 不必登入的本機模式少了啟動時的鑰匙：伺服器重新啟動過，或是直接打了
+ * 不含 ?key= 的網址。請使用者重新打開終端機上的網址。
+ */
+export function LocalKeyNotice() {
+  return (
+    <main className="login-page">
+      <div className="login-card anim-rise" role="alert">
+        <div className="login-brand">
+          <span className="logo" aria-hidden="true" />
+          Harness
+        </div>
+        <h1 className="login-title">請重新打開網址</h1>
+        <p className="help">
+          網頁版每次啟動都會產生新的網址鑰匙。請打開啟動 pyharness web
+          時終端機顯示的完整網址（結尾有 ?key=…）。
+        </p>
+      </div>
+    </main>
+  );
+}
