@@ -1,9 +1,10 @@
 /** 工作中：同時進行的對話一覽，可以直接允許、拒絕或停止。 */
 
 import { useEffect, useState } from "react";
-import type {
-  ApprovalDecision,
-  SessionSummary,
+import {
+  type ApprovalDecision,
+  INTERRUPTED_STOP_REASON,
+  type SessionSummary,
 } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
 import { activityLabel, formatAgo, formatDuration, useNow } from "../format.ts";
@@ -132,7 +133,10 @@ function WorkRow({ summary, now }: { summary: SessionSummary; now: number }) {
   } else if (status === "error") {
     line = summary.error ?? "出錯";
   } else if (status === "stopped") {
-    line = "你停止了這一輪";
+    line =
+      summary.stopReason === INTERRUPTED_STOP_REASON
+        ? "伺服器重新啟動，這一輪中斷了；打開對話可以重試"
+        : "你停止了這一輪";
   } else {
     line =
       summary.toolErrors > 0

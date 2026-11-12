@@ -93,3 +93,44 @@ export function badgeOf(path: string): string {
   const ext = extensionOf(path);
   return ext ? ext.slice(0, 4).toUpperCase() : "FILE";
 }
+
+/** 在回覆底下顯示成縮圖的圖片格式。 */
+const THUMBNAIL = ["png", "jpg", "jpeg", "gif", "webp"];
+
+export function isThumbnail(path: string): boolean {
+  return THUMBNAIL.includes(extensionOf(path));
+}
+
+/** 有通訊協定（http:、data:、mailto:…）的網址，或 //host 開頭的網址。 */
+const EXTERNAL = /^([a-z][a-z0-9+.-]*:|\/\/)/i;
+
+/**
+ * 沙盒容器裡的工作目錄（sandbox.py 的 CONTAINER_WORKDIR）與它在專案裡
+ * 預設的位置（DEFAULT_WORKSPACE）。harness.yaml 改了 sandbox.workspace
+ * 時，前端不知道新的位置，只對應預設的。
+ */
+const CONTAINER_WORKDIR = "/workspace/";
+const PROJECT_WORKSPACE = "workspace/";
+
+/**
+ * 回覆裡圖片的 src 對應到專案裡的路徑（相對於專案根目錄），可以交給
+ * fileUrl 讀取。外部網址、data: 與其他絕對路徑回傳 undefined，照原樣
+ * 顯示。容器裡的 /workspace/x 對應到專案的 workspace/x；開頭的 ./ 拿掉。
+ */
+export function projectPath(src: string): string | undefined {
+  let path = src.trim();
+  if (!path || EXTERNAL.test(path) || path.startsWith("#")) return undefined;
+  path = path.split(/[?#]/)[0] ?? "";
+  try {
+    path = decodeURI(path);
+  } catch {
+    // 不是合法的百分比編碼時照原樣使用。
+  }
+  if (path.startsWith(CONTAINER_WORKDIR)) {
+    path = PROJECT_WORKSPACE + path.slice(CONTAINER_WORKDIR.length);
+  } else if (path.startsWith("/")) {
+    return undefined;
+  }
+  while (path.startsWith("./")) path = path.slice(2);
+  return path || undefined;
+}

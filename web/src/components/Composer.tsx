@@ -5,7 +5,8 @@
  * 或直接貼上。檔案選好就開始上傳，全部上傳完才能送出。
  *
  * 有提供 options 時（Python 版），左下角是 ＋ 選單（上傳、skills、工具），
- * 右下角是模型選單。
+ * 旁邊仍有迴紋針可以直接上傳；右下角是模型選單。送出訊息時關掉開著的
+ * 選單。
  *
  * 按下送出後輸入框立刻清空；送出失敗時把文字與附件放回來。
  */
@@ -74,6 +75,8 @@ export function Composer({
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
+  // 每送出一次加一，＋ 選單與模型選單看到它改變就關起來。
+  const [sent, setSent] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -109,6 +112,7 @@ export function Composer({
   const submit = async () => {
     if (!canSend) return;
     setSending(true);
+    setSent((count) => count + 1);
     const saved = { text, attachments };
     const paths = ready.map((item) => item.path ?? "");
     setText("");
@@ -252,22 +256,21 @@ export function Composer({
         {options && (
           <PlusMenu
             options={options}
+            closeSignal={sent}
             onUpload={onUpload ? () => fileInput.current?.click() : undefined}
           />
         )}
         {onUpload && (
           <>
-            {!options && (
-              <button
-                type="button"
-                className="icon-btn attach-btn"
-                aria-label="附加檔案"
-                title="附加檔案（也可以把檔案拖進來或貼上）"
-                onClick={() => fileInput.current?.click()}
-              >
-                <PaperclipIcon />
-              </button>
-            )}
+            <button
+              type="button"
+              className="icon-btn attach-btn"
+              aria-label="上傳檔案"
+              title="上傳檔案（也可以把檔案拖進來或貼上）"
+              onClick={() => fileInput.current?.click()}
+            >
+              <PaperclipIcon />
+            </button>
             <input
               ref={fileInput}
               type="file"
@@ -282,7 +285,7 @@ export function Composer({
         )}
         {controls}
         <span className="ch-bar-gap" />
-        {options && <ModelMenu options={options} />}
+        {options && <ModelMenu options={options} closeSignal={sent} />}
         {busy && onStop ? (
           <button
             key="stop"

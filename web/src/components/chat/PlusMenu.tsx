@@ -1,7 +1,8 @@
 /**
  * 輸入框左下角的 ＋ 選單：上傳檔案、選 skills、勾選這段對話可以用的工具。
  *
- * Skills 與工具在同一個彈出框裡換頁顯示，手機上也好點。
+ * Skills 與工具在同一個彈出框裡換頁顯示，手機上也好點。可以複選，所以
+ * 勾選後選單不關；送出訊息時（closeSignal 改變）才關。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -21,9 +22,12 @@ type View = "main" | "skills" | "tools";
 
 export function PlusMenu({
   options,
+  closeSignal,
   onUpload,
 }: {
   options: ComposerOptions;
+  /** 改變時關掉選單（例如送出了訊息）。 */
+  closeSignal?: number;
   /** 打開選檔視窗；沒有提供時不顯示「上傳檔案」。 */
   onUpload?: () => void;
 }) {
@@ -36,6 +40,8 @@ export function PlusMenu({
     setOpen(false);
     setView("main");
   }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在 closeSignal 改變時關
+  useEffect(close, [closeSignal]);
   const back = (from: View) => {
     returnTo.current = from;
     setView("main");
@@ -222,6 +228,13 @@ function Checklist({
           aria-label={`搜尋${title}`}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            // 輸入框在表單裡，Enter 會送出訊息；改成勾選第一個符合的項目。
+            if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            const first = shown[0];
+            if (first) onToggle(first.name);
+          }}
         />
       </div>
       <div className="ch-pop-list" role="menu" aria-label={title}>

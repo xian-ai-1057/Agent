@@ -1,12 +1,19 @@
 /** 輸入框右下角的模型選單：可以搜尋，列出供應商與能力標籤。 */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckIcon, ChevronDownIcon } from "../Icons.tsx";
 import { SearchIcon } from "./icons.tsx";
 import { type ComposerOptions, effectiveModel, modelLabel } from "./options.ts";
 import { focusTrigger, Popover } from "./Popover.tsx";
 
-export function ModelMenu({ options }: { options: ComposerOptions }) {
+export function ModelMenu({
+  options,
+  closeSignal,
+}: {
+  options: ComposerOptions;
+  /** 改變時關掉選單（例如送出了訊息）。 */
+  closeSignal?: number;
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const anchor = useRef<HTMLDivElement>(null);
@@ -14,6 +21,8 @@ export function ModelMenu({ options }: { options: ComposerOptions }) {
     setOpen(false);
     setQuery("");
   }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在 closeSignal 改變時關
+  useEffect(close, [closeSignal]);
 
   const { models } = options;
   const current = effectiveModel(options.value, options.fallbackModel, models);
@@ -26,6 +35,11 @@ export function ModelMenu({ options }: { options: ComposerOptions }) {
           .includes(needle),
       )
     : models;
+  const choose = (name: string) => {
+    if (name !== current) options.onChange({ model: name });
+    focusTrigger(anchor);
+    close();
+  };
 
   return (
     <div className="ch-anchor" ref={anchor}>
@@ -57,6 +71,15 @@ export function ModelMenu({ options }: { options: ComposerOptions }) {
             aria-label="搜尋模型"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              // 輸入框在表單裡，Enter 會送出訊息；改成選第一個符合的模型。
+              if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+                return;
+              }
+              event.preventDefault();
+              const first = shown[0];
+              if (first) choose(first.name);
+            }}
           />
         </div>
         <div className="ch-pop-list" role="menu" aria-label="模型">
@@ -69,11 +92,7 @@ export function ModelMenu({ options }: { options: ComposerOptions }) {
                 role="menuitemradio"
                 aria-checked={checked}
                 className="ch-pop-item"
-                onClick={() => {
-                  if (!checked) options.onChange({ model: model.name });
-                  focusTrigger(anchor);
-                  close();
-                }}
+                onClick={() => choose(model.name)}
               >
                 <span className="ch-pop-main">
                   <span className="ch-pop-title">{model.label}</span>

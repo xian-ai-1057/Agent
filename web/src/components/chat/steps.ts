@@ -66,6 +66,33 @@ export function describeStep(step: {
     : { verb: name };
 }
 
+/** 工具的白話名稱，例如 edit_file 是「修改檔案」；不認識的工具回傳 undefined。 */
+const TOOL_LABELS: Record<string, string> = {
+  read_file: "讀取檔案",
+  list_dir: "列出資料夾",
+  write_file: "寫入檔案",
+  edit_file: "修改檔案",
+  find_files: "尋找檔案",
+  search_files: "搜尋檔案內容",
+  run_command: "執行指令",
+  web_fetch: "讀取網頁",
+  update_plan: "更新計畫",
+  sandbox: "執行 Python 程式",
+  run_python: "執行 Python 程式",
+};
+
+export function toolLabel(name: string): string | undefined {
+  const label = TOOL_LABELS[name];
+  if (label) return label;
+  if (
+    name.startsWith(SUBAGENT_PREFIX) &&
+    name.length > SUBAGENT_PREFIX.length
+  ) {
+    return `交給 ${name.slice(SUBAGENT_PREFIX.length)}`;
+  }
+  return undefined;
+}
+
 /** 整句的純文字，給標題、aria-label 與測試用。 */
 export function sentenceText(sentence: StepSentence): string {
   if (!sentence.target) return sentence.verb;

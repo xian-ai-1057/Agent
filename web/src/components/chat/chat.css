@@ -216,6 +216,13 @@
   font-size: 1.05em;
 }
 
+/* 回覆裡的圖片（例如程式畫的圖表）不超出對話寬度。 */
+.md img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--r-md, 8px);
+}
+
 /* ── 對話內容 ─────────────────────────────────────── */
 
 /* 新訊息淡入並上升一點點（比共用的 anim-in 短）。 */
@@ -500,6 +507,125 @@
 
 .ch-thread .file-card {
   border-radius: var(--r-md, 8px);
+}
+
+/* ── 程式產生的檔案與圖片 ─────────────────────────── */
+
+.ch-thumbs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ch-thumb {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md, 8px);
+  background: var(--panel);
+  overflow: hidden;
+  cursor: zoom-in;
+  transition:
+    border-color var(--dur-1, 120ms) var(--ease-out, ease),
+    transform var(--dur-1, 120ms) var(--ease-out, ease);
+}
+
+.ch-thumb:hover:not(:disabled) {
+  border-color: var(--line-3);
+}
+
+.ch-thumb:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.ch-thumb:disabled {
+  cursor: default;
+}
+
+.ch-thumb img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(320px, 100%);
+  max-height: 220px;
+  object-fit: contain;
+}
+
+/* 卡片裡有兩個動作（預覽、下載），外層是 div，hover 交給卡片。 */
+.file-card.ch-produced {
+  padding: 6px 10px 6px 6px;
+  gap: 8px;
+}
+
+.ch-produced-open {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  border-radius: var(--r-sm, 4px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ch-produced-open:disabled {
+  cursor: default;
+}
+
+.ch-produced-main {
+  min-width: 0;
+}
+
+.ch-produced-main .name,
+.ch-produced-main .meta {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 步驟：已修正的錯誤、拒絕 ─────────────────────── */
+
+.ch-fixed-note {
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.step-flag.ch-flag-muted,
+.ch-step-muted {
+  color: var(--muted);
+}
+
+.ch-step-muted {
+  display: flex;
+}
+
+/* ── 中斷、出錯的說明卡片 ─────────────────────────── */
+
+.ch-error-icon {
+  display: flex;
+  color: var(--danger);
+}
+
+.error-card.ch-interrupted {
+  border-color: var(--line-2);
+  background: var(--warn-bg);
+}
+
+.error-card.ch-interrupted .title {
+  color: var(--warn-ink);
+}
+
+.error-card.ch-interrupted .ch-error-icon {
+  color: var(--warn);
 }
 
 /* ── 計畫清單 ─────────────────────────────────────── */

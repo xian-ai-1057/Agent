@@ -3,22 +3,29 @@
  *
  * 一輪 = 一則使用者訊息 + agent 接著做的所有事。agent 的部分依序是
  * 文字段落與「步驟群組」（連續的工具呼叫收在一起，可以展開收合）。
+ *
+ * 工具結果後面的 PRODUCED_MARKER 行（沙盒產生的檔案）會從結果拿掉，
+ * 收進這一輪的 produced，畫面在回覆底下顯示成縮圖或檔案卡片。
  */
 
 import {
   type Approval,
   ATTACHMENT_MARKER,
+  DENIED_RESULT,
   type FilePreview,
   type Message,
+  PRODUCED_MARKER,
   type SessionDetail,
   type SubagentStep,
 } from "../../src/web/protocol.ts";
 
+/** denied：使用者拒絕了這次呼叫（不算工具錯誤）。 */
 export type StepStatus =
   | "running"
   | "waiting"
   | "done"
   | "error"
+  | "denied"
   | "interrupted";
 
 export interface Step {
@@ -34,6 +41,11 @@ export interface Step {
   agent?: string;
   /** 交給 subagent 的步驟：subagent 在裡面呼叫的工具。 */
   children?: Step[];
+  /**
+   * 出錯的步驟之後已經自己修正（後面同一個工具成功了，或這一輪正常
+   * 做完並且有回覆）。畫面預設不顯示它的錯誤內容。
+   */
+  recovered?: boolean;
 }
 
 export type Block =
@@ -56,6 +68,8 @@ export interface Turn {
   attachments: string[];
   blocks: Block[];
   files: FileChange[];
+  /** 沙盒在這一輪產生的檔案（相對於專案根目錄），依出現順序、不重複。 */
+  produced: string[];
 }
 
 export type FileStatus =
@@ -65,7 +79,7 @@ export type FileStatus =
   | "denied"
   | "failed";
 
-/** 寫檔類工具（參數有 path 與 content）造成的檔案變更。 */
+/** 寫檔類工具（參數有 path 與 content，或是 edit_file）造成的檔案變更。 */
 export interface FileChange {
   callId: string;
   path: string;
@@ -73,11 +87,17 @@ export interface FileChange {
   after: string;
   status: FileStatus;
   approval?: Approval;
+  /** edit_file 的修改（不是整個檔案重寫）。 */
+  edited?: boolean;
+  /**
+   * 沒有確認時的檔案內容可以比較（例如重新讀取紀錄後），before 與 after
+   * 只是 edit_file 參數裡被取代的那一段。
+   */
+  fragment?: boolean;
 }
 
 const ERROR_PREFIX = "[錯誤] ";
 const COMPACTED = "對話已壓縮：較早的內容濃縮成摘要，agent 之後看到的是摘要。";
-const DENIED_MARK = "使用者沒有同意";
 
 export function buildTurns(
   detail: SessionDetail,
@@ -87,12 +107,20 @@ export function buildTurns(
     detail.summary.status === "running" || detail.summary.status === "waiting";
   const approvals = new Map(detail.approvals.map((a) => [a.callId, a]));
   const steps = new Map<string, Step>();
+  /** 每個步驟屬於哪一輪，工具結果產生的檔案記在那一輪。 */
+  const stepTurns = new Map<string, Turn>();
   const turns: Turn[] = [];
   let turn: Turn | undefined;
 
   const current = (): Turn => {
     if (!turn) {
-      turn = { key: "t0", blocks: [], files: [], attachments: [] };
+      turn = {
+        key: "t0",
+        blocks: [],
+        files: [],
+        attachments: [],
+        produced: [],
+      };
       turns.push(turn);
     }
     return turn;
@@ -119,6 +147,7 @@ export function buildTurns(
         attachments,
         blocks: [],
         files: [],
+        produced: [],
       };
       turns.push(turn);
       return;
@@ -139,10 +168,11 @@ export function buildTurns(
         const children = detail.subagentSteps?.[call.id];
         if (children?.length) {
           step.children = children.map((child) =>
-            toChildStep(child, approvals, running),
+            toChildStep(child, approvals, running, target.produced),
           );
         }
         steps.set(step.id, step);
+        stepTurns.set(step.id, target);
         const last = target.blocks.at(-1);
         if (last?.kind === "steps") last.steps.push(step);
         else {
@@ -158,11 +188,16 @@ export function buildTurns(
     if (message.role === "tool" && message.tool_call_id) {
       const step = steps.get(message.tool_call_id);
       if (!step) return;
-      const content = message.content ?? "";
-      const failed = content.startsWith(ERROR_PREFIX);
-      step.result = failed ? content.slice(ERROR_PREFIX.length) : content;
-      step.status = failed ? "error" : "done";
+      const { text, produced } = splitProduced(message.content ?? "");
+      const failed = text.startsWith(ERROR_PREFIX);
+      step.result = failed ? text.slice(ERROR_PREFIX.length) : text;
+      step.status = isDeniedResult(step.result)
+        ? "denied"
+        : failed
+          ? "error"
+          : "done";
       step.approval = undefined;
+      addUnique(stepTurns.get(step.id) ?? current(), produced);
     }
   });
 
@@ -184,7 +219,129 @@ export function buildTurns(
       }
     }
   }
+  // 之前的輪都已經結束；最後一輪要正常做完，回覆才算數。
+  turns.forEach((item, index) => {
+    markRecovered(
+      item,
+      index < turns.length - 1 || detail.summary.status === "done",
+    );
+  });
   return turns;
+}
+
+/**
+ * 從工具結果拆出沙盒產生的檔案。伺服器把它們接在結果後面，每個一行，
+ * 以 PRODUCED_MARKER 開頭，接著是相對於專案根目錄的路徑。
+ */
+export function splitProduced(content: string): {
+  text: string;
+  produced: string[];
+} {
+  if (!content.includes(PRODUCED_MARKER)) {
+    return { text: content, produced: [] };
+  }
+  const kept: string[] = [];
+  const produced: string[] = [];
+  for (const line of content.split("\n")) {
+    if (line.startsWith(PRODUCED_MARKER)) {
+      const path = line.slice(PRODUCED_MARKER.length).trim();
+      if (path && !produced.includes(path)) produced.push(path);
+    } else kept.push(line);
+  }
+  return { text: kept.join("\n").trimEnd(), produced };
+}
+
+/** 工具結果是不是「使用者拒絕了這次呼叫」（可能帶著錯誤標記）。 */
+export function isDeniedResult(text: string | undefined): boolean {
+  if (text === undefined) return false;
+  const trimmed = text.trim();
+  const body = trimmed.startsWith(ERROR_PREFIX)
+    ? trimmed.slice(ERROR_PREFIX.length).trim()
+    : trimmed;
+  return body === DENIED_RESULT;
+}
+
+/**
+ * 標出已經自己修正的錯誤步驟：後面有同一個工具成功的步驟，或這一輪
+ * 正常做完（finished）而且錯誤之後還有回覆。最後還沒修好的錯誤不算。
+ * subagent 的步驟：後面同一個工具成功，或交給它的那一步成功了。
+ */
+export function markRecovered(turn: Turn, finished: boolean): void {
+  const order: { step: Step; block: number }[] = [];
+  turn.blocks.forEach((block, index) => {
+    if (block.kind !== "steps") return;
+    for (const step of block.steps) order.push({ step, block: index });
+  });
+  const lastReply = turn.blocks.findLastIndex(
+    (block) => block.kind === "text" && !block.streaming,
+  );
+  order.forEach(({ step, block }, index) => {
+    if (step.status === "error") {
+      step.recovered =
+        succeedsLater(
+          step,
+          order.slice(index + 1).map((item) => item.step),
+        ) ||
+        (finished && lastReply > block);
+    }
+    if (step.children) markChildren(step.children, step.status === "done");
+  });
+}
+
+function markChildren(children: Step[], parentDone: boolean): void {
+  children.forEach((child, index) => {
+    if (child.status === "error") {
+      child.recovered =
+        parentDone || succeedsLater(child, children.slice(index + 1));
+    }
+    if (child.children) markChildren(child.children, child.status === "done");
+  });
+}
+
+function succeedsLater(step: Step, later: Step[]): boolean {
+  return later.some(
+    (other) => other.name === step.name && other.status === "done",
+  );
+}
+
+function addUnique(turn: Turn, paths: string[]): void {
+  for (const path of paths) {
+    if (!turn.produced.includes(path)) turn.produced.push(path);
+  }
+}
+
+/** 沙盒產生的檔案，同一個路徑只留一次，新的在前面。 */
+export function collectProduced(turns: Turn[]): string[] {
+  const seen = new Set<string>();
+  for (const turn of [...turns].reverse()) {
+    for (const path of [...turn.produced].reverse()) seen.add(path);
+  }
+  return [...seen];
+}
+
+/**
+ * 確認卡片與檔案面板要顯示的內容。伺服器沒有附上 preview 的 edit_file
+ * （TypeScript 版）只有被取代的那一段可以比較。
+ */
+export function approvalPreview(approval: Approval): FilePreview | undefined {
+  return approval.preview ?? editFragment(approval.tool, approval.arguments);
+}
+
+/** edit_file 參數裡被取代的那一段，當成修改前後的內容。 */
+function editFragment(
+  name: string,
+  args: Record<string, unknown>,
+): FilePreview | undefined {
+  if (name !== "edit_file") return undefined;
+  const { path, old_text: before, new_text: after } = args;
+  if (
+    typeof path !== "string" ||
+    typeof before !== "string" ||
+    typeof after !== "string"
+  ) {
+    return undefined;
+  }
+  return { path, before, after };
 }
 
 /** 附件那一行路徑後面給模型的說明（uploads.py 的 describe）。 */
@@ -255,11 +412,15 @@ export function replyOf(turn: Turn): { text: string; index?: number } {
  */
 export function summarizeSteps(steps: Step[]): {
   active?: Step;
+  /** 還沒修正的錯誤。 */
   errors: number;
+  /** 之後已經自己修正的錯誤。 */
+  fixed: number;
 } {
   const active = findActive(steps);
-  const errors = steps.filter((step) => step.status === "error").length;
-  return { active, errors };
+  const failed = steps.filter((step) => step.status === "error");
+  const fixed = failed.filter((step) => step.recovered).length;
+  return { active, errors: failed.length - fixed, fixed };
 }
 
 function findActive(steps: Step[] | undefined): Step | undefined {
@@ -351,6 +512,8 @@ function toChildStep(
   child: SubagentStep,
   approvals: Map<string, Approval>,
   running: boolean,
+  /** 收集 subagent 用沙盒產生的檔案。 */
+  produced: string[],
 ): Step {
   let status: StepStatus = child.status;
   const approval = approvals.get(child.callId);
@@ -359,12 +522,21 @@ function toChildStep(
     if (!running) status = "interrupted";
     else if (waiting) status = "waiting";
   }
+  let result = child.result;
+  if (result !== undefined) {
+    const split = splitProduced(result);
+    result = split.text;
+    for (const path of split.produced) {
+      if (!produced.includes(path)) produced.push(path);
+    }
+    if (child.status === "error" && isDeniedResult(result)) status = "denied";
+  }
   return {
     id: child.id,
     name: child.name,
     args: child.arguments,
     rawArgs: JSON.stringify(child.arguments),
-    result: child.result,
+    result,
     status,
     approval: status === "waiting" ? approval : undefined,
     agent: child.agent,
@@ -376,19 +548,38 @@ function toFileChange(
   preview: FilePreview | undefined,
 ): FileChange | undefined {
   const { path, content } = step.args;
-  if (typeof path !== "string" || typeof content !== "string") return;
+  if (typeof path !== "string") return;
   let status: FileStatus = "writing";
   if (step.status === "waiting") status = "pending";
   else if (step.status === "done") status = "written";
-  else if (step.status === "error") {
-    status = step.result?.includes(DENIED_MARK) ? "denied" : "failed";
-  } else if (step.status === "interrupted") status = "failed";
+  else if (step.status === "denied") status = "denied";
+  else if (step.status === "error" || step.status === "interrupted") {
+    status = "failed";
+  }
+  const base = { callId: step.id, path, status, approval: step.approval };
+  if (typeof content === "string") {
+    return {
+      ...base,
+      before: preview ? preview.before : undefined,
+      after: content,
+    };
+  }
+  // edit_file：確認時看過的內容（整個檔案）優先，沒有時只有被取代的那段。
+  const piece = editFragment(step.name, step.args);
+  if (!piece) return;
+  if (preview) {
+    return {
+      ...base,
+      before: preview.before,
+      after: preview.after,
+      edited: true,
+    };
+  }
   return {
-    callId: step.id,
-    path,
-    before: preview ? preview.before : undefined,
-    after: content,
-    status,
-    approval: step.approval,
+    ...base,
+    before: piece.before,
+    after: piece.after,
+    edited: true,
+    fragment: true,
   };
 }

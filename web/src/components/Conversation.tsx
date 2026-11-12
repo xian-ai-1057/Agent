@@ -1,11 +1,12 @@
 /** 一段對話：內容、權限確認、輸入框，以及右側的檔案面板。 */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type {
-  Feedback,
-  PermissionMode,
-  SessionDetail,
-  SessionOptions,
+import {
+  type Feedback,
+  INTERRUPTED_STOP_REASON,
+  type PermissionMode,
+  type SessionDetail,
+  type SessionOptions,
 } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
 import { isBusy, MODE_LABELS, STOP_NOTICES } from "../format.ts";
@@ -16,9 +17,11 @@ import {
   useStore,
 } from "../store.ts";
 import {
+  approvalPreview,
   buildTurns,
   collectAttachments,
   collectFiles,
+  collectProduced,
   type FileChange,
   replyOf,
   type Step,
@@ -106,6 +109,7 @@ export function Conversation({ id }: { id: string }) {
   );
   const files = useMemo(() => collectFiles(turns), [turns]);
   const attachments = useMemo(() => collectAttachments(turns), [turns]);
+  const produced = useMemo(() => collectProduced(turns), [turns]);
   const summary = detail?.summary;
   const busy = isBusy(summary);
   const approval = detail?.approvals[0];
@@ -137,12 +141,18 @@ export function Conversation({ id }: { id: string }) {
   }, [summary?.title, summary]);
 
   // 有寫檔的確認進來時，自動打開面板顯示差異。
+  const approvalFile = useMemo(
+    () => (approval ? approvalPreview(approval) : undefined),
+    [approval],
+  );
   useEffect(() => {
-    if (!approval?.preview || autoOpened.current === approval.id) return;
+    if (!approval || !approvalFile || autoOpened.current === approval.id) {
+      return;
+    }
     autoOpened.current = approval.id;
-    setPanel({ open: true, path: approval.preview.path });
+    setPanel({ open: true, path: approvalFile.path });
     setTab("diff");
-  }, [approval]);
+  }, [approval, approvalFile]);
 
   // 內容變多時，如果使用者本來就在最底下，就跟著捲到底。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 內容改變時才需要捲動
@@ -278,6 +288,10 @@ export function Conversation({ id }: { id: string }) {
       (summary.activity === undefined ||
         summary.activity.kind === "thinking") &&
       !detail.partial);
+  const canLoadFiles = Boolean(project?.features?.files);
+  const interrupted =
+    summary.status === "stopped" &&
+    summary.stopReason === INTERRUPTED_STOP_REASON;
   const approvalAgent =
     (approval && findApprovalStep(turns, approval.id)?.agent) ?? summary.agent;
 
@@ -322,7 +336,8 @@ export function Conversation({ id }: { id: string }) {
                   key={turn.key}
                   turn={turn}
                   onOpenFile={openFile}
-                  onOpenPath={project?.features?.files ? openPath : undefined}
+                  onOpenPath={canLoadFiles ? openPath : undefined}
+                  canLoadFiles={canLoadFiles}
                   reply={
                     reply?.text
                       ? {
@@ -346,14 +361,23 @@ export function Conversation({ id }: { id: string }) {
             {pendingShown && (
               <PendingView
                 pending={pendingShown}
-                onOpenPath={project?.features?.files ? openPath : undefined}
+                onOpenPath={canLoadFiles ? openPath : undefined}
               />
             )}
             {showThinking && <Thinking />}
             {summary.status === "error" && !pendingShown && (
               <ErrorCard id={id} message={summary.error ?? "未知的錯誤"} />
             )}
-            {summary.status === "stopped" && !pendingShown && (
+            {interrupted && !pendingShown && (
+              <ErrorCard
+                id={id}
+                tone="interrupted"
+                message={
+                  summary.notice ?? "伺服器重新啟動，這一輪沒有做完就停下來了。"
+                }
+              />
+            )}
+            {summary.status === "stopped" && !interrupted && !pendingShown && (
               <div className="notice anim-in">你停止了這一輪。</div>
             )}
             {blockedNotice && !pendingShown && (
@@ -383,9 +407,10 @@ export function Conversation({ id }: { id: string }) {
                 key={approval.id}
                 approval={approval}
                 agent={approvalAgent}
+                sessionApproval={Boolean(project?.features?.sessionApproval)}
                 onShowFile={() => {
-                  if (approval.preview) {
-                    setPanel({ open: true, path: approval.preview.path });
+                  if (approvalFile) {
+                    setPanel({ open: true, path: approvalFile.path });
                     setTab("diff");
                   }
                 }}
@@ -436,9 +461,10 @@ export function Conversation({ id }: { id: string }) {
         <FilePanel
           files={files}
           attachments={attachments}
+          produced={produced}
           selected={panel.path}
           tab={tab}
-          canLoad={Boolean(project?.features?.files)}
+          canLoad={canLoadFiles}
           onSelect={(path) => setPanel({ open: true, path })}
           onTab={setTab}
           onClose={() => setPanel((p) => ({ ...p, open: false }))}
@@ -496,21 +522,42 @@ function findApprovalStep(turns: Turn[], approvalId: string): Step | undefined {
   return undefined;
 }
 
-function ErrorCard({ id, message }: { id: string; message: string }) {
+/**
+ * 這一輪沒做完、可以重試的說明卡片。出錯（error）用紅色；伺服器重新
+ * 啟動而中斷（interrupted）不是誰做錯了，用警告色。
+ */
+function ErrorCard({
+  id,
+  message,
+  tone = "error",
+}: {
+  id: string;
+  message: string;
+  tone?: "error" | "interrupted";
+}) {
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string>();
-  const modelProblem = /模型|端點|HARNESS_|API|Connection/i.test(message);
+  const interrupted = tone === "interrupted";
+  const modelProblem =
+    !interrupted && /模型|端點|HARNESS_|API|Connection/i.test(message);
   return (
-    <section className="error-card anim-rise" role="alert">
+    <section
+      className={`error-card anim-rise${interrupted ? " ch-interrupted" : ""}`}
+      role={interrupted ? "status" : "alert"}
+    >
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-        <span style={{ color: "var(--danger)", display: "flex" }}>
+        <span className="ch-error-icon">
           <AlertIcon />
         </span>
         <div style={{ minWidth: 0 }}>
-          <div className="title">這一輪出錯停下來了</div>
+          <div className="title">
+            {interrupted ? "這一輪被中斷了" : "這一輪出錯停下來了"}
+          </div>
           <p className="body">{message}</p>
           <p className="body subtle">
-            你的訊息已經保留，問題排除後按重試就會接著跑。
+            {interrupted
+              ? "你的訊息已經保留，按重試就會接著做。"
+              : "你的訊息已經保留，問題排除後按重試就會接著跑。"}
           </p>
           {error && <p className="inline-error">重試失敗：{error}</p>}
         </div>

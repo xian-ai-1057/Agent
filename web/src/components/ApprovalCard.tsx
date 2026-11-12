@@ -1,13 +1,18 @@
-/** 工具呼叫的權限確認：允許一次、以後都允許、拒絕。按 1、2、3 也可以。 */
+/**
+ * 工具呼叫的權限確認：允許一次、（這段對話都允許、）這個專案以後都
+ * 允許、拒絕，依序也可以按數字鍵。伺服器支援 sessionApproval 時才有
+ * 「這段對話都允許」，按 1–4；否則按 1–3。
+ */
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import type { Approval, ApprovalDecision } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
+import { approvalPreview } from "../transcript.ts";
 import "./chat/chat.css";
-import { describeStep, sentenceText } from "./chat/steps.ts";
+import { describeStep, sentenceText, toolLabel } from "./chat/steps.ts";
 import { lineStats } from "./FilePanel.tsx";
 
-/** 正在打字、或對話框與選單開著時，1、2、3 不當成快速鍵。 */
+/** 正在打字、或對話框與選單開著時，數字鍵不當成快速鍵。 */
 const TYPING =
   "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
 const LAYERS = "dialog, [role='dialog'], [role='menu']";
@@ -25,11 +30,14 @@ function hotkeysAllowed(target: EventTarget | null): boolean {
 export function ApprovalCard({
   approval,
   agent,
+  sessionApproval = false,
   onShowFile,
 }: {
   approval: Approval;
   /** 提出要求的 agent 名稱。 */
   agent: string;
+  /** 伺服器支援「這段對話都允許」（features.sessionApproval）。 */
+  sessionApproval?: boolean;
   onShowFile: () => void;
 }) {
   const [sending, setSending] = useState(false);
@@ -51,22 +59,26 @@ export function ApprovalCard({
     }
   };
 
+  const keys: Record<string, ApprovalDecision> = sessionApproval
+    ? { "1": "once", "2": "session", "3": "always", "4": "deny" }
+    : { "1": "once", "2": "always", "3": "deny" };
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !hotkeysAllowed(event.target)) return;
       // 手機抽屜打開時主畫面是 inert，卡片看不到也不能按。
       if (card.current?.closest("[inert]")) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const choice = { "1": "once", "2": "always", "3": "deny" }[event.key];
+      const choice = keys[event.key];
       if (!choice) return;
       event.preventDefault();
-      void decide(choice as ApprovalDecision);
+      void decide(choice);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const { preview } = approval;
+  const preview = approvalPreview(approval);
   const command =
     approval.tool === "run_command" &&
     typeof approval.arguments.command === "string"
@@ -101,7 +113,7 @@ export function ApprovalCard({
             <div style={{ minWidth: 0 }}>
               <div className="title">
                 {preview
-                  ? `${agent} 想要寫入檔案`
+                  ? `${agent} 想要${approval.tool === "edit_file" ? "修改" : "寫入"}檔案`
                   : command !== undefined
                     ? `${agent} 想要執行指令`
                     : `${agent} 想要${action}`}
@@ -153,11 +165,26 @@ export function ApprovalCard({
             >
               允許這一次
             </Option>
-            <Option n="2" disabled={sending} onClick={() => decide("always")}>
-              這個專案以後都允許 <code>{approval.tool}</code>
+            {sessionApproval && (
+              <Option
+                n="2"
+                disabled={sending}
+                onClick={() => decide("session")}
+              >
+                這段對話都允許
+                <ToolName tool={approval.tool} />
+              </Option>
+            )}
+            <Option
+              n={sessionApproval ? "3" : "2"}
+              disabled={sending}
+              onClick={() => decide("always")}
+            >
+              這個專案以後都允許
+              <ToolName tool={approval.tool} />
             </Option>
             <Option
-              n="3"
+              n={sessionApproval ? "4" : "3"}
               kind="outline"
               disabled={sending}
               onClick={() => decide("deny")}
@@ -174,6 +201,20 @@ export function ApprovalCard({
       </div>
     </div>
   );
+}
+
+/** 選項裡的工具：有白話名稱時顯示名稱（滑過看得到工具名稱），否則顯示工具名稱。 */
+function ToolName({ tool }: { tool: string }) {
+  const label = toolLabel(tool);
+  if (!label) {
+    return (
+      <>
+        {" "}
+        <code>{tool}</code>
+      </>
+    );
+  }
+  return <span title={tool}>{label}</span>;
 }
 
 function Option({

@@ -9,14 +9,19 @@
  * KaTeX 與上色的程式比較大，內容裡真的有 $$ 或程式碼區塊時才載入。
  * 還在串流的回覆每來一段字就重畫一次，所以先不排版、不上色，等回覆
  * 完成後再做一次。
+ *
+ * localFiles 為 true 時（伺服器支援 /api/files），圖片的 src 是相對路徑
+ * （或沙盒裡的 /workspace/...）就從工作資料夾讀取。
  */
 
 import { memo, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { fileUrl } from "../api.ts";
 import "./chat/chat.css";
 import { CodeBlock } from "./chat/CodeBlock.tsx";
+import { projectPath } from "./chat/filetype.ts";
 import { displayMath } from "./chat/math.ts";
 
 type Plugins = NonNullable<
@@ -104,12 +109,31 @@ const components: Components = {
   ),
 };
 
+/** 圖片的 src 指向專案裡的檔案時，改從 /api/files 讀取。 */
+const localComponents: Components = {
+  ...components,
+  img: ({ src, alt, title }) => {
+    const path = typeof src === "string" ? projectPath(src) : undefined;
+    return (
+      <img
+        src={path ? fileUrl(path) : src}
+        alt={alt ?? ""}
+        title={title}
+        loading="lazy"
+      />
+    );
+  },
+};
+
 export const Markdown = memo(function Markdown({
   text,
   streaming = false,
+  localFiles = false,
 }: {
   text: string;
   streaming?: boolean;
+  /** 伺服器可以讀取工作資料夾的檔案（features.files）。 */
+  localFiles?: boolean;
 }) {
   const rehypePlugins = useRehypePlugins(text, streaming);
   const source = useMemo(
@@ -121,7 +145,7 @@ export const Markdown = memo(function Markdown({
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
-        components={components}
+        components={localFiles ? localComponents : components}
       >
         {source}
       </ReactMarkdown>

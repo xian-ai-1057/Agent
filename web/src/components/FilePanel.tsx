@@ -42,6 +42,7 @@ export function lineStats(before: string | null | undefined, after: string) {
 export function FilePanel({
   files,
   attachments = [],
+  produced = [],
   selected,
   tab,
   canLoad = false,
@@ -52,6 +53,8 @@ export function FilePanel({
   files: FileChange[];
   /** 使用者在這段對話附上的檔案路徑。 */
   attachments?: string[];
+  /** 沙盒在這段對話產生的檔案路徑。 */
+  produced?: string[];
   selected?: string;
   tab: PanelTab;
   /** 伺服器可以讀取工作資料夾的檔案（features.files）。 */
@@ -64,8 +67,13 @@ export function FilePanel({
   const change = files.find((file) => file.path === selected);
   const diffFile = change ?? files[0];
   // 預覽的對象：選到的路徑，沒有時是最新的變更或附件。
-  const previewPath = selected ?? files[0]?.path ?? attachments[0];
-  const total = new Set([...files.map((f) => f.path), ...attachments]).size;
+  const previewPath =
+    selected ?? files[0]?.path ?? produced[0] ?? attachments[0];
+  const total = new Set([
+    ...files.map((f) => f.path),
+    ...produced,
+    ...attachments,
+  ]).size;
 
   // 全螢幕時按 Esc 回到原本的大小。對話框、彈出框或選單開著時，Esc
   // 是關掉那一層，不能連全螢幕一起退出。
@@ -134,6 +142,7 @@ export function FilePanel({
           <FileList
             files={files}
             attachments={attachments}
+            produced={produced}
             total={total}
             onOpen={(path) => {
               onSelect(path);
@@ -180,6 +189,7 @@ export function FilePanel({
                 {NOTES[diffFile.status]}
                 {diffFile.before === undefined &&
                   "（從對話紀錄還原，沒有原本的內容可以比較）"}
+                {diffFile.fragment && "（從對話紀錄還原，只有被取代的那一段）"}
               </div>
               <Diff file={diffFile} key={`d-${diffFile.callId}`} />
             </div>
@@ -267,6 +277,7 @@ function PreviewBody({
           className={`file-note ${change.status === "pending" ? "pending" : ""}`}
         >
           {NOTES[change.status]}
+          {change.fragment && "（只有修改後的那一段）"}
         </div>
         <div className="preview-body anim-in">
           {markdown ? (
@@ -292,33 +303,46 @@ function PreviewBody({
   );
 }
 
-/** 這段對話寫入或附上的檔案。 */
+/** 這段對話寫入、程式產生或附上的檔案。 */
 function FileList({
   files,
   attachments,
+  produced,
   total,
   onOpen,
 }: {
   files: FileChange[];
   attachments: string[];
+  produced: string[];
   total: number;
   onOpen: (path: string) => void;
 }) {
   if (total === 0) {
     return (
-      <div className="panel-empty">這段對話還沒有寫入或附上任何檔案。</div>
+      <div className="panel-empty">
+        這段對話還沒有寫入、產生或附上任何檔案。
+      </div>
     );
   }
-  const written = new Set(files.map((file) => file.path));
+  const seen = new Set(files.map((file) => file.path));
   const rows = [
     ...files.map((file) => ({
       path: file.path,
-      meta: NOTES[file.status].replace(/。$/, ""),
+      meta:
+        file.edited && file.status === "written"
+          ? "已修改"
+          : NOTES[file.status].replace(/。$/, ""),
     })),
-    ...attachments
-      .filter((path) => !written.has(path))
-      .map((path) => ({ path, meta: "你附上的檔案" })),
+    ...produced
+      .filter((path) => !seen.has(path))
+      .map((path) => ({ path, meta: "程式產生的檔案" })),
   ];
+  for (const path of produced) seen.add(path);
+  rows.push(
+    ...attachments
+      .filter((path) => !seen.has(path))
+      .map((path) => ({ path, meta: "你附上的檔案" })),
+  );
   return (
     <div className="scroll">
       <ul className="ch-file-list">

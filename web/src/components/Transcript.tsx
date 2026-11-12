@@ -1,6 +1,7 @@
-/** 對話內容：使用者訊息、步驟群組、agent 的文字、檔案卡片。 */
+/** 對話內容：使用者訊息、步驟群組、agent 的文字、檔案卡片與產生的圖片。 */
 
 import { useState } from "react";
+import { fileUrl } from "../api.ts";
 import {
   type Block,
   type FileChange,
@@ -11,6 +12,8 @@ import {
 } from "../transcript.ts";
 import "./chat/chat.css";
 import { FileBadge } from "./chat/FileBadge.tsx";
+import { fileName, isThumbnail } from "./chat/filetype.ts";
+import { DownloadIcon } from "./chat/icons.tsx";
 import {
   MessageActions,
   type ReplyActions,
@@ -34,15 +37,26 @@ export function TurnView({
   turn,
   onOpenFile,
   onOpenPath,
+  canLoadFiles = false,
   reply,
 }: {
   turn: Turn;
   onOpenFile: (change: FileChange) => void;
-  /** 點了使用者附上的檔案；沒有提供時附件不能點。 */
+  /** 點了使用者附上（或程式產生）的檔案；沒有提供時不能點。 */
   onOpenPath?: (path: string) => void;
+  /**
+   * 伺服器可以讀取工作資料夾的檔案（features.files）：顯示產生的圖片
+   * 縮圖、下載按鈕，回覆裡相對路徑的圖片也從伺服器讀取。
+   */
+  canLoadFiles?: boolean;
   /** 這一輪已經結束時，回覆底下的動作。 */
   reply?: ReplyActions;
 }) {
+  const written = turn.files.filter((change) => change.status === "written");
+  // 寫入的檔案已經有卡片，不再重複顯示。
+  const produced = turn.produced.filter(
+    (path) => !written.some((change) => change.path === path),
+  );
   return (
     <>
       {/* 附件放在訊息上方，和 Claude、ChatGPT 一樣先看到附了什麼。 */}
@@ -62,17 +76,22 @@ export function TurnView({
         </div>
       )}
       {turn.blocks.map((block) => (
-        <BlockView key={block.key} block={block} />
+        <BlockView key={block.key} block={block} localFiles={canLoadFiles} />
       ))}
-      {turn.files
-        .filter((change) => change.status === "written")
-        .map((change) => (
-          <FileCard
-            key={change.callId}
-            change={change}
-            onOpen={() => onOpenFile(change)}
-          />
-        ))}
+      {written.map((change) => (
+        <FileCard
+          key={change.callId}
+          change={change}
+          onOpen={() => onOpenFile(change)}
+        />
+      ))}
+      {produced.length > 0 && (
+        <ProducedFiles
+          paths={produced}
+          canLoad={canLoadFiles}
+          onOpen={onOpenPath}
+        />
+      )}
       {reply?.text && <MessageActions {...reply} />}
     </>
   );
@@ -108,11 +127,21 @@ export function AttachmentChip({
   );
 }
 
-function BlockView({ block }: { block: Block }) {
+function BlockView({
+  block,
+  localFiles,
+}: {
+  block: Block;
+  localFiles: boolean;
+}) {
   if (block.kind === "text") {
     return (
       <div className="anim-in">
-        <Markdown text={block.text} streaming={block.streaming} />
+        <Markdown
+          text={block.text}
+          streaming={block.streaming}
+          localFiles={localFiles}
+        />
       </div>
     );
   }
@@ -127,14 +156,19 @@ function BlockView({ block }: { block: Block }) {
   return <StepGroup steps={block.steps} />;
 }
 
-/** 連續的工具呼叫。執行中與有錯誤時預設展開，做完就收起來。 */
+/**
+ * 連續的工具呼叫。執行中與有還沒修正的錯誤時預設展開，做完就收起來；
+ * 之後已經自己修正的錯誤只在標題用淡色註記。
+ */
 function StepGroup({ steps }: { steps: Step[] }) {
-  const { active, errors } = summarizeSteps(steps);
+  const { active, errors, fixed } = summarizeSteps(steps);
   const [choice, setChoice] = useState<boolean | null>(null);
   const open = choice ?? (Boolean(active) || errors > 0);
 
   let label = `已執行 ${steps.length} 個步驟`;
   if (errors > 0) label += ` · ${errors} 個工具錯誤`;
+  const fixedNote =
+    !active && fixed > 0 ? `${fixed} 個步驟出錯，已自動修正` : undefined;
   const who = active?.agent ? `${active.agent}：` : "";
   if (active?.status === "waiting") {
     label = `${who}等你確認：${sentenceText(describeStep(active))}`;
@@ -155,6 +189,7 @@ function StepGroup({ steps }: { steps: Step[] }) {
           </span>
         )}
         <span className="label">{label}</span>
+        {fixedNote && <span className="ch-fixed-note">· {fixedNote}</span>}
         <ChevronIcon className="chevron" />
       </button>
       <div className={`collapse ${open ? "open" : ""}`}>
@@ -203,7 +238,7 @@ function StepRow({ step }: { step: Step }) {
         onClick={() => setExpanded(!expanded)}
       >
         <span className="step-icon">
-          <StepIcon status={step.status} />
+          <StepIcon status={step.status} recovered={step.recovered} />
         </span>
         {step.agent && <span className="step-agent">{step.agent}</span>}
         <Sentence sentence={sentence} />
@@ -217,8 +252,14 @@ function StepRow({ step }: { step: Step }) {
             {resultPreview(step.result)}
           </span>
         )}
-        {step.status === "error" && (
+        {step.status === "denied" && (
+          <span className="step-result anim-in">你拒絕了這個動作</span>
+        )}
+        {step.status === "error" && !step.recovered && (
           <span className="step-flag warn anim-in">工具錯誤</span>
+        )}
+        {step.status === "error" && step.recovered && (
+          <span className="step-flag ch-flag-muted">出錯，已修正</span>
         )}
         {step.status === "waiting" && (
           <span className="step-flag accent">等你確認</span>
@@ -227,7 +268,8 @@ function StepRow({ step }: { step: Step }) {
           <span className="step-flag warn">已中斷</span>
         )}
       </button>
-      {step.status === "error" && !expanded && (
+      {/* 已經修正的錯誤不顯示內容，展開後才看得到。 */}
+      {step.status === "error" && !step.recovered && !expanded && (
         <div className="step-error anim-shake">{step.result}</div>
       )}
       {expanded && <StepDetail step={step} plan={plan} />}
@@ -290,7 +332,20 @@ function StepDetail({
   );
 }
 
-function StepIcon({ status }: { status: Step["status"] }) {
+function StepIcon({
+  status,
+  recovered,
+}: {
+  status: Step["status"];
+  recovered?: boolean;
+}) {
+  if (status === "denied" || (status === "error" && recovered)) {
+    return (
+      <span className="ch-step-muted">
+        <CrossIcon />
+      </span>
+    );
+  }
   if (status === "done") {
     return (
       <span className="anim-pop ch-step-ok">
@@ -332,9 +387,78 @@ function FileCard({
       <FileBadge path={change.path} />
       <span>
         <span className="name">{change.path.split("/").at(-1)}</span>
-        <span className="meta">{change.path} · 已寫入</span>
+        <span className="meta">
+          {change.path} · {change.edited ? "已修改" : "已寫入"}
+        </span>
       </span>
     </button>
+  );
+}
+
+/**
+ * 沙盒產生的檔案：圖片顯示成縮圖，其他檔案是卡片（可以預覽與下載）。
+ * 伺服器不能讀取檔案時沒有縮圖與下載，只顯示檔名。
+ */
+function ProducedFiles({
+  paths,
+  canLoad,
+  onOpen,
+}: {
+  paths: string[];
+  canLoad: boolean;
+  onOpen?: (path: string) => void;
+}) {
+  const images = canLoad ? paths.filter(isThumbnail) : [];
+  const others = paths.filter((path) => !images.includes(path));
+  return (
+    <>
+      {images.length > 0 && (
+        <ul className="ch-thumbs anim-in" aria-label="產生的圖片">
+          {images.map((path) => (
+            <li key={path}>
+              <button
+                type="button"
+                className="ch-thumb"
+                title={path}
+                aria-label={`預覽 ${fileName(path)}`}
+                disabled={!onOpen}
+                onClick={() => onOpen?.(path)}
+              >
+                <img src={fileUrl(path)} alt={fileName(path)} loading="lazy" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {others.map((path) => (
+        <div key={path} className="file-card ch-produced anim-in">
+          <button
+            type="button"
+            className="ch-produced-open"
+            aria-label={`預覽 ${path}`}
+            disabled={!onOpen}
+            onClick={() => onOpen?.(path)}
+          >
+            <FileBadge path={path} />
+            <span className="ch-produced-main">
+              <span className="name">{fileName(path)}</span>
+              <span className="meta">{path} · 程式產生</span>
+            </span>
+          </button>
+          {canLoad && (
+            <a
+              className="btn btn-outline ch-btn-small"
+              href={fileUrl(path, true)}
+              download
+              aria-label={`下載 ${fileName(path)}`}
+            >
+              <DownloadIcon size={14} />
+              下載
+            </a>
+          )}
+        </div>
+      ))}
+    </>
   );
 }
 
