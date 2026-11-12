@@ -104,11 +104,12 @@ export interface Approval {
 
 /**
  * 使用者對工具呼叫的決定。
- *   once    只允許這一次
- *   always  加進 harness.yaml 的 allow 規則，以後都允許
- *   deny    拒絕
+ *   once     只允許這一次
+ *   session  這段對話之後都允許這個工具（Python 版；不寫進 harness.yaml）
+ *   always   加進 harness.yaml 的 allow 規則，以後都允許
+ *   deny     拒絕
  */
-export type ApprovalDecision = "once" | "always" | "deny";
+export type ApprovalDecision = "once" | "session" | "always" | "deny";
 
 /** 一段對話的完整內容。 */
 export interface SessionDetail {
@@ -217,6 +218,8 @@ export interface ServerFeatures {
   sessionOptions: boolean;
   /** PUT /api/sessions/:id/feedback：對回覆按讚或倒讚。 */
   feedback: boolean;
+  /** 權限確認可以選「這段對話都允許」（ApprovalDecision 的 session）。 */
+  sessionApproval?: boolean;
 }
 
 export interface ToolInfo {
@@ -341,6 +344,23 @@ export interface UploadedFile {
  * 開頭是這個標記，接著是路徑（不含空白），後面可能還有給模型的說明。
  */
 export const ATTACHMENT_MARKER = "[附件] ";
+
+/**
+ * 沙盒產生檔案的說明行（Python 版）：run_python 執行後新增或修改的檔案，
+ * 伺服器接在工具結果後面，每個一行，開頭是這個標記，接著是相對於專案
+ * 根目錄的路徑。網頁用它顯示檔案卡片與縮圖。
+ */
+export const PRODUCED_MARKER = "[產生的檔案] ";
+
+/** 使用者拒絕工具呼叫時，交給模型的工具結果（網頁上改顯示「你拒絕了這個動作」）。 */
+export const DENIED_RESULT = "使用者沒有同意這次呼叫，請不要重試同樣的操作";
+
+/**
+ * 伺服器重新啟動時，正在跑或等待確認的那一輪會中斷（Python 版）：
+ * 摘要的 status 為 stopped、stopReason 為這個值，notice 說明原因；
+ * POST /api/sessions/:id/retry 可以接著做。
+ */
+export const INTERRUPTED_STOP_REASON = "interrupted";
 
 /** 測試模型連線的結果。 */
 export interface ModelTestResult {
