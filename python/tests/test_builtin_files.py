@@ -1,5 +1,6 @@
 """內建檔案工具的測試。"""
 
+import dataclasses
 import os
 import threading
 import time
@@ -46,6 +47,18 @@ async def test_read_file_notes_truncation(context, monkeypatch):
 def test_resolve_path_rejects_paths_outside_workdir(context, path):
     with pytest.raises(ValueError, match="超出專案資料夾"):
         files.resolve_path(context, path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["private/a.txt", "PRIVATE/a.txt", "Private/x/a.txt", ".HARNESS/Secrets/k"],
+)
+def test_hidden_names_ignore_case(context, path):
+    # macOS 的檔案系統不分大小寫：PRIVATE 就是 private。
+    hidden = dataclasses.replace(context, hidden=("private",))
+
+    with pytest.raises(ValueError, match="不能存取"):
+        paths.relative_parts(hidden, path)
 
 
 def test_write_file_requires_approval():

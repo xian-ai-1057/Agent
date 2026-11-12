@@ -37,6 +37,7 @@ tools/、skills/、harness.yaml、AGENTS.md）重疊，彼此也不能互相包�
 import dataclasses
 import pathlib
 import re
+import unicodedata
 from typing import Any
 
 from harness import project as project_lib
@@ -173,12 +174,17 @@ class Folders:
         )
 
     def legacy(self) -> Folder:
-        """「舊資料（專案資料夾）」：單人時期的檔案，只有接收舊資料的人看得到。"""
+        """「舊資料（專案資料夾）」：單人時期的檔案，只有接收舊資料的人看得到。
+
+        路徑是整個專案資料夾（含 agents/、tools/、harness.yaml），所以一律
+        唯讀：agent 在這裡只能讀舊檔案，不能寫入，免得被誘導改寫專案設定或
+        放進會被伺服器載入的程式。
+        """
         return Folder(
             id=LEGACY_ID,
             name=LEGACY_NAME,
             kind="shared",
-            writable=True,
+            writable=False,
             path=self.root,
             project_root=True,
             hidden=(PRIVATE_DIR,),
@@ -206,7 +212,13 @@ class Folders:
             or folder.members is None
             or user.username.lower() in folder.members
         ]
-        if self.legacy_owner is not None and user.id == self.legacy_owner:
+        # 接收舊資料的人被降為成員或停用後，就看不到整個專案資料夾。
+        if (
+            self.legacy_owner is not None
+            and user.id == self.legacy_owner
+            and user.is_admin
+            and not user.disabled
+        ):
             visible.append(self.legacy())
         return [self.private(user), *visible]
 
@@ -336,4 +348,11 @@ def _check_path(root: pathlib.Path, path: pathlib.Path, name: str) -> None:
 
 
 def _overlaps(a: pathlib.Path, b: pathlib.Path) -> bool:
+    # macOS 與 Windows 預設不分大小寫：「Agents」和「agents」是同一個資料夾。
+    a, b = _folded(a), _folded(b)
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
+
+
+def _folded(path: pathlib.Path) -> pathlib.PurePosixPath:
+    text = unicodedata.normalize("NFC", path.as_posix()).casefold()
+    return pathlib.PurePosixPath(text)

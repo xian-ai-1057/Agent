@@ -711,7 +711,7 @@ class TestBootstrapAndMigration:
             "id": "legacy",
             "name": "舊資料（專案資料夾）",
             "kind": "shared",
-            "writable": True,
+            "writable": False,
         }
         assert (s.root / "workspace" / "uploads" / "old.csv").exists()
         assert info["features"]["folders"] is True
@@ -753,6 +753,40 @@ class TestBootstrapAndMigration:
         assert await get(alice, "report.md") == 404
         assert await get(alice, "chart.png", "shared:shared") == 404
         assert await get(alice, "workspace/chart.png", "shared:shared") == 404
+
+    async def test_legacy_folder_is_read_only_and_follows_the_role(self, site):
+        s = await site(
+            [
+                conftest.tool_response(
+                    ("write_file", {"path": "tools/evil.py", "content": "x"})
+                ),
+                conftest.text_response("好"),
+            ],
+            users=(("boss", "admin"), ("other", "admin")),
+            prepare=legacy_data,
+        )
+        boss = await s.login("boss", password_of("boss"))
+        other = await s.login("other", password_of("other"))
+
+        await boss.api(
+            "POST", f"/sessions/{LEGACY_ID}/messages", {"text": "改一下"}
+        )
+        detail = await boss.wait_idle(LEGACY_ID)
+        tool = next(m for m in detail["messages"] if m["role"] == "tool")
+        # 專案資料夾裡有 tools/ 與 harness.yaml，舊資料資料夾一律唯讀。
+        assert not (s.root / "tools" / "evil.py").exists()
+        assert "唯讀" in tool["content"]
+
+        # 被降為成員後就看不到整個專案資料夾。
+        await other.api(
+            "PATCH",
+            f"/admin/users/{(await boss.api('GET', '/auth/me'))[1]['id']}",
+            {"role": "member"},
+        )
+        _, info = await boss.api("GET", "/project")
+        status, _ = await boss.api("GET", "/files/list?folder=legacy")
+        assert "legacy" not in [f["id"] for f in info["folders"]]
+        assert status == 404
 
     async def test_legacy_folder_runs_cannot_run_code_or_reach_private(
         self, site, monkeypatch
@@ -1530,7 +1564,9 @@ class TestWorkspacesConfig:
             ".harness/x",
             "private",
             "private/u",
+            "Private/u",
             "agents",
+            "Agents",
             "tools/a",
             "skills",
             "harness.yaml",

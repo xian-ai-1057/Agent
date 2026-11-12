@@ -18,6 +18,7 @@ import errno
 import os
 import pathlib
 import stat
+import unicodedata
 
 from harness import datatypes
 
@@ -314,15 +315,23 @@ def _inside_root(
 def _check_parts(
     context: datatypes.RunContext, parts: tuple[str, ...], shown: str
 ) -> None:
-    secrets = SECRETS_DIR.parts
-    if tuple(parts[: len(secrets)]) == secrets:
+    # macOS 與 Windows 的檔案系統預設不分大小寫，也不分 Unicode 的組合
+    # 方式：「PRIVATE」和「private」是同一個資料夾，所以比對前先統一。
+    folded = tuple(_fold(part) for part in parts)
+    secrets = tuple(_fold(part) for part in SECRETS_DIR.parts)
+    if folded[: len(secrets)] == secrets:
         raise ValueError(f"不能存取存放金鑰的資料夾：{shown}")
-    if parts and parts[0] in context.hidden:
+    if folded and folded[0] in {_fold(name) for name in context.hidden}:
         raise ValueError(f"不能存取這個位置：{shown}")
     if context.hide_dotfiles and any(
         part.startswith(".") and part not in (".", "..") for part in parts
     ):
         raise ValueError(f"不能存取以點開頭的檔案或資料夾：{shown}")
+
+
+def _fold(name: str) -> str:
+    """比對名稱用：統一 Unicode 組合方式並忽略大小寫。"""
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 def _open_at(directory: int, name: str, flags: int, mode: int, shown) -> int:
