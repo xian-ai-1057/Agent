@@ -29,7 +29,8 @@ export HARNESS_WEB_PASSWORD='一組夠長的隨機密碼'
 export HARNESS_BASE_URL=http://litellm:4000      # 模型設定，見「模型設定」
 export HARNESS_API_KEY=sk-...
 export HARNESS_MODEL=claude
-~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com
+~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com \
+    --trusted-proxy 127.0.0.1
 ```
 
 - **讓其他電腦連線時一定要登入。** 第一次啟動時自動建立管理者帳號
@@ -46,13 +47,26 @@ export HARNESS_MODEL=claude
   [在網頁上連接模型](/guide/web#在網頁上連接模型)（只有管理者能設定）。
 - `--allowed-host` 是使用者在瀏覽器網址列輸入的主機名稱（可以重複）。
   沒有指定時，用任何網址連線都接受（還是要登入）。
-- 登入的 cookie 是 HttpOnly、SameSite=Strict；經過 HTTPS（或反向代理送來
-  `X-Forwarded-Proto: https`）時另外加上 Secure。**一定要放在 HTTPS
-  後面**，不要讓瀏覽器直接用 http 連到伺服器傳送密碼。
+- `--trusted-proxy` 是反向代理連到 pyharness 的位址（IP 或網段，例如
+  `127.0.0.1`、`10.0.0.0/8`，可以重複；也可以用環境變數
+  `HARNESS_TRUSTED_PROXIES`，逗號分隔）。只有從這些位址連進來的請求，
+  才採信 `X-Forwarded-For`（取最右邊不是反向代理的那一站當成使用者的
+  IP，登入限制依它計算）與 `X-Forwarded-Proto`。沒有指定時這兩個標頭
+  一律不採信：所有人共用反向代理的 IP，cookie 也不會加上 Secure。
+- 登入的 cookie 是 HttpOnly、SameSite=Strict；經過 HTTPS（或信任的反向
+  代理送來 `X-Forwarded-Proto: https`）時另外加上 Secure。**一定要放在
+  HTTPS 後面**，不要讓瀏覽器直接用 http 連到伺服器傳送密碼。
+- 沒有設定密碼、也沒有任何帳號時是「本機模式」（不必登入）。這時伺服器
+  拒絕所有帶反向代理標頭（`X-Forwarded-For`、`Forwarded`、
+  `X-Forwarded-Host`、`Via`）或不是從本機連進來的請求，所以忘了設定
+  密碼就接上 nginx 時，只會看到「請設定 HARNESS_WEB_PASSWORD」的錯誤，
+  不會把管理者權限開放出去。
 
 ## 3. 用反向代理加上 HTTPS
 
-pyharness 只聽本機，由 nginx（或 Caddy 等）負責 HTTPS。以 nginx 為例：
+pyharness 只聽本機，由 nginx（或 Caddy 等）負責 HTTPS；啟動時用
+`--trusted-proxy 127.0.0.1` 讓 pyharness 採信 nginx 送來的
+`X-Forwarded-For` 與 `X-Forwarded-Proto`。以 nginx 為例：
 
 ```nginx
 server {
@@ -64,6 +78,7 @@ server {
         proxy_pass http://127.0.0.1:4321;
         proxy_set_header Host $http_host;  # 一定要傳瀏覽器送來的 Host
         proxy_set_header X-Forwarded-Proto $scheme;  # 讓登入的 cookie 加上 Secure
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # 使用者的 IP
         proxy_http_version 1.1;
         proxy_buffering off;               # 即時串流回覆（SSE）需要
         proxy_read_timeout 1h;
@@ -85,7 +100,7 @@ After=network-online.target docker.service
 User=harness
 WorkingDirectory=/srv/my_bot
 EnvironmentFile=/etc/harness.env
-ExecStart=/home/harness/venv/bin/pyharness web --allowed-host ai.example.com
+ExecStart=/home/harness/venv/bin/pyharness web --allowed-host ai.example.com --trusted-proxy 127.0.0.1
 Restart=on-failure
 
 [Install]
@@ -119,7 +134,21 @@ sudo systemctl enable --now harness
   agent 使用 `shell`；企業版會把管理者也移進沙盒。
 - **共用資料夾裡的檔案，所有能使用它的人都拿得到**（agent 可以讀裡面的
   任何檔案），上傳的檔案也不會自動刪除。敏感文件請放在自己的「我的
-  檔案」，分析完自行清理。
-- 登入失敗的限制（同一個帳號名稱加 IP 連續錯 5 次暫停 30 秒）只記在
-  記憶體裡，重新啟動後歸零；放在網際網路上時，請另外在反向代理加上
-  流量限制。
+  檔案」，分析完自行清理。預設的「共用」資料夾是 `shared/`；從單人版
+  升級時，舊的 `workspace/` 只有第一位管理者能在「舊資料（專案資料夾）」
+  裡看到（見[從舊版升級](/guide/web#帳號與成員)）。
+- **沙盒裡的程式可以在工作資料夾裡建立捷徑（symlink）**，所以伺服器存取
+  工作資料夾時一律不跟著捷徑走：檔案工具、檔案面板與上傳都從資料夾
+  開始一層一層用 `O_NOFOLLOW` 打開，路徑上有捷徑就拒絕。
+- **`web_fetch` 不能讀內部網路**（本機、私有網路、link-local 與雲端主機的
+  中繼資料服務 `169.254.169.254`、IPv6 unique-local、CGNAT），每次轉址
+  都重新檢查。管理者確實需要時，在 `harness.yaml` 寫
+  `web: {allowPrivateNetworks: true}`，只對管理者自己的對話生效。
+- **停用成員或改變角色會立刻生效**：那個人正在執行的對話停下來，開著
+  的網頁不再收到更新（SSE 每次心跳都重新確認登入）；工具的權限判斷
+  每次都讀最新的角色。
+- 登入失敗的限制只記在記憶體裡，重新啟動後歸零：同一個帳號名稱連續錯
+  5 次後每次再錯都要等 2 秒起跳、加倍、最多 60 秒（換 IP 也一樣），同一
+  個 IP 10 分鐘內最多錯 50 次，同時最多 4 個登入在驗證密碼。等待時間
+  刻意設得很短，別人亂試你的帳號時你最多等一分鐘。放在網際網路上時，
+  請另外在反向代理加上流量限制，並設定 `--trusted-proxy`。

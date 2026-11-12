@@ -5,6 +5,7 @@ API 與事件格式要和 TypeScript 版完全相同，兩個版本共用同一�
 """
 
 import asyncio
+import ipaddress
 import json
 import os
 import pathlib
@@ -64,15 +65,13 @@ def make_project(root: pathlib.Path, extra: str = "") -> pathlib.Path:
 
 
 def private(root: pathlib.Path) -> pathlib.Path:
-    """本機使用者的「我的檔案」：對話預設的工作資料夾。"""
-    folder = root / "private" / "local"
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
+    """本機模式的工作資料夾：和加入帳號之前一樣是專案根目錄。"""
+    return root
 
 
 def sessions_dir(root: pathlib.Path) -> pathlib.Path:
-    """本機使用者存放對話紀錄的資料夾。"""
-    return root / ".harness" / "users" / "local" / "sessions"
+    """本機模式的對話紀錄：和 CLI 共用 .harness/sessions/。"""
+    return root / ".harness" / "sessions"
 
 
 class Harness:
@@ -960,6 +959,19 @@ class TestServerDeployment:
         assert "HARNESS_WEB_PASSWORD" in out
         assert not credentials.secrets_dir(root).exists()
 
+    def test_cli_passes_trusted_proxies(self, tmp_path, served, monkeypatch):
+        root = make_project(tmp_path / "cli")
+        monkeypatch.setenv("HARNESS_TRUSTED_PROXIES", "10.0.0.0/8, 10.1.1.1")
+
+        cli.main(["web", "-p", str(root), "--trusted-proxy", "127.0.0.1"])
+
+        proxies = served[0]["trusted_proxies"]
+        assert server_lib.parse_trusted_proxies(proxies) == (
+            ipaddress.ip_network("127.0.0.1/32"),
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("10.1.1.1/32"),
+        )
+
     def test_cli_needs_no_password_on_localhost(self, tmp_path, served):
         root = make_project(tmp_path / "cli")
 
@@ -998,6 +1010,19 @@ class TestZeroConfigStart:
         assert "run_python" not in names
         assert served[0].memory is not None
         assert (root / "workspace").is_dir()
+
+    def test_assistant_talks_about_the_working_folder(self, tmp_path, served):
+        root = tmp_path / "fresh"
+
+        cli.main(["web", "-p", str(root)])
+
+        instructions = served[0].agents["main"].instructions
+        ignored = (root / ".gitignore").read_text("utf-8").split()
+        # 多人使用時上傳與產生的檔案都在對話的工作資料夾，不是 workspace/。
+        assert "工作資料夾的 uploads/" in instructions
+        assert "存在工作資料夾裡" in instructions
+        assert "workspace/uploads" not in instructions
+        assert {"private/", "shared/", ".harness/"} <= set(ignored)
 
     def test_assistant_uses_sandbox_when_docker_works(
         self, tmp_path, served, monkeypatch
@@ -1309,17 +1334,17 @@ class TestUploads:
         assert body["files"] == [
             {
                 "name": "十月_業績.xlsx",
-                "path": "uploads/十月_業績.xlsx",
+                "path": "workspace/uploads/十月_業績.xlsx",
                 "size": 5,
             },
             {
                 "name": "notes.txt",
-                "path": "uploads/notes.txt",
+                "path": "workspace/uploads/notes.txt",
                 "size": 2,
             },
         ]
         assert (
-            private(root) / "uploads/十月_業績.xlsx"
+            root / "workspace/uploads/十月_業績.xlsx"
         ).read_bytes() == b"excel"
 
     async def test_same_name_gets_a_number(self, server):
@@ -1328,7 +1353,7 @@ class TestUploads:
         await self._upload(client, ("a.csv", b"1"))
         _, body = await self._upload(client, ("a.csv", b"2"))
 
-        assert body["files"][0]["path"] == "uploads/a-2.csv"
+        assert body["files"][0]["path"] == "workspace/uploads/a-2.csv"
 
     async def test_large_file_streams_past_json_body_limit(self, server):
         client, root, _ = await server(max_upload_bytes=3 * 1024 * 1024)
@@ -1337,7 +1362,7 @@ class TestUploads:
         status, _ = await self._upload(client, ("big.bin", content))
 
         assert status == 201
-        assert (private(root) / "uploads/big.bin").stat().st_size == len(
+        assert (root / "workspace/uploads/big.bin").stat().st_size == len(
             content
         )
 
@@ -1348,7 +1373,7 @@ class TestUploads:
 
         assert status == 413
         assert "超過上限" in body["error"]
-        assert list((private(root) / "uploads").iterdir()) == []
+        assert list((root / "workspace/uploads").iterdir()) == []
 
     @pytest.mark.parametrize(
         "headers",
@@ -1360,7 +1385,7 @@ class TestUploads:
         status, _ = await self._upload(client, ("a.txt", b"x"), headers=headers)
 
         assert status == 403
-        assert not (root / "private" / "local" / "uploads").exists()
+        assert not (root / "workspace" / "uploads").exists()
 
     async def test_attachments_are_described_in_the_message(self, server):
         client, root, model = await server(
@@ -1379,7 +1404,7 @@ class TestUploads:
         assert status == 201
         user = model.requests[0]["messages"][-1]["content"]
         assert user == (
-            "幫我分析\n\n[附件] uploads/sales.csv"
+            "幫我分析\n\n[附件] data/uploads/sales.csv"
             "（run_python 裡的路徑：/workspace/uploads/sales.csv）"
         )
 
@@ -1397,7 +1422,7 @@ class TestUploads:
         assert status == 201
         assert created["title"] == "報告.pdf"
         user = model.requests[0]["messages"][-1]["content"]
-        assert user == "[附件] uploads/報告.pdf"
+        assert user == "[附件] workspace/uploads/報告.pdf"
 
     @pytest.mark.parametrize(
         "path",
@@ -1471,7 +1496,8 @@ class TestProjectChoices:
             "feedback": True,
             "sessionApproval": True,
             "accounts": True,
-            "folders": True,
+            # 本機模式沒有工作資料夾可選：和加入帳號之前一樣是專案根目錄。
+            "folders": False,
         }
         assert info["auth"] == {
             "mode": "local",
@@ -1485,14 +1511,8 @@ class TestProjectChoices:
         assert info["folders"] == [
             {
                 "id": "private",
-                "name": "我的檔案",
+                "name": "專案資料夾",
                 "kind": "private",
-                "writable": True,
-            },
-            {
-                "id": "shared:workspace",
-                "name": "共用",
-                "kind": "shared",
                 "writable": True,
             },
         ]
@@ -1866,13 +1886,16 @@ class TestSessionAdmin:
 
     async def test_search_skips_attachment_lines(self, start):
         h = await start([conftest.text_response("收到")])
-        uploads = private(h.root) / "uploads"
+        uploads = h.root / "workspace" / "uploads"
         uploads.mkdir(parents=True)
         (uploads / "secret-plan.txt").write_text("x", encoding="utf-8")
         await h.api(
             "POST",
             "/sessions",
-            {"text": "看看", "attachments": ["uploads/secret-plan.txt"]},
+            {
+                "text": "看看",
+                "attachments": ["workspace/uploads/secret-plan.txt"],
+            },
         )
         await h.wait_for("run_end")
 
@@ -1899,7 +1922,7 @@ class TestFiles:
 
         assert status == 200
         names = [item["name"] for item in entries]
-        assert names == ["reports", "b.txt"]
+        assert names == ["agents", "reports", "b.txt", "harness.yaml"]
         b = next(item for item in entries if item["name"] == "b.txt")
         assert b["kind"] == "file"
         assert b["size"] == 1
@@ -1969,7 +1992,7 @@ class TestFiles:
         assert response.status == 403
         assert "TOP-SECRET" not in await response.text()
 
-    async def test_listing_hides_links_outside_and_refuses_hidden(self, start):
+    async def test_listing_hides_links_and_refuses_hidden(self, start):
         h = await start()
         outside = h.root.parent / "elsewhere"
         outside.mkdir()
@@ -1980,12 +2003,16 @@ class TestFiles:
         _, entries = await h.api("GET", "/files/list")
         status, _ = await h.api("GET", "/files/list?dir=.harness")
         escaped, _ = await h.api("GET", "/files/list?dir=..")
+        through, _ = await h.api("GET", "/files/list?dir=inside")
 
         names = [item["name"] for item in entries]
+        # 捷徑（symlink）一律不列出、不跟著走，連指向裡面的也一樣。
         assert "out" not in names
-        assert "inside" in names
+        assert "inside" not in names
+        assert "docs" in names
         assert status == 403
         assert escaped == 403
+        assert through == 403
 
     async def test_symlink_loop_is_not_a_server_error(self, start):
         h = await start()
@@ -2000,8 +2027,8 @@ class TestFiles:
         names = [item["name"] for item in entries]
         assert "a.txt" in names
         assert "loop" not in names
-        assert served.status == 404
-        assert listed == 404
+        assert served.status == 403
+        assert listed == 403
 
     @pytest.mark.parametrize(
         "path",
@@ -2010,21 +2037,24 @@ class TestFiles:
     def test_absolute_paths_are_refused_before_touching_disk(
         self, tmp_path, monkeypatch, path
     ):
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise AssertionError("不應該碰到檔案系統")
 
-        monkeypatch.setattr(files_lib.paths, "resolve_path", fail)
+        monkeypatch.setattr(files_lib.paths, "open_path", fail)
+        monkeypatch.setattr(files_lib.paths, "list_entries", fail)
 
         with pytest.raises(files_lib.FileError) as error:
-            files_lib.resolve(tmp_path, path)
+            files_lib.open_file(tmp_path, path)
+        with pytest.raises(files_lib.FileError) as listed:
+            files_lib.list_dir(tmp_path, path)
 
         assert error.value.status == 403
+        assert listed.value.status == 403
 
     async def test_missing_file_is_not_found(self, start):
         h = await start()
 
         response = await h.client.get("/api/files", params={"path": "x.md"})
-        (private(h.root) / "agents").mkdir()
         folder = await h.client.get("/api/files", params={"path": "agents"})
 
         assert response.status == 404

@@ -129,6 +129,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="瀏覽器網址上的主機名稱，例如反向代理的網域（可以重複）",
     )
     web.add_argument(
+        "--trusted-proxy",
+        action="append",
+        metavar="IP或網段",
+        help="信任的反向代理（例如 127.0.0.1 或 10.0.0.0/8，可以重複；也可以"
+        "用環境變數 HARNESS_TRUSTED_PROXIES，逗號分隔）。只有來自這些位址的"
+        "請求，才採信 X-Forwarded-For 與 X-Forwarded-Proto",
+    )
+    web.add_argument(
         "--max-upload-mb",
         type=int,
         default=50,
@@ -299,6 +307,11 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
         allowed_hosts=args.allowed_host or [],
     )
 
+    proxies = [
+        *(args.trusted_proxy or []),
+        os.environ.get(server.TRUSTED_PROXIES_ENV, ""),
+    ]
+
     def ready(url: str) -> None:
         print(f"{loaded.name} 的網頁版已啟動：{url}")
         if mode == "accounts":
@@ -318,6 +331,7 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
                 password=password,
                 allowed_hosts=args.allowed_host or [],
                 max_upload_bytes=args.max_upload_mb * 1024 * 1024,
+                trusted_proxies=proxies,
             )
         )
     except KeyboardInterrupt:

@@ -14,7 +14,18 @@
         writable: true            # false 時 agent 只能讀
 
 沒有寫 workspaces 時，有一個所有人共用的「共用」資料夾：專案的
-workspace/（有設定沙盒時是 sandbox.workspace）。
+shared/（第一次使用時建立）。舊版單人網頁版的 workspace/ 不會自動
+分享給所有人。
+
+另外兩種特別的資料夾，路徑都是專案根目錄（project_root）：
+
+    本機模式  不必登入、只有本機使用者時，只有一個資料夾：專案根目錄，
+              和加入帳號之前完全一樣（features.folders 關閉）
+    legacy    「舊資料（專案資料夾）」：帳號模式第一次啟動時，把單人時期
+              的對話交給第一位管理者（見 migration 模組），只有他看得到
+              這個資料夾，舊對話裡的檔案路徑因此照樣找得到。它碰不到
+              .harness/、private/ 與任何以點開頭的檔案，也不能執行程式
+              或指令（沙盒會掛載整個專案）
 
 共用資料夾不能和 .harness/、private/、專案的設定與程式（agents/、
 tools/、skills/、harness.yaml、AGENTS.md）重疊，彼此也不能互相包含；
@@ -29,7 +40,6 @@ import re
 from typing import Any
 
 from harness import project as project_lib
-from harness import sandbox as sandbox_lib
 from harness.web import accounts as accounts_lib
 from harness.web import config as config_lib
 
@@ -38,6 +48,10 @@ PRIVATE_NAME = "我的檔案"
 PRIVATE_DIR = "private"
 SHARED_PREFIX = "shared:"
 DEFAULT_SHARED_NAME = "共用"
+DEFAULT_SHARED_DIR = "shared"
+LOCAL_NAME = "專案資料夾"
+LEGACY_ID = "legacy"
+LEGACY_NAME = "舊資料（專案資料夾）"
 CONFIG_KEY = "workspaces"
 # 共用資料夾不能碰到的位置：harness 自己的資料與專案的設定、程式。
 _PROTECTED = (
@@ -64,6 +78,12 @@ class Folder:
         writable: False 時 agent 與上傳都不能寫入。
         path: 資料夾的絕對路徑。
         members: 可以使用的使用者名稱（小寫）；None 表示所有人。
+        project_root: 資料夾就是專案根目錄（本機模式與「舊資料」）。上傳
+            的檔案照舊版存在 workspace/uploads/（有沙盒時是
+            sandbox.workspace/uploads/）。
+        hidden: 資料夾第一層裡任何人都碰不到的名稱（檔案 API 與內建工具）。
+        hide_dotfiles: 內建工具也碰不到以點開頭的檔案或資料夾（檔案 API
+            本來就一律不提供）。
     """
 
     id: str
@@ -72,6 +92,14 @@ class Folder:
     writable: bool
     path: pathlib.Path
     members: frozenset[str] | None = None
+    project_root: bool = False
+    hidden: tuple[str, ...] = ()
+    hide_dotfiles: bool = False
+
+    @property
+    def is_legacy(self) -> bool:
+        """是不是「舊資料（專案資料夾）」：不能執行程式或指令。"""
+        return self.id == LEGACY_ID
 
     def info(self) -> dict[str, Any]:
         """FolderInfo（見 src/web/protocol.ts）。"""
@@ -89,30 +117,73 @@ class Folders:
     Attributes:
         root: 專案根目錄。
         shared: 共用資料夾，依 harness.yaml 的順序。
+        local: 本機模式：唯一的資料夾就是專案根目錄。
+        legacy_owner: 看得到「舊資料（專案資料夾）」的使用者識別碼；
+            沒有舊資料時為 None。
     """
 
-    def __init__(self, root: pathlib.Path, shared: list[Folder]) -> None:
+    def __init__(
+        self,
+        root: pathlib.Path,
+        shared: list[Folder],
+        *,
+        local: bool = False,
+        legacy_owner: str | None = None,
+    ) -> None:
         self.root = root.resolve()
         self.shared = shared
+        self.local = local
+        self.legacy_owner = legacy_owner
 
     @classmethod
-    def for_project(cls, project: project_lib.Project) -> "Folders":
+    def for_project(
+        cls,
+        project: project_lib.Project,
+        *,
+        local: bool = False,
+        legacy_owner: str | None = None,
+    ) -> "Folders":
         """讀取 harness.yaml 的 workspaces。
+
+        Args:
+            project: 載入完成的專案。
+            local: 本機模式（見 Folders.local）。
+            legacy_owner: 見 Folders.legacy_owner。
 
         Raises:
             ValueError: workspaces 寫錯，或資料夾和專案的設定重疊。
         """
         config = config_lib.read_config(project.root)
-        default = sandbox_lib.DEFAULT_WORKSPACE
-        if project.sandbox is not None:
-            workspace = project.sandbox.workspace
-            root = project.root.resolve()
-            default = (
-                workspace.relative_to(root).as_posix()
-                if workspace.is_relative_to(root)
-                else workspace.as_posix()
-            )
-        return cls(project.root, load_shared(project.root, config, default))
+        return cls(
+            project.root,
+            load_shared(project.root, config),
+            local=local,
+            legacy_owner=legacy_owner,
+        )
+
+    def project_folder(self) -> Folder:
+        """本機模式唯一的資料夾：專案根目錄，和加入帳號之前一樣。"""
+        return Folder(
+            id=PRIVATE_ID,
+            name=LOCAL_NAME,
+            kind="private",
+            writable=True,
+            path=self.root,
+            project_root=True,
+        )
+
+    def legacy(self) -> Folder:
+        """「舊資料（專案資料夾）」：單人時期的檔案，只有接收舊資料的人看得到。"""
+        return Folder(
+            id=LEGACY_ID,
+            name=LEGACY_NAME,
+            kind="shared",
+            writable=True,
+            path=self.root,
+            project_root=True,
+            hidden=(PRIVATE_DIR,),
+            hide_dotfiles=True,
+        )
 
     def private(self, user: accounts_lib.User) -> Folder:
         """這個人自己的「我的檔案」。"""
@@ -126,6 +197,8 @@ class Folders:
 
     def for_user(self, user: accounts_lib.User) -> list[Folder]:
         """這個人可以使用的資料夾，自己的「我的檔案」排第一個。"""
+        if self.local:
+            return [self.project_folder()]
         visible = [
             folder
             for folder in self.shared
@@ -133,6 +206,8 @@ class Folders:
             or folder.members is None
             or user.username.lower() in folder.members
         ]
+        if self.legacy_owner is not None and user.id == self.legacy_owner:
+            visible.append(self.legacy())
         return [self.private(user), *visible]
 
     def find(self, user: accounts_lib.User, folder_id: Any) -> Folder | None:
@@ -161,15 +236,14 @@ def ensure(folder: Folder) -> pathlib.Path:
     return folder.path
 
 
-def load_shared(
-    root: pathlib.Path, config: dict[str, Any], default_path: str
-) -> list[Folder]:
+def load_shared(root: pathlib.Path, config: dict[str, Any]) -> list[Folder]:
     """依 harness.yaml 的 workspaces 建立共用資料夾。
+
+    沒有寫 workspaces 時是一個所有人共用的「共用」資料夾（shared/）。
 
     Args:
         root: 專案根目錄。
         config: harness.yaml 的內容。
-        default_path: 沒有寫 workspaces 時「共用」資料夾的位置。
 
     Returns:
         共用資料夾。
@@ -180,7 +254,7 @@ def load_shared(
     root = root.resolve()
     entries = config.get(CONFIG_KEY)
     if entries is None:
-        entries = [{"name": DEFAULT_SHARED_NAME, "path": default_path}]
+        entries = [{"name": DEFAULT_SHARED_NAME, "path": DEFAULT_SHARED_DIR}]
     if not isinstance(entries, list):
         raise ValueError(f"{CONFIG_KEY} 必須是清單")
     folders: list[Folder] = []
@@ -257,7 +331,7 @@ def _check_path(root: pathlib.Path, path: pathlib.Path, name: str) -> None:
             raise ValueError(
                 f"{CONFIG_KEY} 的 {name}（{path}）和 {protected} 重疊：agent "
                 "可以改寫專案的設定或讀到別人的資料，請改用專用的資料夾，"
-                "例如 workspace/"
+                "例如 shared/ 底下的資料夾"
             )
 
 

@@ -5,22 +5,31 @@ API 與檔案 API 都要確認別人碰不到。
 """
 
 import asyncio
+import dataclasses
 import json
+import os
 import pathlib
+import threading
+import time
+from unittest import mock
 
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient
 from aiohttp.test_utils import TestServer
+from aiohttp.test_utils import make_mocked_request
 
 from harness import cli
 from harness import project as project_lib
 from harness import sandbox as sandbox_lib
 from harness.builtin import shell
+from harness.builtin import web as web_tools
 from harness.web import accounts as accounts_lib
+from harness.web import files as files_lib
 from harness.web import folders as folders_lib
 from harness.web import migration
 from harness.web import server as server_lib
+from harness.web import workspace as workspace_lib
 from tests import conftest
 
 CONFIG = """name: team
@@ -313,19 +322,75 @@ class TestAccountStore:
         assert store.resolve_login(token) is None
         assert store.authenticate("alice", "another-password") is not None
 
-    def test_throttle_locks_after_five_failures(self):
+    @staticmethod
+    def _fail(throttle, username, address):
+        assert throttle.reserve(username, address) == 0
+        throttle.release(username, address, False)
+
+    def test_throttle_backs_off_per_username_from_any_ip(self):
         now = [0.0]
         throttle = accounts_lib.LoginThrottle(clock=lambda: now[0])
 
-        for _ in range(accounts_lib.MAX_FAILURES):
-            assert not throttle.locked("alice", "1.2.3.4")
-            throttle.failed("Alice", "1.2.3.4")
+        for index in range(accounts_lib.MAX_FAILURES):
+            self._fail(throttle, "Alice", f"10.0.0.{index}")
 
-        assert throttle.locked("alice", "1.2.3.4")
-        assert not throttle.locked("alice", "5.6.7.8")
-        assert not throttle.locked("bob", "1.2.3.4")
-        now[0] += accounts_lib.LOCK_SECONDS
-        assert not throttle.locked("alice", "1.2.3.4")
+        # 換 IP 也一樣要等；其他帳號名稱不受影響。
+        first = throttle.reserve("alice", "5.6.7.8")
+        assert first == accounts_lib.BACKOFF_SECONDS
+        assert throttle.reserve("bob", "1.2.3.4") == 0
+        throttle.release("bob", "1.2.3.4", True)
+        now[0] += first
+        self._fail(throttle, "alice", "5.6.7.8")
+        # 每次失敗等待加倍，但有上限：真正的使用者不會被擋太久。
+        assert throttle.reserve("alice", "1.1.1.1") == 2 * first
+        for _ in range(20):
+            now[0] += accounts_lib.MAX_BACKOFF_SECONDS
+            self._fail(throttle, "alice", "1.1.1.1")
+        assert (
+            throttle.reserve("alice", "1.1.1.1")
+            == accounts_lib.MAX_BACKOFF_SECONDS
+        )
+        now[0] += accounts_lib.MAX_BACKOFF_SECONDS
+        assert throttle.reserve("alice", "1.1.1.1") == 0
+        throttle.release("alice", "1.1.1.1", True)
+        # 成功登入後歸零。
+        assert throttle.reserve("alice", "1.1.1.1") == 0
+
+    def test_attempts_in_flight_count_before_they_finish(self):
+        throttle = accounts_lib.LoginThrottle(clock=lambda: 0.0)
+
+        reserved = [throttle.reserve("alice", f"10.0.0.{i}") for i in range(20)]
+
+        assert reserved.count(0) == accounts_lib.MAX_FAILURES
+        assert all(wait > 0 for wait in reserved[accounts_lib.MAX_FAILURES :])
+
+    def test_one_ip_cannot_spray_many_usernames(self):
+        now = [0.0]
+        throttle = accounts_lib.LoginThrottle(clock=lambda: now[0])
+
+        for index in range(accounts_lib.MAX_IP_FAILURES):
+            self._fail(throttle, f"user{index}", "6.6.6.6")
+
+        assert throttle.reserve("someone", "6.6.6.6") > 0
+        assert throttle.reserve("someone", "7.7.7.7") == 0
+        now[0] += accounts_lib.IP_WINDOW_SECONDS
+        assert throttle.reserve("other", "6.6.6.6") == 0
+
+    def test_throttle_entries_expire_and_are_bounded(self, monkeypatch):
+        monkeypatch.setattr(accounts_lib, "MAX_THROTTLE_ENTRIES", 40)
+        monkeypatch.setattr(accounts_lib, "MAX_IP_FAILURES", 10_000)
+        now = [0.0]
+        throttle = accounts_lib.LoginThrottle(clock=lambda: now[0])
+
+        for index in range(200):
+            self._fail(throttle, f"user{index}", "1.2.3.4")
+            now[0] += 0.001
+        sizes = len(throttle._names)  # noqa: SLF001
+        now[0] += accounts_lib.FORGET_SECONDS
+        self._fail(throttle, "late", "1.2.3.4")
+
+        assert sizes <= 40
+        assert set(throttle._names) == {"late"}  # noqa: SLF001
 
 
 class TestLogin:
@@ -351,8 +416,13 @@ class TestLogin:
         assert not cookie["secure"]
         assert int(cookie["max-age"]) == accounts_lib.SESSION_LIFETIME
 
-    async def test_cookie_is_secure_behind_https_proxy(self, site):
-        s = await site()
+    @pytest.mark.parametrize(
+        ("proxies", "secure"), [(["127.0.0.1"], True), ([], False)]
+    )
+    async def test_cookie_is_secure_only_behind_a_trusted_https_proxy(
+        self, site, proxies, secure
+    ):
+        s = await site(trusted_proxies=proxies)
 
         response = await s.client.post(
             "/api/auth/login",
@@ -360,7 +430,7 @@ class TestLogin:
             headers={"X-Forwarded-Proto": "https"},
         )
 
-        assert response.cookies[server_lib.COOKIE]["secure"]
+        assert bool(response.cookies[server_lib.COOKIE]["secure"]) is secure
 
     async def test_me_logout_and_401_without_session(self, site):
         s = await site()
@@ -408,7 +478,7 @@ class TestLogin:
         assert statuses[:-1] == [401] * accounts_lib.MAX_FAILURES
         assert statuses[-1] == 429
         assert locked == 429
-        assert "30 秒" in body["error"]
+        assert f"{accounts_lib.BACKOFF_SECONDS} 秒" in body["error"]
 
     async def test_disabled_user_is_logged_out_and_cannot_log_in(self, site):
         s = await site()
@@ -472,8 +542,37 @@ class TestLogin:
         assert "app" in await response.text()
 
 
+LEGACY_ID = "20250101-000000-aaaaaa"
+
+
+def legacy_data(root: pathlib.Path) -> None:
+    """加入帳號之前（或本機模式）的資料：對話、記憶與專案裡的檔案。"""
+    sessions = root / ".harness" / "sessions"
+    sessions.mkdir(parents=True)
+    lines = [
+        {
+            "role": "user",
+            "content": "舊的問題\n\n[附件] workspace/uploads/old.csv",
+        },
+        {"role": "assistant", "content": "圖在 workspace/chart.png"},
+    ]
+    (sessions / f"{LEGACY_ID}.jsonl").write_text(
+        "".join(json.dumps(m, ensure_ascii=False) + "\n" for m in lines),
+        "utf-8",
+    )
+    (sessions / f"{LEGACY_ID}.meta.json").write_text(
+        json.dumps({"agent": "main"}), "utf-8"
+    )
+    (root / ".harness" / "memory.json").write_text("[]", "utf-8")
+    uploads = root / "workspace" / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "old.csv").write_text("a,b", "utf-8")
+    (root / "workspace" / "chart.png").write_bytes(b"png")
+    (root / "report.md").write_text("# 報告", "utf-8")
+
+
 class TestLocalMode:
-    """只在本機使用、沒有帳號：不必登入，視為本機管理者。"""
+    """只在本機使用、沒有帳號：不必登入，和加入帳號之前完全一樣。"""
 
     async def test_works_without_login(self, site):
         s = await site([conftest.text_response("好")], users=())
@@ -496,8 +595,81 @@ class TestLocalMode:
         assert add == 400
         assert "pyharness user add" in error["error"]
         assert store_of(s.root).list_users() == []
-        sessions = s.root / ".harness" / "users" / "local" / "sessions"
+        # 和 CLI 共用同一份對話紀錄。
+        sessions = s.root / ".harness" / "sessions"
         assert (sessions / f"{created['id']}.jsonl").exists()
+        assert not (s.root / ".harness" / "users").exists()
+
+    async def test_keeps_cli_data_and_works_in_the_project_root(self, site):
+        read = ("read_file", {"path": "report.md"})
+        s = await site(
+            [conftest.tool_response(read), conftest.text_response("好")],
+            users=(),
+            prepare=legacy_data,
+        )
+        person = s.anonymous()
+
+        _, info = await person.api("GET", "/project")
+        _, listed = await person.api("GET", "/sessions")
+        served = await s.client.get("/api/files", params={"path": "report.md"})
+        chart = await s.client.get(
+            "/api/files", params={"path": "workspace/chart.png"}
+        )
+        _, created = await person.api("POST", "/sessions", {"text": "讀報告"})
+        detail = await person.wait_idle(created["id"])
+
+        assert info["features"]["folders"] is False
+        assert [item["id"] for item in listed][-1] == LEGACY_ID
+        # 沒有搬走任何東西：pyharness chat / memory 看到的是同一份。
+        assert (
+            s.root / ".harness" / "sessions" / f"{LEGACY_ID}.jsonl"
+        ).exists()
+        assert (s.root / ".harness" / "memory.json").exists()
+        assert not (s.root / migration.MARKER).exists()
+        assert not (s.root / "private").exists()
+        assert served.status == 200
+        assert await served.text() == "# 報告"
+        assert chart.status == 200
+        tool = next(m for m in detail["messages"] if m["role"] == "tool")
+        assert tool["content"] == "# 報告"
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            {"X-Forwarded-For": "203.0.113.9"},
+            {"Forwarded": "for=203.0.113.9"},
+            {"X-Forwarded-Host": "ai.example.com"},
+            {"Via": "1.1 nginx"},
+        ],
+    )
+    async def test_proxied_requests_are_refused(self, site, header):
+        s = await site(users=())
+
+        plain = await s.client.get("/api/project")
+        proxied = await s.client.get("/api/project", headers=header)
+        page = await s.client.get("/", headers=header)
+
+        assert plain.status == 200
+        assert proxied.status == 403
+        assert "HARNESS_WEB_PASSWORD" in (await proxied.json())["error"]
+        assert page.status == 403
+
+    async def test_requests_from_other_machines_are_refused(self):
+        transport = mock.Mock()
+        transport.get_extra_info.side_effect = lambda name, default=None: (
+            ("192.168.1.20", 5555) if name == "peername" else default
+        )
+        request = make_mocked_request(
+            "GET", "/api/project", transport=transport
+        )
+
+        async def handler(_):
+            raise AssertionError("不應該處理這個請求")
+
+        with pytest.raises(workspace_lib.WebError) as error:
+            await server_lib._local_only_middleware(request, handler)  # noqa: SLF001
+
+        assert error.value.status == 403
 
     async def test_any_user_makes_login_required(self, site):
         s = await site(users=(("boss", "admin"),))
@@ -510,70 +682,165 @@ class TestLocalMode:
 class TestBootstrapAndMigration:
     """升級：舊的網頁密碼變成 admin 的密碼，舊資料交給第一位管理者。"""
 
-    @staticmethod
-    def _legacy_data(root: pathlib.Path) -> None:
-        sessions = root / ".harness" / "sessions"
-        sessions.mkdir(parents=True)
-        lines = [
-            {"role": "user", "content": "舊的問題"},
-            {"role": "assistant", "content": "舊的回答"},
-        ]
-        (sessions / "20250101-000000-aaaaaa.jsonl").write_text(
-            "".join(json.dumps(m, ensure_ascii=False) + "\n" for m in lines),
-            "utf-8",
-        )
-        (sessions / "20250101-000000-aaaaaa.meta.json").write_text(
-            json.dumps({"agent": "main"}), "utf-8"
-        )
-        (root / ".harness" / "memory.json").write_text("[]", "utf-8")
-        uploads = root / "workspace" / "uploads"
-        uploads.mkdir(parents=True)
-        (uploads / "old.csv").write_text("a,b", "utf-8")
-        (root / "workspace" / "chart.png").write_bytes(b"png")
-
     async def test_password_creates_admin_and_old_data_moves(self, site):
         s = await site(
-            users=(), prepare=self._legacy_data, password="old-web-password"
+            [conftest.text_response("好")],
+            users=(),
+            prepare=legacy_data,
+            password="old-web-password",
         )
 
         admin = await s.login("admin", "old-web-password")
         _, listed = await admin.api("GET", "/sessions")
         _, me = await admin.api("GET", "/auth/me")
-        status, served = await admin.api(
-            "GET", "/files/list?dir=workspace/uploads"
-        )
+        _, info = await admin.api("GET", "/project")
+        _, detail = await admin.api("GET", f"/sessions/{LEGACY_ID}")
 
         assert me["role"] == "admin"
         assert [item["title"] for item in listed] == ["舊的問題"]
         owner = me["id"]
         base = s.root / ".harness" / "users" / owner
-        assert (base / "sessions" / "20250101-000000-aaaaaa.jsonl").exists()
+        assert (base / "sessions" / f"{LEGACY_ID}.jsonl").exists()
         assert (base / "memory.json").exists()
         assert not (s.root / ".harness" / "sessions").exists()
         assert not (s.root / ".harness" / "memory.json").exists()
-        # 上傳的檔案搬到「我的檔案」裡同樣的位置，舊對話的附件還找得到。
-        assert status == 200
-        assert [item["path"] for item in served] == [
-            "workspace/uploads/old.csv"
-        ]
-        # 其他檔案留在預設的「共用」資料夾。
-        assert (s.root / "workspace" / "chart.png").exists()
+        # 舊對話在「舊資料（專案資料夾）」裡：檔案不搬，路徑照舊。
+        assert detail["options"]["folder"] == "legacy"
+        legacy = next(f for f in info["folders"] if f["id"] == "legacy")
+        assert legacy == {
+            "id": "legacy",
+            "name": "舊資料（專案資料夾）",
+            "kind": "shared",
+            "writable": True,
+        }
+        assert (s.root / "workspace" / "uploads" / "old.csv").exists()
+        assert info["features"]["folders"] is True
+
+    async def test_old_file_cards_resolve_only_for_the_admin(self, site):
+        s = await site(
+            users=(("boss", "admin"), ("alice", "member")),
+            prepare=lambda root: (
+                legacy_data(root),
+                (root / "private" / "x").mkdir(parents=True),
+                (root / "private" / "x" / "secret.txt").write_text("s"),
+            ),
+        )
+        boss = await s.login("boss", password_of("boss"))
+        alice = await s.login("alice", password_of("alice"))
+
+        async def get(person, path, folder="legacy"):
+            response = await s.client.get(
+                "/api/files",
+                params={"folder": folder, "path": path},
+                headers=person.headers,
+            )
+            return response.status
+
+        _, entries = await boss.api("GET", "/files/list?folder=legacy")
+        _, alice_info = await alice.api("GET", "/project")
+
+        assert await get(boss, "workspace/uploads/old.csv") == 200
+        assert await get(boss, "workspace/chart.png") == 200
+        assert await get(boss, "report.md") == 200
+        # 碰不到 .harness/、private/ 與以點開頭的檔案。
+        assert await get(boss, ".harness/users/x.json") == 403
+        assert await get(boss, "private/x/secret.txt") == 403
+        names = [item["name"] for item in entries]
+        assert "private" not in names
+        assert "report.md" in names
+        # 只有接收舊資料的管理者看得到這個資料夾；舊檔案也不在「共用」。
+        assert "legacy" not in [f["id"] for f in alice_info["folders"]]
+        assert await get(alice, "report.md") == 404
+        assert await get(alice, "chart.png", "shared:shared") == 404
+        assert await get(alice, "workspace/chart.png", "shared:shared") == 404
+
+    async def test_legacy_folder_runs_cannot_run_code_or_reach_private(
+        self, site, monkeypatch
+    ):
+        async def never(*args, **kwargs):
+            raise AssertionError("舊資料資料夾不能執行指令")
+
+        monkeypatch.setattr(shell, "execute", never)
+        peek = ("read_file", {"path": "private/x/secret.txt"})
+        s = await site(
+            [conftest.tool_response(peek), conftest.text_response("好")],
+            users=(("boss", "admin"),),
+            prepare=lambda root: (
+                legacy_data(root),
+                (root / "private" / "x").mkdir(parents=True),
+                (root / "private" / "x" / "secret.txt").write_text("s"),
+            ),
+            extra="sandbox: true\n",
+            agent=SANDBOX_AGENT,
+        )
+        boss = await s.login("boss", password_of("boss"))
+
+        status, _ = await boss.api(
+            "POST", f"/sessions/{LEGACY_ID}/messages", {"text": "再看看"}
+        )
+        detail = await boss.wait_idle(LEGACY_ID)
+
+        assert status == 202
+        request = s.model.requests[0]
+        names = [item["function"]["name"] for item in request["tools"]]
+        assert "run_command" not in names
+        assert "run_python" not in names
+        assert "read_file" in names
+        assert "舊資料" in request["messages"][0]["content"]
+        tool = next(m for m in detail["messages"] if m["role"] == "tool")
+        assert "不能存取" in tool["content"]
+        assert "s" != tool["content"]
+
+    async def test_local_mode_data_moves_when_accounts_are_enabled(
+        self, tmp_path, fake_model
+    ):
+        root = make_project(tmp_path / "l")
+        loaded = project_lib.load_project(root)
+        model = fake_model([conftest.text_response("好")])
+        local = server_lib.create_app(loaded, model_fn=model)
+        async with TestClient(TestServer(local)) as client:
+            response = await client.post("/api/sessions", json={"text": "嗨"})
+            created = await response.json()
+            await asyncio.sleep(0.1)
+        loaded.close()
+        assert (root / ".harness" / "sessions").exists()
+
+        loaded = project_lib.load_project(root)
+        server_lib.create_app(loaded, password="secret-password")
+        loaded.close()
+
+        admin = store_of(root).find_user("admin")
+        moved = migration.user_dir(root, admin.id) / "sessions"
+        meta = json.loads(
+            (moved / f"{created['id']}.meta.json").read_text("utf-8")
+        )
+        assert meta["options"]["folder"] == "legacy"
+        assert migration.legacy_owner(root) == admin.id
 
     def test_migration_is_idempotent_and_never_overwrites(self, tmp_path):
         root = make_project(tmp_path / "m")
-        self._legacy_data(root)
-        legacy = root / "workspace"
+        legacy_data(root)
 
-        first = migration.migrate(root, "abc", legacy)
-        again = migration.migrate(root, "abc", legacy)
+        first = migration.migrate(root, "abc")
+        again = migration.migrate(root, "abc")
 
         assert ".harness/sessions" in first
         assert again == []
         # 之後 CLI 建立的對話不會再被搬走。
         (root / ".harness" / "sessions").mkdir()
         (root / ".harness" / "sessions" / "x.jsonl").write_text("", "utf-8")
-        assert migration.migrate(root, "abc", legacy) == []
+        assert migration.migrate(root, "abc") == []
         assert (root / ".harness" / "sessions" / "x.jsonl").exists()
+        # workspace/ 不搬。
+        assert (root / "workspace" / "chart.png").exists()
+
+    def test_fresh_project_gets_no_legacy_folder(self, tmp_path):
+        root = make_project(tmp_path / "f")
+
+        migration.migrate(root, "abc")
+
+        assert (root / migration.MARKER).exists()
+        assert migration.legacy_owner(root) is None
 
     def test_local_data_moves_to_the_first_admin(self, tmp_path):
         root = make_project(tmp_path / "m")
@@ -587,7 +854,7 @@ class TestBootstrapAndMigration:
         (root / "private" / "admin1" / "a.txt").write_text("mine", "utf-8")
         (root / "private" / "local" / "b.txt").write_text("b", "utf-8")
 
-        migration.migrate(root, "admin1", root / "workspace")
+        migration.migrate(root, "admin1")
 
         target = root / ".harness" / "users" / "admin1" / "sessions"
         assert (target / "s1.jsonl").exists()
@@ -970,10 +1237,7 @@ class TestFolders:
         )
         detail = await alice.wait_idle(created["id"])
         bad, error = await alice.api(
-            "PUT", f"/sessions/{created['id']}/options", {"folder": "nope"}
-        )
-        back, options = await alice.api(
-            "PUT", f"/sessions/{created['id']}/options", {"folder": None}
+            "POST", "/sessions", {"text": "嗨", "options": {"folder": "nope"}}
         )
         refused, _ = await bob.api(
             "POST",
@@ -985,10 +1249,25 @@ class TestFolders:
         assert detail["options"]["folder"] == "shared:workspace-revenue"
         assert bad == 400
         assert "nope" in error["error"]
-        assert back == 200
-        assert options["folder"] == "private"
         assert refused == 400
         assert bob_sessions == []
+
+    async def test_folder_is_fixed_once_the_conversation_starts(self, site):
+        s = await site([conftest.text_response("好")])
+        alice = await s.login("alice", password_of("alice"))
+        _, created = await alice.api("POST", "/sessions", {"text": "嗨"})
+        await alice.wait_idle(created["id"])
+        path = f"/sessions/{created['id']}/options"
+
+        moved, error = await alice.api("PUT", path, {"folder": "shared:shared"})
+        same, _ = await alice.api("PUT", path, {"folder": "private"})
+        _, detail = await alice.api("GET", f"/sessions/{created['id']}")
+
+        # 之前的附件與檔案卡片都相對於原本的資料夾，換了就全部失效。
+        assert moved == 400
+        assert error["error"] == "資料夾只能在開始對話前選擇"
+        assert same == 200
+        assert detail["options"]["folder"] == "private"
 
     async def test_file_tools_stay_inside_the_folder(self, site):
         escape = ("write_file", {"path": "../escape.md", "content": "x"})
@@ -1068,7 +1347,7 @@ class TestFolders:
 
         status, body = await self._upload(s.client, alice)
         shared, shared_body = await self._upload(
-            s.client, alice, "shared:workspace"
+            s.client, alice, "shared:shared"
         )
         missing, _ = await self._upload(s.client, alice, "shared:nope")
         _, created = await alice.api(
@@ -1090,7 +1369,7 @@ class TestFolders:
         assert (private(s.root, alice_id) / "uploads" / "sales.csv").exists()
         assert shared == 201
         assert shared_body["files"][0]["path"] == "uploads/sales.csv"
-        assert (s.root / "workspace" / "uploads" / "sales.csv").exists()
+        assert (s.root / "shared" / "uploads" / "sales.csv").exists()
         assert missing == 404
         user = s.model.requests[0]["messages"][-1]["content"]
         assert user == (
@@ -1307,13 +1586,16 @@ class TestWorkspacesConfig:
             folder.id == f"shared:{str(outside).strip('/').replace('/', '-')}"
         )
 
-    def test_default_shared_folder_follows_the_sandbox(self, tmp_path):
+    def test_default_shared_folder_is_a_fresh_shared_dir(self, tmp_path):
         root = make_project(tmp_path / "c", "sandbox:\n  workspace: data\n")
 
         with project_lib.load_project(root) as loaded:
             [folder] = folders_lib.Folders.for_project(loaded).shared
 
-        assert folder.path == (root / "data").resolve()
+        # 不是舊版的 workspace/（或 sandbox.workspace）：舊檔案不會自動
+        # 分享給所有成員。
+        assert folder.path == (root / "shared").resolve()
+        assert folder.id == "shared:shared"
         assert folder.name == "共用"
 
 
@@ -1362,3 +1644,345 @@ class TestUserCommand:
 
         assert (duplicate, missing, last, nowhere) == (1, 1, 1, 1)
         assert "harness.yaml" in capsys.readouterr().err
+
+
+async def _upload(client, person, name="evil.py", folder=None):
+    form = aiohttp.FormData()
+    form.add_field("file", b"print('pwned')", filename=name)
+    query = f"?folder={folder}" if folder else ""
+    response = await client.post(
+        f"/api/uploads{query}",
+        data=form,
+        headers={**person.headers, "X-Harness-Upload": "1"},
+    )
+    return response.status, await response.json()
+
+
+def _app(s: Site):
+    return s.client.server.app
+
+
+class TestHardening:
+    """安全審查發現的問題（捷徑、登入限制、反向代理、失效的登入）。"""
+
+    @pytest.mark.parametrize("planted", ["uploads", "uploads/x"])
+    async def test_upload_never_follows_a_planted_link(self, site, planted):
+        s = await site(extra="sandbox: true\n")
+        (s.root / "tools").mkdir(exist_ok=True)
+        alice = await s.login("alice", password_of("alice"))
+        folder = private(s.root, user_id(s.root, "alice"))
+        (folder / "uploads").mkdir(parents=True)
+        if planted == "uploads":
+            # 沙盒裡 `rm -rf uploads && ln -s ../../tools uploads` 的結果。
+            (folder / "uploads").rmdir()
+            os.symlink("../../tools", folder / "uploads")
+            status, body = await _upload(s.client, alice)
+            assert status == 403
+            assert "捷徑" in body["error"]
+        else:
+            # 同名的檔案是捷徑：換一個名字，不會寫到捷徑指的位置。
+            os.symlink("../../../tools/evil.py", folder / "uploads/evil.py")
+            status, body = await _upload(s.client, alice)
+            assert status == 201
+            assert body["files"][0]["path"] == "uploads/evil-2.py"
+
+        assert not (s.root / "tools" / "evil.py").exists()
+
+    async def test_file_api_streams_ranges_from_the_opened_file(self, site):
+        s = await site()
+        alice = await s.login("alice", password_of("alice"))
+        folder = private(s.root, user_id(s.root, "alice"))
+        folder.mkdir(parents=True)
+        (folder / "a.txt").write_bytes(b"0123456789")
+
+        async def get(headers=None):
+            response = await s.client.get(
+                "/api/files",
+                params={"path": "a.txt"},
+                headers={**alice.headers, **(headers or {})},
+            )
+            return response, await response.read()
+
+        whole, body = await get()
+        part, middle = await get({"Range": "bytes=2-4"})
+        tail, end = await get({"Range": "bytes=-3"})
+        bad, _ = await get({"Range": "bytes=50-"})
+
+        assert whole.status == 200
+        assert body == b"0123456789"
+        assert whole.headers["Content-Length"] == "10"
+        assert whole.headers["X-Content-Type-Options"] == "nosniff"
+        assert part.status == 206
+        assert middle == b"234"
+        assert part.headers["Content-Range"] == "bytes 2-4/10"
+        assert (tail.status, end) == (206, b"789")
+        assert bad.status == 416
+
+    def test_file_api_never_serves_a_swapped_in_link(self, tmp_path):
+        """沙盒一直把資料夾換成指向金鑰的捷徑：檔案 API 讀不到金鑰。"""
+        secrets = tmp_path / ".harness" / "secrets"
+        secrets.mkdir(parents=True)
+        (secrets / "env.json").write_text("SECRET", encoding="utf-8")
+        folder = tmp_path / "private" / "alice"
+        folder.mkdir(parents=True)
+        real = folder / "d"
+        real.mkdir()
+        (real / "env.json").write_text("benign", encoding="utf-8")
+        stop = threading.Event()
+
+        def swap():
+            while not stop.is_set():
+                os.rename(real, folder / "hold")
+                os.symlink("../../.harness/secrets", real)
+                os.unlink(real)
+                os.rename(folder / "hold", real)
+
+        worker = threading.Thread(target=swap)
+        worker.start()
+        leaks = reads = 0
+        deadline = time.monotonic() + 1
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    fd, _ = files_lib.open_file(folder, "d/env.json")
+                except files_lib.FileError:
+                    continue
+                with os.fdopen(fd, "rb") as file:
+                    leaks += file.read() == b"SECRET"
+                reads += 1
+        finally:
+            stop.set()
+            worker.join()
+
+        assert reads > 0
+        assert leaks == 0
+
+    async def test_parallel_wrong_passwords_are_throttled(self, site):
+        s = await site()
+
+        async def attempt(index):
+            response = await s.client.post(
+                "/api/auth/login",
+                json={"username": "alice", "password": f"wrong-{index}"},
+            )
+            return response.status
+
+        statuses = await asyncio.gather(*(attempt(i) for i in range(30)))
+
+        assert statuses.count(401) == accounts_lib.MAX_FAILURES
+        assert statuses.count(429) == 30 - accounts_lib.MAX_FAILURES
+
+    @pytest.mark.parametrize("username", ["x" * 100_000, "王小明", "a b", "a"])
+    async def test_malformed_usernames_skip_the_throttle(
+        self, site, monkeypatch, username
+    ):
+        s = await site()
+        calls = []
+        monkeypatch.setattr(
+            accounts_lib.AccountStore,
+            "authenticate",
+            lambda *args: calls.append(args),
+        )
+
+        status, body = await s.anonymous().api(
+            "POST", "/auth/login", {"username": username, "password": "x"}
+        )
+
+        throttle = _app(s)[server_lib._THROTTLE]  # noqa: SLF001
+        assert status == 401
+        assert body == {"error": "帳號或密碼不正確"}
+        assert calls == []
+        assert throttle._names == {}  # noqa: SLF001
+
+    async def test_lockout_follows_the_username_through_a_trusted_proxy(
+        self, site
+    ):
+        s = await site(trusted_proxies=["127.0.0.1"])
+        wrong = {"username": "alice", "password": "wrong-password"}
+
+        statuses = []
+        for index in range(accounts_lib.MAX_FAILURES + 1):
+            # 每次都換一個（偽造的）IP：鎖定跟著帳號名稱，換 IP 沒有用。
+            response = await s.client.post(
+                "/api/auth/login",
+                json=wrong,
+                headers={"X-Forwarded-For": f"198.51.100.{index}"},
+            )
+            statuses.append(response.status)
+        other = await s.client.post(
+            "/api/auth/login",
+            json={"username": "bob", "password": password_of("bob")},
+            headers={"X-Forwarded-For": "198.51.100.1"},
+        )
+
+        assert statuses[-1] == 429
+        assert other.status == 200
+        throttle = _app(s)[server_lib._THROTTLE]  # noqa: SLF001
+        assert "198.51.100.3" in throttle._addresses  # noqa: SLF001
+
+    @pytest.mark.parametrize(
+        ("remote", "forwarded", "expected"),
+        [
+            # 沒有信任的反向代理：標頭一律不採信。
+            ("10.0.0.2", "1.1.1.1", "10.0.0.2"),
+            # 最左邊的是用戶端自己寫的，取最右邊不是反向代理的那一站。
+            ("127.0.0.1", "6.6.6.6, 203.0.113.7", "203.0.113.7"),
+            ("127.0.0.1", "6.6.6.6, 203.0.113.7, 10.0.0.9", "203.0.113.7"),
+            ("127.0.0.1", "", "127.0.0.1"),
+        ],
+    )
+    def test_client_address(self, remote, forwarded, expected):
+        transport = mock.Mock()
+        transport.get_extra_info.side_effect = lambda name, default=None: (
+            (remote, 1234) if name == "peername" else default
+        )
+        app = aiohttp.web.Application()
+        app[server_lib._PROXIES] = server_lib.parse_trusted_proxies(  # noqa: SLF001
+            ["127.0.0.1", "10.0.0.0/24"] if remote == "127.0.0.1" else []
+        )
+        headers = {"X-Forwarded-For": forwarded} if forwarded else {}
+        request = make_mocked_request(
+            "POST", "/", headers=headers, app=app, transport=transport
+        )
+
+        assert server_lib.client_address(request) == expected
+
+    def test_bad_trusted_proxy_is_refused(self):
+        with pytest.raises(ValueError, match="反向代理"):
+            server_lib.parse_trusted_proxies(["10.0.0.0/8, nope"])
+
+    @pytest.mark.parametrize("action", ["logout", "disable", "password"])
+    async def test_event_stream_ends_when_the_login_does(
+        self, site, monkeypatch, action
+    ):
+        monkeypatch.setattr(server_lib, "_HEARTBEAT", 0.05)
+        s = await site()
+        alice = await s.login("alice", password_of("alice"))
+        boss = await s.login("boss", password_of("boss"))
+        response = await s.client.get("/api/events", headers=alice.headers)
+        assert response.status == 200
+
+        if action == "logout":
+            await alice.api("POST", "/auth/logout", {})
+        elif action == "disable":
+            alice_id = user_id(s.root, "alice")
+            await boss.api(
+                "PATCH", f"/admin/users/{alice_id}", {"disabled": True}
+            )
+        else:
+            store_of(s.root).set_password(
+                user_id(s.root, "alice"), "another-password"
+            )
+
+        async with asyncio.timeout(3):
+            body = await response.read()
+        assert b"hello" in body
+
+    @pytest.mark.parametrize("change", [{"disabled": True}, {"role": "member"}])
+    async def test_account_changes_stop_running_turns(self, site, change):
+        s = await site(
+            [conftest.tool_response(WRITE), conftest.text_response("好")],
+            users=(("boss", "admin"), ("carol", "admin")),
+        )
+        carol = await s.login("carol", password_of("carol"))
+        boss = await s.login("boss", password_of("boss"))
+        await carol.listen()
+        _, created = await carol.api("POST", "/sessions", {"text": "寫"})
+        await carol.wait_for("approval")
+
+        status, _ = await boss.api(
+            "PATCH", f"/admin/users/{user_id(s.root, 'carol')}", change
+        )
+        workspace = _app(s)[server_lib._WORKSPACE]  # noqa: SLF001
+        state = workspace._states[created["id"]]  # noqa: SLF001
+        async with asyncio.timeout(3):
+            while state.task is not None:
+                await asyncio.sleep(0.01)
+
+        assert status == 200
+        assert state.status == "stopped"
+        assert state.notice == workspace_lib.ACCOUNT_CHANGED_NOTICE
+        assert not (private(s.root, user_id(s.root, "carol")) / "a.md").exists()
+
+    def test_permissions_read_the_role_live(self, tmp_path):
+        root = make_project(tmp_path / "p")
+        boss, _ = store_of(root).create_user("boss", None, "admin", "pw")
+        current = {"user": boss}
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(
+                loaded,
+                auth_mode="accounts",
+                users=lambda _: current["user"],
+            )
+            state = ws._create(boss, "main")  # noqa: SLF001
+            state.run_user = boss
+            state.run_folder = ws.folder(boss, None)
+            state.mode = "bypass"
+            permissions = ws._permissions_for(state)  # noqa: SLF001
+
+            before = permissions.mode
+            current["user"] = dataclasses.replace(boss, role="member")
+            demoted = permissions.mode
+            current["user"] = None
+            removed = permissions.mode
+
+        assert before == "bypass"
+        assert demoted == "ask"
+        assert removed == "ask"
+
+    @pytest.mark.parametrize(
+        ("username", "config", "guarded"),
+        [
+            ("alice", "", True),
+            ("boss", "", True),
+            ("alice", "web:\n  allowPrivateNetworks: true\n", True),
+            ("boss", "web:\n  allowPrivateNetworks: true\n", False),
+        ],
+    )
+    def test_web_fetch_is_guarded_in_accounts_mode(
+        self, tmp_path, username, config, guarded
+    ):
+        agent = AGENT.replace("  - shell\n", "  - shell\n  - web\n")
+        root = make_project(tmp_path / "w", config, agent)
+        store = store_of(root)
+        store.create_user("boss", None, "admin", "pw")
+        store.create_user("alice", None, "member", "pw")
+        user = store.find_user(username)
+        with project_lib.load_project(root) as loaded:
+            ws = workspace_lib.Workspace(
+                loaded, auth_mode="accounts", users=store.get_user
+            )
+            agent = ws._scoped_agent(  # noqa: SLF001
+                loaded.agents["main"], user, ws.folder(user, None)
+            )
+            local = workspace_lib.Workspace(loaded)
+            plain = local._run_agent  # noqa: SLF001
+
+        [fetch] = [item for item in agent.tools if item.name == "web_fetch"]
+        assert (fetch is not web_tools.web_fetch) is guarded
+        assert plain is not None
+
+    async def test_admin_resetting_own_password_stays_logged_in(self, site):
+        s = await site()
+        boss = await s.login("boss", password_of("boss"))
+        boss_id = user_id(s.root, "boss")
+
+        response = await s.client.post(
+            f"/api/admin/users/{boss_id}/password",
+            json={},
+            headers=boss.headers,
+        )
+        old, _ = await boss.api("GET", "/auth/me")
+        fresh = response.cookies[server_lib.COOKIE].value
+        other = await s.client.post(
+            f"/api/admin/users/{user_id(s.root, 'alice')}/password",
+            json={},
+            headers={"Cookie": f"{server_lib.COOKIE}={fresh}"},
+        )
+
+        assert response.status == 200
+        assert old == 401
+        assert store_of(s.root).resolve_login(fresh).id == boss_id
+        # 重設別人的密碼不會換掉自己的 cookie。
+        assert other.status == 200
+        assert server_lib.COOKIE not in other.cookies

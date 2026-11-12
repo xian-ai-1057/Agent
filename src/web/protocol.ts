@@ -277,8 +277,13 @@ export interface IssuedPassword {
 /**
  * 一個工作資料夾（Python 版）。agent 的檔案工具、執行指令與沙盒都只看得到
  * 這段對話選的資料夾；上傳的檔案也存在裡面。
- *   private  每個人自己的「我的檔案」，只有本人看得到
- *   shared   管理者在 harness.yaml 的 workspaces 開放的資料夾
+ *   private  每個人自己的「我的檔案」，只有本人看得到。本機模式（AuthMode
+ *            為 local）沒有帳號，只有這一個，路徑是專案資料夾本身，而且
+ *            ServerFeatures.folders 為 false。
+ *   shared   管理者在 harness.yaml 的 workspaces 開放的資料夾；升級前的舊
+ *            對話另有一個 id 為 "legacy" 的「舊資料」資料夾，只有接手舊資料
+ *            的管理者看得到。
+ * 資料夾在對話開始時決定；之後 PUT /options 改 folder 會被拒絕（400）。
  */
 export interface FolderInfo {
   id: string;

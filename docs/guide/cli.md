@@ -46,6 +46,7 @@ pyharness user disable <名稱> 停用帳號（enable 重新啟用）
 | 選項 | 用途 |
 |---|---|
 | `--allowed-host <主機名稱>` | 只接受用這個網址連線，可以重複（見[部署到伺服器](/advanced/server)） |
+| `--trusted-proxy <IP或網段>` | 信任的反向代理，可以重複，或用環境變數 `HARNESS_TRUSTED_PROXIES`（逗號分隔）；只有來自這些位址的請求才採信 `X-Forwarded-For` 與 `X-Forwarded-Proto`（見[部署到伺服器](/advanced/server)） |
 | `--max-upload-mb <MB>` | 單一上傳檔案的上限，預設 50 |
 
 在空的資料夾執行 `pyharness web` 時，會自動建立可以直接使用的助手（見[網頁版](/guide/web#自動建立助手)）。

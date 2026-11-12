@@ -18,7 +18,17 @@ skills 與工作資料夾，以及對回覆按讚或倒讚。這些資料存在�
 的人，別人的對話一律當成不存在（WebError 404），事件也只送給對話的
 擁有者。每一輪都在對話選的工作資料夾裡執行（見 folders 模組）：檔案
 工具、執行指令與沙盒都只看得到那個資料夾；成員的 run_command 改在沙盒
-裡執行，沒有沙盒時不提供。
+裡執行，沒有沙盒時不提供。工作資料夾在對話開始後就固定，不能再換。
+
+權限判斷每次都向帳號資料庫讀最新的角色（users），不用這一輪開始時的
+快照；管理者停用成員或改變角色時，伺服器呼叫 stop_runs_of 停掉那個人
+正在執行的對話。帳號模式下 web_fetch 不能讀內部網路（見
+builtin.web.guarded_fetch_tool），管理者可以在 harness.yaml 用
+web: {allowPrivateNetworks: true} 開放給自己。
+
+本機模式（auth_mode 為 local）和加入帳號之前一樣：對話紀錄與記憶在
+.harness/sessions/ 與 .harness/memory.json（和 CLI 共用），每一輪都在
+專案根目錄執行，沙盒照 harness.yaml 掛載 sandbox.workspace。
 """
 
 import asyncio
@@ -53,7 +63,9 @@ from harness import sessions as sessions_lib
 from harness import skills as skills_lib
 from harness import tools as tools_lib
 from harness.builtin import files
+from harness.builtin import paths
 from harness.builtin import shell
+from harness.builtin import web as web_tools
 from harness.web import accounts as accounts_lib
 from harness.web import config as config_lib
 from harness.web import folders as folders_lib
@@ -104,6 +116,16 @@ ENDPOINT_PROVIDER = "OpenAI 相容端點"
 # 成員「以後都允許」的工具，依工作資料夾分開記（見 resolve_approval）。
 PERMISSIONS_FILE = "permissions.json"
 AUTH_MODES = ("local", "accounts")
+FOLDER_LOCKED = "資料夾只能在開始對話前選擇"
+# 管理者停用成員或改變角色時，那個人正在執行的對話停下來的說明。
+ACCOUNT_CHANGED_NOTICE = "管理者變更了你的帳號，這一輪已經停止。"
+# 「舊資料」資料夾不能執行程式或指令：告訴模型為什麼沒有這些工具。
+LEGACY_NOTE = (
+    "## 舊資料資料夾\n"
+    "- 這段對話在「舊資料（專案資料夾）」裡，為了安全不能執行程式或指令"
+    "（沒有 run_python 與 run_command）。需要的話請使用者把檔案上傳到"
+    "其他資料夾，開新的對話處理。"
+)
 
 
 class WebError(Exception):
@@ -177,6 +199,8 @@ class _State:
     session_tools: set[str] = dataclasses.field(default_factory=set)
     # 使用者同意過的呼叫（工具名稱加參數的雜湊），一模一樣的呼叫不再問。
     approved_calls: set[str] = dataclasses.field(default_factory=set)
+    # 被伺服器停下時（例如帳號被停用）顯示的說明。
+    stop_notice: str | None = None
 
 
 class Workspace:
@@ -197,8 +221,18 @@ class Workspace:
         max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
         auth_mode: str = "local",
         folders: folders_lib.Folders | None = None,
+        users: Callable[[str], accounts_lib.User | None] | None = None,
     ) -> None:
         """建立 Workspace。
+
+        Args:
+            project: 載入完成的專案。
+            model_fn: 模型函式，預設透過 litellm 呼叫。
+            max_upload_bytes: 上傳的單一檔案大小上限。
+            auth_mode: local 或 accounts。
+            folders: 工作資料夾；預設依 harness.yaml 建立。
+            users: 依識別碼查目前的帳號（帳號資料庫的 get_user）；權限
+                判斷用它讀最新的角色。None 時沿用這一輪開始時的帳號。
 
         Raises:
             ValueError: harness.yaml 的 workspaces 寫錯。
@@ -207,8 +241,13 @@ class Workspace:
             raise ValueError(f"auth_mode 必須是 {AUTH_MODES} 之一")
         self.project = project
         self.auth_mode = auth_mode
-        self.folders = folders or folders_lib.Folders.for_project(project)
+        self.folders = folders or folders_lib.Folders.for_project(
+            project,
+            local=auth_mode == "local",
+            legacy_owner=migration.legacy_owner(project.root.resolve()),
+        )
         self.max_upload_bytes = max_upload_bytes
+        self._users = users
         self._model_fn = model_fn or llm.complete
         self._states: dict[str, _State] = {}
         # close() 停下的對話保留「執行中」的記錄，下次啟動時標成中斷。
@@ -274,11 +313,27 @@ class Workspace:
         return self._uploads(found)
 
     def migrate(self, owner_id: str) -> list[str]:
-        """把多人帳號之前的資料交給 owner_id（見 migration 模組）。"""
-        legacy = self.project.root / sandbox_lib.DEFAULT_WORKSPACE
-        if self.project.sandbox is not None:
-            legacy = self.project.sandbox.workspace
-        return migration.migrate(self.project.root, owner_id, legacy)
+        """把多人帳號之前的資料交給 owner_id（見 migration 模組）。
+
+        只在帳號模式呼叫；本機模式的資料留在原處，和 CLI 共用。
+        """
+        moved = migration.migrate(self.project.root, owner_id)
+        self.folders.legacy_owner = migration.legacy_owner(
+            self.project.root.resolve()
+        )
+        return moved
+
+    def stop_runs_of(self, user_id: str, notice: str) -> None:
+        """停掉這個人所有正在執行的對話（帳號被停用或角色改變時）。
+
+        Args:
+            user_id: 使用者識別碼。
+            notice: 顯示在對話裡的說明。
+        """
+        for state in self._states.values():
+            if state.owner == user_id and state.task is not None:
+                state.stop_notice = notice
+                state.task.cancel()
 
     def refresh_project(self) -> None:
         """通知瀏覽器重新讀取專案資訊（例如 litellm 在背景載入完成後）。"""
@@ -323,7 +378,7 @@ class Workspace:
                 "feedback": True,
                 "sessionApproval": True,
                 "accounts": True,
-                "folders": True,
+                "folders": self.auth_mode == "accounts",
             },
             "auth": {
                 "mode": self.auth_mode,
@@ -482,16 +537,36 @@ class Workspace:
         found = self.folders.find(user, folder_id)
         if found is None:
             raise WebError(
-                400, "這段對話的工作資料夾已經不能使用，請換一個資料夾"
+                400, "這段對話的工作資料夾已經不能使用，請開始新的對話"
             )
         folders_lib.ensure(found)
         return found
 
     def _uploads(self, folder: folders_lib.Folder) -> uploads_lib.Uploads:
+        """工作資料夾的上傳資料夾。
+
+        專案根目錄的資料夾（本機模式、「舊資料」）照舊版存在
+        workspace/uploads/（有沙盒時是 sandbox.workspace/uploads/），舊
+        對話裡的附件路徑不變。
+        """
+        box = self.project.sandbox
+        if not folder.project_root:
+            return uploads_lib.Uploads.for_folder(
+                folder.path,
+                folder.path if box is not None else None,
+                self.max_upload_bytes,
+            )
+        root = self.project.root.resolve()
+        workspace = (
+            box.workspace
+            if box is not None
+            else root / sandbox_lib.DEFAULT_WORKSPACE
+        )
+        subdir = workspace.relative_to(root) / uploads_lib.UPLOADS_DIR
+        # 「舊資料」不能執行程式，附件不必說明容器裡的路徑。
+        mounted = box.workspace if box and not folder.is_legacy else None
         return uploads_lib.Uploads.for_folder(
-            folder.path,
-            sandbox=self.project.sandbox is not None,
-            max_bytes=self.max_upload_bytes,
+            folder.path, mounted, self.max_upload_bytes, subdir.as_posix()
         )
 
     def retry(self, user: accounts_lib.User, session_id: str) -> dict[str, Any]:
@@ -607,9 +682,19 @@ class Workspace:
             設定後完整的選項。
 
         Raises:
-            WebError: 找不到對話，或選項不合法。
+            WebError: 找不到對話、選項不合法，或對話開始後要換工作資料夾
+                （資料夾只能在開始對話前選擇：之前的檔案與附件路徑都相對
+                於它）。
         """
         state = self._require(user, session_id)
+        if (
+            isinstance(changes, dict)
+            and "folder" in changes
+            and state.session.messages
+            and (changes["folder"] or folders_lib.PRIVATE_ID)
+            != state.options["folder"]
+        ):
+            raise WebError(400, FOLDER_LOCKED)
         agent = self._active_agent(state).name
         state.options = self._checked_options(
             user, changes, state.options, agent
@@ -888,6 +973,7 @@ class Workspace:
         """設定好執行中的狀態，再把執行放進背景。"""
         state.run_user = user
         state.run_folder = folder
+        state.stop_notice = None
         state.status = "running"
         state.activity = {"kind": "thinking"}
         state.started_at = _now()
@@ -930,11 +1016,15 @@ class Workspace:
                 memory=self._memory_for(user),
                 compaction=project.compaction,
                 model_fn=self._model_fn,
+                hidden=folder.hidden,
+                hide_dotfiles=folder.hide_dotfiles,
             )
             async for event in events:
                 self._handle(state, event)
         except asyncio.CancelledError:
             state.status = "stopped"
+            if state.stop_notice is not None:
+                state.notice = state.stop_notice
             self._emit({"type": "run_stopped", "sessionId": session_id})
         # 模型或網路出錯時停下來讓使用者重試；錯誤種類取決於供應商。
         except Exception as error:  # noqa: BLE001
@@ -1101,14 +1191,18 @@ class Workspace:
         """這段對話使用的權限設定。
 
         規則永遠讀專案目前的值，所以在設定頁或「以後都允許」改過的
-        規則，執行中的對話也會立刻套用。成員另外加上自己在這個工作
-        資料夾「以後都允許」的工具。
+        規則，執行中的對話也會立刻套用。是不是管理者也每次向帳號資料庫
+        確認（被降級的管理者不能再用 bypass）。成員另外加上自己在這個
+        工作資料夾「以後都允許」的工具。
         """
         user = state.run_user or accounts_lib.LOCAL_USER
         folder = state.run_folder
 
+        def is_admin() -> bool:
+            return self._live_admin(user)
+
         def extra_allow() -> list[str]:
-            if user.is_admin or folder is None:
+            if folder is None or is_admin():
                 return []
             return self._member_allow(user.id).get(folder.id, [])
 
@@ -1117,8 +1211,15 @@ class Workspace:
             state,
             self._approver(state),
             extra_allow,
-            user.is_admin,
+            is_admin,
         )
+
+    def _live_admin(self, user: accounts_lib.User) -> bool:
+        """這個人現在是不是管理者（停用或刪除的帳號都不是）。"""
+        if self._users is None:
+            return user.is_admin
+        current = self._users(user.id)
+        return current is not None and current.is_admin and not current.disabled
 
     def _memory_for(
         self, user: accounts_lib.User
@@ -1126,6 +1227,9 @@ class Workspace:
         """這個人自己的長期記憶；專案沒有開啟記憶時為 None。"""
         if self.project.memory is None:
             return None
+        if self.auth_mode == "local":
+            # 本機模式和 CLI 共用 .harness/memory.json。
+            return self.project.memory
         directory = migration.user_dir(self.project.root, user.id)
         return memory_lib.MemoryStore(directory / "memory.json")
 
@@ -1214,17 +1318,28 @@ class Workspace:
         if not isinstance(path, str):
             return None
         folder = state.run_folder
-        workdir = folder.path if folder is not None else self.project.root
-        context = datatypes.RunContext("", workdir, "")
+        if folder is None:
+            context = datatypes.RunContext("", self.project.root, "")
+        else:
+            context = datatypes.RunContext(
+                "",
+                folder.path,
+                "",
+                hidden=folder.hidden,
+                hide_dotfiles=folder.hide_dotfiles,
+            )
         content = arguments.get("content")
         if isinstance(content, str):
             try:
-                target = files.resolve_path(context, path)
+                paths.relative_parts(context, path)
+            except ValueError:
+                return None
+            try:
+                text = paths.read_text(context, path, errors="replace")
+                before = text[:_PREVIEW_LIMIT]
+            except FileNotFoundError:
                 before = None
-                if target.is_file():
-                    text = target.read_text(encoding="utf-8", errors="replace")
-                    before = text[:_PREVIEW_LIMIT]
-            except (tools_lib.ToolError, OSError, ValueError):
+            except (OSError, ValueError):
                 return None
             return {"path": path, "before": before, "after": content}
         return _edit_preview(context, path, arguments)
@@ -1474,6 +1589,9 @@ class Workspace:
         agent = self._with_options(
             state, self._active_agent(state), self._chosen_model(state), {}
         )
+        if self.auth_mode == "local":
+            # 和加入帳號之前一樣：專案根目錄、專案自己的沙盒設定。
+            return agent
         user = state.run_user or accounts_lib.LOCAL_USER
         assert state.run_folder is not None
         return self._scoped_agent(agent, user, state.run_folder)
@@ -1491,12 +1609,19 @@ class Workspace:
           伺服器上替成員執行。管理者維持原樣（在伺服器上、工作資料夾裡
           執行）。
         - write_file、edit_file：唯讀的資料夾一律拒絕。
+        - 「舊資料」資料夾（專案根目錄）：拿掉 run_python 與 run_command，
+          並在指示裡說明原因。
+        - web_fetch：不能讀內部網路（見 _blocks_private_networks）。
         """
         project = self.project
         box_tools = project.toolsets.get(sandbox_lib.TOOLSET, [])
         box = None
         box_error = "這個專案沒有設定沙盒"
-        if project.sandbox is not None:
+        legacy = folder.is_legacy
+        fetch = None
+        if self._blocks_private_networks(user):
+            fetch = web_tools.guarded_fetch_tool()
+        if project.sandbox is not None and not legacy:
             try:
                 box = project.sandbox.for_folder(
                     project.root, folder.path, read_only=not folder.writable
@@ -1506,6 +1631,13 @@ class Workspace:
         made: dict[str, tools_lib.Tool] = {}
 
         def convert(item: tools_lib.Tool) -> tools_lib.Tool | None:
+            if legacy and (
+                item is shell.run_command
+                or any(item is known for known in box_tools)
+            ):
+                return None
+            if fetch is not None and item is web_tools.web_fetch:
+                return fetch
             if any(item is known for known in box_tools):
                 if box is None:
                     return _refusing(item, box_error)
@@ -1529,7 +1661,24 @@ class Workspace:
                 )
             return item
 
-        return _map_tools(agent, convert, {})
+        scoped = _map_tools(agent, convert, {})
+        if legacy:
+            scoped.instructions = "\n\n".join(
+                part for part in (scoped.instructions, LEGACY_NOTE) if part
+            )
+        return scoped
+
+    def _blocks_private_networks(self, user: accounts_lib.User) -> bool:
+        """web_fetch 要不要擋內部網路：帳號模式一律擋，除非管理者在
+        harness.yaml 寫了 web: {allowPrivateNetworks: true}（只開放給
+        管理者自己的對話）。"""
+        if self.auth_mode == "local":
+            return False
+        if not self._live_admin(user):
+            return True
+        web = config_lib.read_config(self.project.root).get("web")
+        allowed = isinstance(web, dict) and web.get("allowPrivateNetworks")
+        return allowed is not True
 
     def _with_options(
         self,
@@ -1607,7 +1756,9 @@ class Workspace:
         return model if model in names else None
 
     def _sessions_dir(self, owner: str) -> pathlib.Path:
-        """一個人存放對話紀錄的資料夾。"""
+        """一個人存放對話紀錄的資料夾；本機模式和 CLI 共用專案的。"""
+        if self.auth_mode == "local":
+            return self.project.sessions_dir
         return migration.user_dir(self.project.root, owner) / "sessions"
 
     def _create(self, user: accounts_lib.User, agent: str) -> _State:
@@ -1790,7 +1941,7 @@ class _LivePermissions(permissions_lib.Permissions):
         state: _State,
         approver: permissions_lib.Approver,
         extra_allow: Callable[[], list[str]] = list,
-        is_admin: bool = True,
+        is_admin: Callable[[], bool] = lambda: True,
     ) -> None:
         # 不呼叫父類別的 __init__：欄位都改由 property 即時讀取。
         self._shared = shared
@@ -1803,7 +1954,7 @@ class _LivePermissions(permissions_lib.Permissions):
     def mode(self) -> str:
         # 成員不能自己改成 bypass（例如在對話中被降級的管理者）。
         mode = self._state.mode
-        if mode == "bypass" and not self._is_admin:
+        if mode == "bypass" and not self._is_admin():
             mode = None
         return mode or self._shared.mode
 
@@ -2089,10 +2240,8 @@ def _edit_preview(
     ):
         return None
     try:
-        target = files.resolve_path(context, path)
-        # 和 edit_file 一樣保留原本的換行字元。
-        with target.open(encoding="utf-8", newline="") as file:
-            text = file.read()
+        # 和 edit_file 一樣保留原本的換行字元；不跟著捷徑（見 paths）。
+        text = paths.read_text(context, path, newline="")
     except (tools_lib.ToolError, OSError, ValueError):
         return None
     count = text.count(old_text)

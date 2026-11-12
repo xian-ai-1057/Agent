@@ -27,6 +27,9 @@ services:
     ports:
       - "${HARNESS_PORT:-4321}:4321"
     # .env 裡的其他設定（模型金鑰、HARNESS_WEB_PASSWORD…）原樣交給容器。
+    # 前面再加一層 HTTPS 反向代理時，在 .env 寫上它連進容器的位址，例如
+    # HARNESS_TRUSTED_PROXIES=172.16.0.0/12：只有來自這些位址的請求才採信
+    # X-Forwarded-For（登入限制依它計算）與 X-Forwarded-Proto（cookie 的 Secure）。
     env_file:
       - path: .env
         required: false
@@ -34,7 +37,7 @@ services:
       # 執行時（呼叫模型、讀取網頁）使用的 proxy，大小寫兩種寫法都設定。
       <<: *proxy-args
       # 沙盒：agent 寫的程式（與成員執行的指令）在另一個容器裡執行，只看得到
-      # harness-data 裡這段對話的工作資料夾（private/<識別碼>/ 或共用的 workspace/）。
+      # harness-data 裡這段對話的工作資料夾（private/<識別碼>/ 或共用的 shared/）。
       HARNESS_SANDBOX_IMAGE: harness-sandbox
       HARNESS_SANDBOX_VOLUME: harness-data
       HARNESS_SANDBOX_NOTES: >-

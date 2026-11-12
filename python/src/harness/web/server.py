@@ -31,9 +31,24 @@
 登入方式（見 auth_mode）：
 
     local     只聽本機、沒有設定密碼、也沒有任何帳號：不必登入，所有
-              請求都視為一位本機管理者
+              請求都視為一位本機管理者。只接受直接從本機連進來的請求：
+              帶有反向代理標頭（X-Forwarded-For、Forwarded、
+              X-Forwarded-Host、Via）或不是從 loopback 連進來的一律 403，
+              避免不小心把沒有密碼的管理者權限透過反向代理開放出去
     accounts  要用帳號密碼登入。登入後瀏覽器拿到 HttpOnly、SameSite=Strict
               的 cookie（harness_session），沒有登入時 API 一律回 401
+
+登入的限制見 accounts.LoginThrottle；另外同時最多 LOGIN_CONCURRENCY 個
+登入在驗證密碼（scrypt 很吃 CPU）。
+
+放在反向代理後面時，用 --trusted-proxy（或環境變數
+HARNESS_TRUSTED_PROXIES）指定反向代理的 IP 或網段：只有從這些位址連進
+來的請求，才用 X-Forwarded-For 最右邊不是反向代理的那一站當成用戶端 IP
+（登入限制依它計算），並依 X-Forwarded-Proto 決定 cookie 要不要加上
+Secure。沒有指定時這兩個標頭一律不採信。
+
+SSE 每次送出心跳前重新確認登入狀態，登出、改密碼或帳號被停用後就關閉；
+管理者停用成員或改變角色時，那個人正在執行的對話也會停下來。
 
 第一次以帳號模式啟動、還沒有管理者時，自動建立管理者 admin，密碼是
 網頁密碼（HARNESS_WEB_PASSWORD，沒有時自動產生，見 cli 模組）。之後
@@ -49,7 +64,9 @@ Origin 標頭，避免其他網站透過瀏覽器呼叫這裡的 API。
 import asyncio
 import contextlib
 import importlib
+import ipaddress
 import json
+import os
 import pathlib
 import urllib.parse
 from collections.abc import Iterable
@@ -62,6 +79,7 @@ from harness import llm
 from harness import project as project_lib
 from harness.web import accounts as accounts_lib
 from harness.web import files as files_lib
+from harness.web import folders as folders_lib
 from harness.web import uploads as uploads_lib
 from harness.web import workspace as workspace_lib
 
@@ -76,7 +94,19 @@ UPLOAD_PATH = "/api/uploads"
 # 腳本因此無法借用使用者的登入狀態上傳檔案。
 UPLOAD_HEADER = "X-Harness-Upload"
 _UPLOAD_CHUNK = 256 * 1024
+_FILE_CHUNK = 256 * 1024
 COOKIE = "harness_session"
+# 同時最多幾個登入在驗證密碼。
+LOGIN_CONCURRENCY = 4
+TRUSTED_PROXIES_ENV = "HARNESS_TRUSTED_PROXIES"
+# 本機模式不接受的標頭：有這些標頭表示請求是經過反向代理轉來的。
+_PROXY_HEADERS = ("X-Forwarded-For", "Forwarded", "X-Forwarded-Host", "Via")
+_LOCAL_ONLY = (
+    "沒有設定密碼的網頁版只接受從這台電腦直接連線。要透過反向代理或從"
+    "其他電腦使用，請設定環境變數 HARNESS_WEB_PASSWORD（或用 pyharness "
+    "user add <名稱> --admin 建立管理者）後重新啟動。"
+)
+_Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 ADMIN_USERNAME = "admin"
 ADMIN_DISPLAY_NAME = "管理者"
 # 不需要登入就能呼叫的 API。
@@ -89,6 +119,8 @@ _WORKSPACE = web.AppKey("workspace", workspace_lib.Workspace)
 _ACCOUNTS = web.AppKey("accounts", accounts_lib.AccountStore)
 _THROTTLE = web.AppKey("throttle", accounts_lib.LoginThrottle)
 _STREAMS = web.AppKey("streams", set)
+_LOGINS = web.AppKey("logins", asyncio.Semaphore)
+_PROXIES = web.AppKey("proxies", tuple)
 # 登入的人（aiohttp 3.13 之後建議用 RequestKey，較舊的版本用字串）。
 _USER: Any = (
     web.RequestKey("user", accounts_lib.User)
@@ -159,6 +191,33 @@ def ensure_admin(
     return user
 
 
+def parse_trusted_proxies(values: Iterable[str]) -> tuple[_Network, ...]:
+    """把 --trusted-proxy 與 HARNESS_TRUSTED_PROXIES 的值轉成網段。
+
+    Args:
+        values: IP 或 CIDR 網段；每一項也可以是逗號分隔的多個。
+
+    Returns:
+        網段。
+
+    Raises:
+        ValueError: 有寫錯的 IP 或網段。
+    """
+    networks = []
+    for value in values:
+        for item in str(value).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                networks.append(ipaddress.ip_network(item, strict=False))
+            except ValueError as error:
+                raise ValueError(
+                    f"信任的反向代理不是 IP 或網段（例如 10.0.0.0/8）：{item}"
+                ) from error
+    return tuple(networks)
+
+
 def create_app(
     project: project_lib.Project,
     *,
@@ -168,12 +227,13 @@ def create_app(
     password: str | None = None,
     allowed_hosts: Iterable[str] = (),
     max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
+    trusted_proxies: Iterable[str] = (),
 ) -> web.Application:
     """建立網頁版的 aiohttp 應用程式。
 
     帳號模式還沒有管理者時建立 admin（見 ensure_admin），並把多人帳號
-    之前的資料交給第一位管理者（本機模式交給本機使用者，見 migration
-    模組）。
+    之前的資料交給第一位管理者（見 migration 模組）。本機模式不搬任何
+    資料，和 CLI 共用 .harness/sessions/ 與 .harness/memory.json。
 
     Args:
         project: 載入完成的專案。
@@ -185,20 +245,22 @@ def create_app(
         allowed_hosts: 另外接受的 Host（瀏覽器網址上的主機名稱，例如
             反向代理的網域）。帳號模式且沒有指定時接受任何 Host。
         max_upload_bytes: 上傳的單一檔案大小上限。
+        trusted_proxies: 信任的反向代理（IP 或網段），見模組說明。
 
     Returns:
         aiohttp 的 Application。
 
     Raises:
-        ValueError: 需要管理者卻沒有密碼，或 harness.yaml 的 workspaces
-            寫錯。
+        ValueError: 需要管理者卻沒有密碼、信任的反向代理寫錯，或
+            harness.yaml 的 workspaces 寫錯。
     """
     allowed_hosts = list(allowed_hosts)
+    proxies = parse_trusted_proxies(trusted_proxies)
     store = accounts_lib.AccountStore.for_project(project.root)
     mode = auth_mode(
         store, host=host, password=password, allowed_hosts=allowed_hosts
     )
-    owner = accounts_lib.LOCAL_ID
+    owner = None
     if mode == "accounts":
         owner = ensure_admin(store, password).id
     workspace = workspace_lib.Workspace(
@@ -206,14 +268,17 @@ def create_app(
         model_fn=model_fn,
         max_upload_bytes=max_upload_bytes,
         auth_mode=mode,
+        users=store.get_user if mode == "accounts" else None,
     )
-    workspace.migrate(owner)
+    if owner is not None:
+        workspace.migrate(owner)
     app = web.Application(
         client_max_size=_MAX_BODY,
         # 第一個 middleware 在最外層，安全檢查丟出的錯誤也要轉成 JSON。
         middlewares=[
             _error_middleware,
             _guard_middleware(host, allowed_hosts, mode == "accounts"),
+            *([_local_only_middleware] if mode == "local" else []),
             _auth_middleware(mode, store),
         ],
     )
@@ -221,6 +286,8 @@ def create_app(
     app[_ACCOUNTS] = store
     app[_THROTTLE] = accounts_lib.LoginThrottle()
     app[_STREAMS] = set()
+    app[_LOGINS] = asyncio.Semaphore(LOGIN_CONCURRENCY)
+    app[_PROXIES] = proxies
     routes = web.RouteTableDef()
     _session_routes(routes)
     _file_routes(routes)
@@ -362,18 +429,24 @@ def _file_routes(routes: web.RouteTableDef) -> None:
 
     @routes.get("/api/files")
     async def get_file(request: web.Request) -> web.StreamResponse:
-        root = _folder_path(request)
-        target = _checked_file(root, request.query.get("path", ""))
+        folder = _request_folder(request)
+        path = request.query.get("path", "")
+        try:
+            fd, info = files_lib.open_file(folder.path, path, folder.hidden)
+        except files_lib.FileError as error:
+            raise workspace_lib.WebError(error.status, str(error)) from error
+        name = pathlib.PurePosixPath(path.replace("\\", "/")).name
         download = request.query.get("download") == "1"
-        return web.FileResponse(
-            target, headers=files_lib.response_headers(target, download)
-        )
+        headers = files_lib.response_headers(name, download)
+        return await _send_file(request, fd, info.st_size, headers)
 
     @routes.get("/api/files/list")
     async def list_files(request: web.Request) -> web.Response:
-        root = _folder_path(request)
+        folder = _request_folder(request)
         try:
-            entries = files_lib.list_dir(root, request.query.get("dir", ""))
+            entries = files_lib.list_dir(
+                folder.path, request.query.get("dir", ""), folder.hidden
+            )
         except files_lib.FileError as error:
             raise workspace_lib.WebError(error.status, str(error)) from error
         return _json(entries)
@@ -392,19 +465,13 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
             raise workspace_lib.WebError(400, "請輸入帳號與密碼")
         if local:
             return _json(accounts_lib.current_user(accounts_lib.LOCAL_USER))
-        throttle = request.app[_THROTTLE]
-        address = request.remote or ""
-        if throttle.locked(username, address):
-            raise workspace_lib.WebError(
-                429,
-                f"登入失敗太多次，請 {accounts_lib.LOCK_SECONDS} 秒後再試",
-            )
-        store = request.app[_ACCOUNTS]
-        user = await asyncio.to_thread(store.authenticate, username, password)
-        if user is None:
-            throttle.failed(username, address)
+        # 格式不對的名稱不可能有帳號：不算密碼，也不占登入限制的記錄。
+        if not accounts_lib.valid_username(username):
             raise workspace_lib.WebError(401, "帳號或密碼不正確")
-        throttle.succeeded(username, address)
+        store = request.app[_ACCOUNTS]
+        user = await _checked_login(request, username, password)
+        if user is None:
+            raise workspace_lib.WebError(401, "帳號或密碼不正確")
         response = _json(accounts_lib.current_user(user))
         _set_cookie(request, response, store.create_login(user.id))
         return response
@@ -432,17 +499,8 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
             raise workspace_lib.WebError(400, "缺少 current 或 next")
         user = _user(request)
         store = request.app[_ACCOUNTS]
-        throttle = request.app[_THROTTLE]
-        address = request.remote or ""
-        if throttle.locked(user.username, address):
-            raise workspace_lib.WebError(
-                429, f"失敗太多次，請 {accounts_lib.LOCK_SECONDS} 秒後再試"
-            )
-        checked = await asyncio.to_thread(
-            store.authenticate, user.username, current
-        )
+        checked = await _checked_login(request, user.username, current)
         if checked is None or checked.id != user.id:
-            throttle.failed(user.username, address)
             raise workspace_lib.WebError(400, "目前的密碼不正確")
         try:
             accounts_lib.check_new_password(new)
@@ -489,12 +547,23 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
         disabled = body.get("disabled")
         if disabled is not None and not isinstance(disabled, bool):
             raise workspace_lib.WebError(400, "disabled 必須是 true 或 false")
+        store = request.app[_ACCOUNTS]
+        user_id = request.match_info["user_id"]
+        before = store.get_user(user_id)
         with _account_errors():
-            user = request.app[_ACCOUNTS].update_user(
-                request.match_info["user_id"],
+            user = store.update_user(
+                user_id,
                 display_name=body.get("displayName"),
                 role=body.get("role"),
                 disabled=disabled,
+            )
+        # 停用或改變角色：那個人正在執行的對話停下來（權限另外每次都
+        # 讀最新的角色）。
+        if before is not None and (
+            user.disabled != before.disabled or user.role != before.role
+        ):
+            _ws(request).stop_runs_of(
+                user.id, workspace_lib.ACCOUNT_CHANGED_NOTICE
             )
         return _json(accounts_lib.member_info(user))
 
@@ -511,9 +580,13 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
             store.set_password(user_id, password)
         user = store.get_user(user_id)
         assert user is not None
-        return _json(
+        response = _json(
             {"user": accounts_lib.member_info(user), "password": password}
         )
+        # 重設自己的密碼會登出所有地方，這個瀏覽器重新登入。
+        if user_id == _user(request).id:
+            _set_cookie(request, response, store.create_login(user_id))
+        return response
 
 
 def _settings_routes(routes: web.RouteTableDef) -> None:
@@ -559,6 +632,7 @@ async def serve(
     password: str | None = None,
     allowed_hosts: Iterable[str] = (),
     max_upload_bytes: int = uploads_lib.DEFAULT_MAX_BYTES,
+    trusted_proxies: Iterable[str] = (),
 ) -> None:
     """啟動伺服器，直到被取消（例如使用者按 Ctrl-C）。
 
@@ -571,6 +645,7 @@ async def serve(
         password: 網頁密碼，見 create_app。
         allowed_hosts: 另外接受的 Host，見 create_app。
         max_upload_bytes: 上傳的單一檔案大小上限。
+        trusted_proxies: 信任的反向代理，見 create_app。
 
     Raises:
         ValueError: 要讓其他電腦連線，卻沒有管理者也沒有設定密碼。
@@ -582,6 +657,7 @@ async def serve(
         password=password,
         allowed_hosts=allowed_hosts,
         max_upload_bytes=max_upload_bytes,
+        trusted_proxies=trusted_proxies,
     )
     runner = web.AppRunner(app, handle_signals=False)
     await runner.setup()
@@ -623,11 +699,14 @@ def _account_errors():
 def _set_cookie(
     request: web.Request, response: web.Response, token: str
 ) -> None:
-    """設定登入的 cookie：HttpOnly、SameSite=Strict，HTTPS 時加上 Secure。"""
-    forwarded = request.headers.get("X-Forwarded-Proto", "")
-    secure = request.secure or (
-        forwarded.split(",")[0].strip().lower() == "https"
-    )
+    """設定登入的 cookie：HttpOnly、SameSite=Strict，HTTPS 時加上 Secure。
+
+    X-Forwarded-Proto 只在請求來自信任的反向代理時採信。
+    """
+    secure = request.secure
+    if _from_trusted_proxy(request):
+        forwarded = request.headers.get("X-Forwarded-Proto", "")
+        secure = secure or forwarded.split(",")[0].strip().lower() == "https"
     response.set_cookie(
         COOKIE,
         token,
@@ -639,10 +718,136 @@ def _set_cookie(
     )
 
 
-def _folder_path(request: web.Request) -> pathlib.Path:
+def client_address(request: web.Request) -> str:
+    """用戶端的 IP。
+
+    請求來自信任的反向代理（--trusted-proxy）時，取 X-Forwarded-For
+    最右邊不是信任的反向代理的那一站（最左邊的可以被用戶端自己偽造）；
+    否則就是連線的位址。
+    """
+    remote = request.remote or ""
+    if not _from_trusted_proxy(request):
+        return remote
+    hops = [
+        hop.strip()
+        for header in request.headers.getall("X-Forwarded-For", [])
+        for hop in header.split(",")
+        if hop.strip()
+    ]
+    proxies = request.app[_PROXIES]
+    for hop in reversed(hops):
+        if not _in_networks(hop, proxies):
+            return hop
+    return hops[0] if hops else remote
+
+
+def _from_trusted_proxy(request: web.Request) -> bool:
+    return _in_networks(request.remote or "", request.app[_PROXIES])
+
+
+def _in_networks(address: str, networks: tuple[_Network, ...]) -> bool:
+    if not networks:
+        return False
+    try:
+        ip = ipaddress.ip_address(address.strip("[]").split("%", 1)[0])
+    except ValueError:
+        return False
+    return any(ip in network for network in networks)
+
+
+async def _checked_login(
+    request: web.Request, username: str, password: str
+) -> accounts_lib.User | None:
+    """在登入限制之內確認帳號密碼。
+
+    先在 LoginThrottle 占位（還沒有結果的也算一次），再排隊等驗證密碼
+    的名額（同時最多 LOGIN_CONCURRENCY 個）。
+
+    Raises:
+        WebError: 失敗太多次，要等一下再試（429）。
+    """
+    throttle = request.app[_THROTTLE]
+    address = client_address(request)
+    wait = throttle.reserve(username, address)
+    if wait:
+        raise workspace_lib.WebError(429, f"登入失敗太多次，請 {wait} 秒後再試")
+    result: bool | None = None
+    user = None
+    try:
+        async with request.app[_LOGINS]:
+            store = request.app[_ACCOUNTS]
+            user = await asyncio.to_thread(
+                store.authenticate, username, password
+            )
+            result = user is not None
+    finally:
+        throttle.release(username, address, result)
+    return user
+
+
+def _request_folder(request: web.Request) -> folders_lib.Folder:
     """?folder= 指定的工作資料夾；不能使用時回 404。"""
-    folder = _ws(request).folder(_user(request), request.query.get("folder"))
-    return folder.path
+    return _ws(request).folder(_user(request), request.query.get("folder"))
+
+
+async def _send_file(
+    request: web.Request, fd: int, size: int, headers: dict[str, str]
+) -> web.StreamResponse:
+    """從已經打開的 fd 送出檔案（支援單一範圍的 Range），送完關閉 fd。
+
+    不用 web.FileResponse：它依路徑重新打開檔案，那時路徑可能已經被換
+    成捷徑（見 builtin.paths）。
+    """
+    try:
+        start, stop, status = _byte_range(request, size)
+        response = web.StreamResponse(status=status, headers=headers)
+        response.headers["Accept-Ranges"] = "bytes"
+        if status == 416:
+            response.headers["Content-Range"] = f"bytes */{size}"
+            response.content_length = 0
+            await response.prepare(request)
+            return response
+        if status == 206:
+            response.headers["Content-Range"] = (
+                f"bytes {start}-{stop - 1}/{size}"
+            )
+        response.content_length = stop - start
+        await response.prepare(request)
+        if request.method == "HEAD":
+            return response
+        offset = start
+        while offset < stop:
+            length = min(_FILE_CHUNK, stop - offset)
+            chunk = await asyncio.to_thread(os.pread, fd, length, offset)
+            if not chunk:
+                break
+            await response.write(chunk)
+            offset += len(chunk)
+        await response.write_eof()
+        return response
+    finally:
+        os.close(fd)
+
+
+def _byte_range(request: web.Request, size: int) -> tuple[int, int, int]:
+    """Range 標頭要的範圍，回傳 (開始, 結束（不含）, HTTP 狀態碼)。"""
+    if "Range" not in request.headers:
+        return 0, size, 200
+    try:
+        wanted = request.http_range
+    except ValueError:
+        return 0, 0, 416
+    start, stop = wanted.start, wanted.stop
+    if start is None and stop is None:
+        return 0, size, 200
+    if start is None:
+        start = 0
+    if start < 0:
+        start = max(size + start, 0)
+    stop = size if stop is None else min(stop, size)
+    if start >= size or start >= stop:
+        return 0, 0, 416
+    return start, stop, 206
 
 
 def _warm_up() -> None:
@@ -693,19 +898,6 @@ def _string(body: dict[str, Any], key: str) -> str:
 def _optional_string(body: dict[str, Any], key: str) -> str | None:
     value = body.get(key)
     return value if isinstance(value, str) else None
-
-
-def _checked_file(root: pathlib.Path, path: str) -> pathlib.Path:
-    """確認是可以送出的檔案（規則見 files 模組）。"""
-    if not path:
-        raise workspace_lib.WebError(400, "缺少 path")
-    try:
-        target = files_lib.resolve(root, path)
-    except files_lib.FileError as error:
-        raise workspace_lib.WebError(error.status, str(error)) from error
-    if not target.is_file():
-        raise workspace_lib.WebError(404, f"找不到檔案：{path}")
-    return target
 
 
 def _attachments(body: dict[str, Any]) -> list[str]:
@@ -796,6 +988,27 @@ def _check_upload(request: web.Request, raw_host: str) -> None:
         raise workspace_lib.WebError(415, "上傳必須是 multipart/form-data")
 
 
+@web.middleware
+async def _local_only_middleware(request: web.Request, handler):
+    """本機模式（不必登入）只接受直接從本機連進來的請求。
+
+    反向代理通常從 127.0.0.1 連進來、Host 也可能是 localhost，光看 Host
+    擋不住；經過反向代理的請求一定會帶 X-Forwarded-For 這類標頭。
+    """
+    remote = request.remote or ""
+    proxied = any(name in request.headers for name in _PROXY_HEADERS)
+    if proxied or not _loopback(remote):
+        raise workspace_lib.WebError(403, _LOCAL_ONLY)
+    return await handler(request)
+
+
+def _loopback(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
 def _auth_middleware(mode: str, store: accounts_lib.AccountStore):
     """確認登入的人，放進 request[_USER]。
 
@@ -843,7 +1056,8 @@ async def _stream_events(request: web.Request) -> web.StreamResponse:
     )
     await response.prepare(request)
     queue: asyncio.Queue = asyncio.Queue()
-    unsubscribe = _ws(request).subscribe(_user(request), queue.put_nowait)
+    user = _user(request)
+    unsubscribe = _ws(request).subscribe(user, queue.put_nowait)
     request.app[_STREAMS].add(response)
     try:
         queue.put_nowait({"type": "hello"})
@@ -851,6 +1065,9 @@ async def _stream_events(request: web.Request) -> web.StreamResponse:
             try:
                 event = await asyncio.wait_for(queue.get(), _HEARTBEAT)
             except TimeoutError:
+                # 登出、改密碼或帳號被停用後就不再推送。
+                if not _still_logged_in(request, user):
+                    break
                 await response.write(b": ping\n\n")
                 continue
             if event is None:
@@ -863,6 +1080,15 @@ async def _stream_events(request: web.Request) -> web.StreamResponse:
         unsubscribe()
         request.app[_STREAMS].discard(response)
     return response
+
+
+def _still_logged_in(request: web.Request, user: accounts_lib.User) -> bool:
+    """SSE 的登入是否仍然有效（本機模式一律有效）。"""
+    if user.id == accounts_lib.LOCAL_ID:
+        return True
+    store = request.app[_ACCOUNTS]
+    current = store.resolve_login(request.cookies.get(COOKIE))
+    return current is not None and current.id == user.id
 
 
 def _serve_static(directory: pathlib.Path, path: str) -> web.StreamResponse:

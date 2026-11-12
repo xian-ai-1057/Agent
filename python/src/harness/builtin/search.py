@@ -7,12 +7,12 @@
       含 `/` 的樣式比對相對於搜尋目錄的完整路徑，例如 `src/**/*.py`。
 
 一律略過 .git、node_modules、.harness 等不需要看的資料夾，也不會跟著
-符號連結走出專案資料夾。
+符號連結（symlink）走：掃描與讀檔都經過 paths 模組，一層一層不跟著捷徑
+打開。
 """
 
 import dataclasses
 import os
-import pathlib
 import re
 from collections.abc import Callable
 
@@ -43,6 +43,7 @@ MAX_SEARCH_MATCHES = 100
 # 超過這個大小的檔案不搜尋內容。
 MAX_SEARCH_FILE_BYTES = 1_000_000
 _MAX_LINE_CHARS = 300
+_CHILD_FLAGS = paths.DIR_FLAGS | getattr(os, "O_NOFOLLOW", 0)
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -109,51 +110,90 @@ class Walked:
     truncated: bool
 
 
-def walk_files(directory: pathlib.Path) -> Walked:
-    """列出目錄底下所有的檔案（略過 IGNORED_DIRS 與符號連結）。
+def walk_files(context: datatypes.RunContext, path: str = ".") -> Walked:
+    """列出工作目錄裡一個資料夾底下所有的檔案。
+
+    略過 IGNORED_DIRS、捷徑（symlink）與 context 不讓看的位置。每一層
+    資料夾都以上一層的 fd 為基準、用 O_NOFOLLOW 打開（見 paths 模組），
+    掃描途中資料夾被換成捷徑也不會跟著走出去。
 
     Args:
-        directory: 要列出的目錄。
+        context: 這次 run 的環境資訊。
+        path: 要列出的資料夾，相對於工作目錄。
 
     Returns:
-        找到的檔案，以及是否因為太多而沒有全部列出。
+        找到的檔案（相對於這個資料夾），以及是否因為太多而沒有全部列出。
+
+    Raises:
+        ValueError: 路徑不能存取。
+        OSError: 資料夾不存在或不是資料夾。
     """
+    start = paths.relative_parts(context, path)
     files: list[str] = []
 
-    def visit(current: pathlib.Path) -> bool:
-        with os.scandir(current) as iterator:
-            entries = sorted(iterator, key=lambda entry: entry.name)
-        for entry in entries:
-            if entry.is_dir(follow_symlinks=False):
-                if entry.name in IGNORED_DIRS:
-                    continue
-                if not visit(pathlib.Path(entry.path)):
-                    return False
-            elif entry.is_file(follow_symlinks=False):
-                if len(files) >= MAX_WALK_FILES:
-                    return False
-                relative = pathlib.Path(entry.path).relative_to(directory)
-                files.append(relative.as_posix())
+    def keep(entry: os.DirEntry, relative: tuple[str, ...]) -> bool:
+        return paths.visible(context, (*start, *relative)) and not (
+            entry.is_dir(follow_symlinks=False) and entry.name in IGNORED_DIRS
+        )
+
+    def add(relative: tuple[str, ...]) -> bool:
+        if len(files) >= MAX_WALK_FILES:
+            return False
+        files.append("/".join(relative))
         return True
 
-    complete = visit(directory)
+    def visit(handle, relative: tuple[str, ...]) -> bool:
+        with os.scandir(handle) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+        for entry in entries:
+            inner = (*relative, entry.name)
+            if entry.is_symlink() or not keep(entry, inner):
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if not visit_child(handle, entry.name, inner):
+                    return False
+            elif entry.is_file(follow_symlinks=False) and not add(inner):
+                return False
+        return True
+
+    def visit_child(handle, name: str, inner: tuple[str, ...]) -> bool:
+        if not paths.SAFE_OPEN:
+            return visit(os.path.join(handle, name), inner)
+        try:
+            child = os.open(name, _CHILD_FLAGS, dir_fd=handle)
+        except OSError:
+            # 掃描途中被換成捷徑或刪掉：略過。
+            return True
+        try:
+            return visit(child, inner)
+        finally:
+            os.close(child)
+
+    if not paths.SAFE_OPEN:
+        complete = visit(str(paths.resolve_path(context, path)), ())
+        return Walked(files=files, truncated=not complete)
+    root = paths.open_path(context, path, paths.DIR_FLAGS)
+    try:
+        complete = visit(root, ())
+    finally:
+        os.close(root)
     return Walked(files=files, truncated=not complete)
 
 
-def _search_root(context: datatypes.RunContext, path: str) -> pathlib.Path:
-    """解析搜尋的起點，必須是專案資料夾裡存在的資料夾。"""
-    directory = paths.resolve_path(context, path)
-    if not directory.is_dir():
-        raise tools.ToolError(f"找不到資料夾：{path}")
-    return directory
+def _search_root(context: datatypes.RunContext, path: str) -> tuple[str, ...]:
+    """檢查搜尋的起點是工作目錄裡存在的資料夾，回傳它的各層名稱。"""
+    parts = paths.relative_parts(context, path)
+    try:
+        handle = paths.open_path(context, path, paths.DIR_FLAGS)
+    except OSError as error:
+        raise tools.ToolError(f"找不到資料夾：{path}") from error
+    os.close(handle)
+    return parts
 
 
-def _from_root(
-    context: datatypes.RunContext, directory: pathlib.Path, path: str
-) -> str:
-    """把相對於搜尋目錄的路徑換成相對於專案根目錄的路徑。"""
-    root = context.workdir.resolve()
-    return (directory / path).relative_to(root).as_posix()
+def _from_root(start: tuple[str, ...], path: str) -> str:
+    """把相對於搜尋目錄的路徑換成相對於工作目錄的路徑。"""
+    return "/".join((*start, path))
 
 
 @tools.tool
@@ -170,16 +210,13 @@ def find_files(
     """
     if not pattern:
         raise tools.ToolError("pattern 不能是空字串")
-    directory = _search_root(context, path)
+    start = _search_root(context, path)
     matches = glob_matcher(pattern)
-    walked = walk_files(directory)
+    walked = walk_files(context, path)
     found = [item for item in walked.files if matches(item)]
     if not found:
         return f"沒有符合 {pattern} 的檔案"
-    lines = [
-        _from_root(context, directory, item)
-        for item in found[:MAX_FIND_RESULTS]
-    ]
+    lines = [_from_root(start, item) for item in found[:MAX_FIND_RESULTS]]
     if len(found) > MAX_FIND_RESULTS:
         lines.append(
             f"[共 {len(found)} 個，只顯示前 {MAX_FIND_RESULTS} 個，請縮小範圍]"
@@ -197,11 +234,20 @@ def _clip(line: str) -> str:
     return f"{trimmed[:_MAX_LINE_CHARS]}…"
 
 
-def _read_text(path: pathlib.Path) -> str | None:
-    """讀取要搜尋的檔案；太大或是二進位檔時回傳 None。"""
-    if path.stat().st_size > MAX_SEARCH_FILE_BYTES:
+def _read_text(context: datatypes.RunContext, path: str) -> str | None:
+    """讀取要搜尋的檔案；太大、是二進位檔或讀不到時回傳 None。"""
+    try:
+        handle = paths.open_path(context, path, paths.READ_FLAGS)
+    except (OSError, ValueError):
         return None
-    data = path.read_bytes()
+    with os.fdopen(handle, "rb") as file:
+        try:
+            info = paths.require_file(file.fileno(), path)
+        except (OSError, ValueError):
+            return None
+        if info.st_size > MAX_SEARCH_FILE_BYTES:
+            return None
+        data = file.read(MAX_SEARCH_FILE_BYTES + 1)
     # 有 NUL 字元的視為二進位檔，不搜尋。
     if b"\0" in data[:8000]:
         return None
@@ -233,15 +279,16 @@ def search_files(
         regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
     except re.error as error:
         raise tools.ToolError(f"正規表示式有誤：{error}") from error
-    directory = _search_root(context, path)
+    start = _search_root(context, path)
     wanted = glob_matcher(glob) if glob else (lambda _: True)
-    walked = walk_files(directory)
+    walked = walk_files(context, path)
     results: list[str] = []
     total = 0
     for file in walked.files:
         if not wanted(file):
             continue
-        text = _read_text(directory / file)
+        where = _from_root(start, file)
+        text = _read_text(context, where)
         if text is None:
             continue
         for number, line in enumerate(paths.split_lines(text), start=1):
@@ -249,7 +296,6 @@ def search_files(
                 continue
             total += 1
             if len(results) < MAX_SEARCH_MATCHES:
-                where = _from_root(context, directory, file)
                 results.append(f"{where}:{number}: {_clip(line)}")
     if total == 0:
         return f"沒有找到符合 {pattern} 的內容"

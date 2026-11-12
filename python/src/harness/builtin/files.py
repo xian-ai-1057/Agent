@@ -1,6 +1,7 @@
 """內建的檔案工具（toolset 名稱：files）。
 
-所有路徑都限制在專案根目錄（RunContext.workdir）底下。
+所有路徑都限制在專案根目錄（RunContext.workdir）底下，讀寫都經過
+paths.open_path：路徑上的捷徑（symlink）一律拒絕，列資料夾時也不列出捷徑。
 
 設計參考 Claude Code 的 Read / Write / Edit / Glob / Grep：
     read_file: 讀整個檔案，或用 offset / limit 只讀其中幾行。
@@ -59,7 +60,7 @@ def read_file(
     for name, value in (("offset", offset), ("limit", limit)):
         if value is not None and value < 1:
             raise tools.ToolError(f"{name} 必須大於或等於 1")
-    text = resolve_path(context, path).read_text(encoding="utf-8")
+    text = paths.read_text(context, path)
     if offset is None and limit is None:
         return _truncate(text)
     return _truncate(_slice_lines(text, offset or 1, limit))
@@ -72,10 +73,9 @@ def list_dir(context: datatypes.RunContext, path: str = ".") -> list[str]:
     Args:
         path: 相對於專案根目錄的目錄路徑。
     """
-    target = resolve_path(context, path)
     return sorted(
-        f"{item.name}/" if item.is_dir() else item.name
-        for item in target.iterdir()
+        f"{item.name}/" if item.is_dir else item.name
+        for item in paths.list_entries(context, path)
     )
 
 
@@ -89,9 +89,7 @@ def write_file(context: datatypes.RunContext, path: str, content: str) -> str:
         path: 相對於專案根目錄的檔案路徑。
         content: 要寫入的完整內容。
     """
-    target = resolve_path(context, path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    paths.write_text(context, path, content)
     return f"已寫入 {path}（{len(content)} 個字元）"
 
 
@@ -118,10 +116,8 @@ def edit_file(
         raise tools.ToolError("old_text 不能是空字串")
     if old_text == new_text:
         raise tools.ToolError("old_text 與 new_text 相同，沒有需要修改的地方")
-    target = resolve_path(context, path)
     # newline="" 保留原本的換行字元（\r\n 不會被換成 \n）。
-    with target.open(encoding="utf-8", newline="") as file:
-        text = file.read()
+    text = paths.read_text(context, path, newline="")
     count = text.count(old_text)
     if count == 0:
         raise tools.ToolError(
@@ -134,8 +130,7 @@ def edit_file(
             "一次，或設定 replace_all 取代全部"
         )
     updated = text.replace(old_text, new_text, -1 if replace_all else 1)
-    with target.open("w", encoding="utf-8", newline="") as file:
-        file.write(updated)
+    paths.write_text(context, path, updated, newline="")
     return f"已修改 {path}（取代 {count if replace_all else 1} 處）"
 
 

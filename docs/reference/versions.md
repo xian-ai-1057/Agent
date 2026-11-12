@@ -37,7 +37,7 @@
 - **Python 版不會載入 `tools/*.ts`。**
 - TypeScript 版會忽略 agent 檔案裡的 `subagents`、`handoffs`、`skills`、`knowledge` 欄位，以及 `harness.yaml` 的 `knowledge`、`memory`、`guardrails`、`compaction`、`sandbox` 區塊。但 agent 的 `tools` 列了 `sandbox` 的話，TypeScript 版會因為找不到它而**無法載入**。
 - 兩個版本的內建檔案工具都不能存取 `.harness/secrets/`。
-- Python 版的網頁把每個人的對話存在 `.harness/users/<識別碼>/sessions/`，TypeScript 版的網頁與兩個版本的命令列用 `.harness/sessions/`，所以 Python 版網頁上的對話不會出現在 TypeScript 版或命令列裡。harness.yaml 的 `workspaces` 只有 Python 版使用。
+- Python 版的網頁要登入時把每個人的對話存在 `.harness/users/<識別碼>/sessions/`，這些對話不會出現在 TypeScript 版或命令列裡；不必登入（本機模式）時和 TypeScript 版的網頁、兩個版本的命令列一樣用 `.harness/sessions/`。harness.yaml 的 `workspaces` 只有 Python 版使用。
 - Python 版壓縮過的對話，TypeScript 版會讀取壓縮後的歷史接續。
 
 ## 怎麼選

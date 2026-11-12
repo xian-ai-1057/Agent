@@ -89,6 +89,9 @@ class _RunOptions:
     workdir: pathlib.Path
     model_fn: llm.ModelFn
     memory: memory_lib.MemoryStore | None = None
+    # 內建檔案工具在 workdir 裡看不到的部分（見 RunContext）。
+    hidden: tuple[str, ...] = ()
+    hide_dotfiles: bool = False
     compaction: compaction_lib.Compaction | None = None
     # 0 是使用者直接對話的 agent，每進入一層 subagent 加 1。
     depth: int = 0
@@ -122,6 +125,8 @@ async def run_stream(
     model_fn: llm.ModelFn | None = None,
     memory: memory_lib.MemoryStore | None = None,
     compaction: compaction_lib.Compaction | None = None,
+    hidden: tuple[str, ...] = (),
+    hide_dotfiles: bool = False,
 ) -> AsyncIterator[datatypes.Event]:
     """執行 agent 並逐步產生事件，適合接到聊天介面。
 
@@ -141,6 +146,8 @@ async def run_stream(
             用 remember / forget 工具管理；不傳則不使用記憶。
         compaction: 對話壓縮的設定。傳入時，對話太長會自動把較舊的歷史
             濃縮成檢查點；不傳則不壓縮。
+        hidden: workdir 第一層裡內建檔案工具不能碰的名稱（見 RunContext）。
+        hide_dotfiles: 內建檔案工具是否不能碰以點開頭的檔案或資料夾。
 
     Yields:
         Event，最後一個一定是 run_end。
@@ -157,6 +164,8 @@ async def run_stream(
         model_fn=model_fn or llm.complete,
         memory=memory,
         compaction=compaction,
+        hidden=tuple(hidden),
+        hide_dotfiles=hide_dotfiles,
     )
     events = _run_loop(
         agent, user_input, session or sessions.Session(), options
@@ -515,6 +524,8 @@ def _make_context(
         workdir=options.workdir,
         session_id=session.id,
         deps=options.deps,
+        hidden=options.hidden,
+        hide_dotfiles=options.hide_dotfiles,
     )
 
 

@@ -41,7 +41,7 @@ NO_PROXY=localhost,127.0.0.1,.example.internal   # 不經過 proxy 的位址
 
 ## 資料放在哪裡
 
-專案、帳號（`.harness/harness.db`）、每個人的對話紀錄與記憶、「我的檔案」（`private/`）、共用資料夾（`workspace/`）與金鑰都在名為 `harness-data` 的 Docker volume 裡，`docker compose down` 與重新建置都不會刪除它（`docker compose down -v` 才會）。
+專案、帳號（`.harness/harness.db`）、每個人的對話紀錄與記憶、「我的檔案」（`private/`）、共用資料夾（預設是 `shared/`）與金鑰都在名為 `harness-data` 的 Docker volume 裡，`docker compose down` 與重新建置都不會刪除它（`docker compose down -v` 才會）。
 
 ```bash
 docker compose exec harness ls /assistant
@@ -50,12 +50,14 @@ docker compose restart harness   # 改了 harness.yaml 或 agent 之後重新載
 
 更新版本：`git pull && docker compose up -d --build`。
 
+從多人帳號之前的版本升級時，第一次啟動會把原本的對話紀錄與記憶交給 `admin`，放在只有他看得到的「舊資料（專案資料夾）」裡，舊對話的附件與檔案照樣打得開；`workspace/` 裡的檔案不搬，也**不會**分享給其他成員。預設的「共用」資料夾換成新的 `shared/`，要分享舊檔案請自己搬進去（見[從舊版升級](/guide/web#帳號與成員)）。
+
 ## 安全上要知道的事
 
 ::: warning
 - **`docker-compose.yml` 把主機的 Docker socket 掛進容器**，沙盒才能啟動容器來執行程式。能使用這個 socket 等於擁有主機的 root 權限，所以請放在專用的機器或虛擬機上。不需要分析檔案時，把 `/var/run/docker.sock` 那一行刪掉再啟動（自動建立的助手就不會開啟沙盒）。
 - **admin 的密碼會印在 log 裡**，看得到 `docker compose logs` 的人就能以管理者登入，直到 admin 自己改掉密碼。
-- **這個設定是 http，沒有加密。** 只在內網或 VPN 裡使用；要從網際網路連線，請在前面加上 HTTPS 的反向代理（見[部署到伺服器](/advanced/server)）。
+- **這個設定是 http，沒有加密。** 只在內網或 VPN 裡使用；要從網際網路連線，請在前面加上 HTTPS 的反向代理（見[部署到伺服器](/advanced/server)），並在 `.env` 用 `HARNESS_TRUSTED_PROXIES` 寫上反向代理連進容器的位址（例如 `172.16.0.0/12`），登入限制才會依使用者真正的 IP 計算、cookie 才會加上 Secure。
 - 每個人的對話與「我的檔案」分開，共用資料夾所有能使用的人都拿得到；成員與管理者的差別見[部署到伺服器](/advanced/server#安全上要知道的事)。
 :::
 

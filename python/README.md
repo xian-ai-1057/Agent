@@ -1259,8 +1259,9 @@ pyharness memory             查看長期記憶（forget <識別碼> / clear）
 pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
                              （-l hr,sales 模擬受限的 agent）
 pyharness web                開啟網頁版（--port、--host、--allowed-host、
-                             --max-upload-mb，見下一節）；資料夾是空的
-                             時自動建立可以直接使用的助手
+                             --trusted-proxy、--max-upload-mb，見下一
+                             節）；資料夾是空的時自動建立可以直接使用的
+                             助手
 pyharness user               管理網頁版的帳號：add <名稱> [--name 顯示
                              名稱] [--admin]、list、passwd <名稱>、
                              disable <名稱>、enable <名稱>
@@ -1343,8 +1344,15 @@ Python 版另外會處理：
 ### 帳號與成員
 
 只在自己的電腦上用（只聽本機、沒有設定密碼、沒有任何帳號）時不必登入，
-你就是這台電腦的管理者。讓其他人使用時（聽本機以外的位址、設定了
-`HARNESS_WEB_PASSWORD`，或建立過帳號），每個人都要用自己的帳號登入：
+你就是這台電腦的管理者，一切和加入帳號之前一樣：對話紀錄與記憶就是
+`.harness/sessions/` 與 `.harness/memory.json`（和 `pyharness chat`、
+`pyharness memory` 共用），agent 在專案根目錄工作，上傳的檔案存在
+`workspace/uploads/`，沒有工作資料夾可以選。這時只接受直接從本機連進來
+的請求，帶有反向代理標頭（`X-Forwarded-For`、`Forwarded`、
+`X-Forwarded-Host`、`Via`）的一律拒絕，要透過反向代理使用請設定密碼。
+
+讓其他人使用時（聽本機以外的位址、設定了 `HARNESS_WEB_PASSWORD`，或
+建立過帳號），每個人都要用自己的帳號登入：
 
 - 第一次這樣啟動時自動建立管理者 `admin`，密碼是網頁密碼（環境變數
   `HARNESS_WEB_PASSWORD`，沒有時自動產生並印出來）。從舊版升級時原本的
@@ -1361,24 +1369,34 @@ Python 版另外會處理：
   pyharness user disable alice             # 停用；enable 重新啟用
   ```
 
-- 至少要留一位可以使用的管理者。停用的人立刻被登出。
+- 至少要留一位可以使用的管理者。停用的人立刻被登出，他正在執行的對話
+  也會停下來；改變角色時同樣停下來，權限判斷每次都讀最新的角色。
 - 成員只看得到自己的對話、「我的檔案」與被開放的共用資料夾，不能修改
   模型連線、全站權限與成員，也不能讓對話「全部直接執行」（bypass）。
   成員的 `run_command` 一律在沙盒裡執行，沒有沙盒時不提供。
 - 登入用 HttpOnly、SameSite=Strict 的 cookie，12 小時沒有使用就要重新
-  登入；同一個帳號名稱加 IP 連續錯 5 次密碼暫停 30 秒。
+  登入；登出、改密碼或被停用後，開著的網頁也不再收到更新。
+- 同一個帳號名稱連續錯 5 次密碼後，每次再錯都要等 2 秒起跳、加倍、最多
+  60 秒（換 IP 也一樣，成功登入後歸零）；同一個 IP 10 分鐘內最多錯 50
+  次；同時送出的登入也算數，同時最多 4 個登入在驗證密碼。
 
 每個人的資料存在 `.harness/users/<識別碼>/`（`sessions/`、`memory.json`、
 `permissions.json`），「我的檔案」在 `private/<識別碼>/`，帳號在
-`.harness/harness.db`。第一次啟動時，舊版的對話紀錄、記憶與上傳的檔案
-交給第一位管理者（上傳的檔案放到他「我的檔案」裡同樣的相對位置，舊對話
-的附件仍然打得開），只搬一次、不覆蓋任何檔案。
+`.harness/harness.db`。
+
+**從舊版升級（或從本機模式改成要登入）**：第一次啟動時，原本的對話紀錄
+與記憶交給第一位管理者，只搬一次、不覆蓋任何檔案。檔案不搬：舊對話都
+放在只有這位管理者看得到的「舊資料（專案資料夾）」裡，它就是專案根目錄，
+所以舊對話的附件與檔案卡片照原本的路徑打得開；它碰不到 `.harness/`、
+`private/` 與以點開頭的檔案，也不能執行程式或指令。預設的「共用」資料夾
+換成新的 `shared/`，舊的 `workspace/` 不會再自動分享給所有成員。
 
 ### 工作資料夾
 
-每段對話選一個工作資料夾（預設是自己的「我的檔案」），agent 的檔案
-工具、執行指令與沙盒都只看得到它，上傳的檔案也存在裡面。管理者可以在
-`harness.yaml` 開放共用資料夾：
+要登入時，每段對話選一個工作資料夾（預設是自己的「我的檔案」），agent
+的檔案工具、執行指令與沙盒都只看得到它，上傳的檔案也存在裡面。資料夾
+只能在開始對話前選擇，對話開始後就固定。管理者可以在 `harness.yaml`
+開放共用資料夾：
 
 ```yaml
 workspaces:
@@ -1388,10 +1406,17 @@ workspaces:
     writable: true            # false 時 agent 不能寫入（沙盒唯讀掛載），也不能上傳
 ```
 
-沒有寫 `workspaces` 時，有一個所有人都能用的「共用」資料夾：`workspace/`
-（有設定沙盒時是 `sandbox.workspace`）。共用資料夾不能和 `.harness/`、
+沒有寫 `workspaces` 時，有一個所有人都能用的「共用」資料夾：`shared/`
+（第一次使用時建立）。共用資料夾不能和 `.harness/`、
 `private/`、`harness.yaml`、`AGENTS.md`、`agents/`、`tools/`、`skills/`
 重疊，彼此也不能互相包含，寫錯時啟動就會報錯。
+
+檔案工具、檔案面板與上傳都不跟著捷徑（symlink）走：從工作資料夾開始
+一層一層用 `O_NOFOLLOW` 打開，路徑上有捷徑就拒絕，沙盒裡的程式因此沒辦法
+讓伺服器讀寫資料夾外面的檔案。要登入時 `web_fetch` 不能讀內部網路（本機、
+私有網路、link-local 與 `169.254.169.254`、IPv6 unique-local、CGNAT），
+每次轉址都重新檢查；管理者確實需要時在 `harness.yaml` 寫
+`web: {allowPrivateNetworks: true}`，只對管理者自己的對話生效。
 
 ### 在網頁上連接模型
 
@@ -1426,7 +1451,8 @@ agent 不建議開啟 `shell`。
 
 ### 上傳檔案
 
-上傳的檔案存在這段對話的[工作資料夾](#工作資料夾)底下的 `uploads/`。
+上傳的檔案存在這段對話的[工作資料夾](#工作資料夾)底下的 `uploads/`
+（不必登入時和以前一樣存在 `workspace/uploads/`）。
 [沙盒](#在沙盒裡執行程式)每一輪都把工作資料夾掛載到 `/workspace`，所以
 agent 可以直接用 `run_python` 解析，也可以用 `files` 工具讀取。
 
@@ -1486,7 +1512,8 @@ export HARNESS_WEB_PASSWORD='一組夠長的隨機密碼'
 export HARNESS_BASE_URL=http://litellm:4000      # 模型設定，見「模型設定」
 export HARNESS_API_KEY=sk-...
 export HARNESS_MODEL=claude
-~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com
+~/venv/bin/pyharness web -p /srv/my_bot --allowed-host ai.example.com \
+    --trusted-proxy 127.0.0.1
 ```
 
 - **讓其他電腦連線時一定要登入。** 第一次啟動時自動建立管理者帳號
@@ -1503,9 +1530,13 @@ export HARNESS_MODEL=claude
   [在網頁上連接模型](#在網頁上連接模型)（只有管理者能設定）。
 - `--allowed-host` 是使用者在瀏覽器網址列輸入的主機名稱（可以重複）。
   沒有指定時，用任何網址連線都接受（還是要登入）。
-- 登入的 cookie 是 HttpOnly、SameSite=Strict；經過 HTTPS（或反向代理送來
-  `X-Forwarded-Proto: https`）時另外加上 Secure。**一定要放在 HTTPS
-  後面**，不要讓瀏覽器直接用 http 連到伺服器傳送密碼。
+- `--trusted-proxy` 是反向代理連到 pyharness 的位址（IP 或網段，可以
+  重複；或環境變數 `HARNESS_TRUSTED_PROXIES`，逗號分隔）。只有從這些
+  位址連進來的請求，才採信 `X-Forwarded-For`（取最右邊不是反向代理的
+  那一站當成使用者的 IP）與 `X-Forwarded-Proto`；沒有指定時一律不採信。
+- 登入的 cookie 是 HttpOnly、SameSite=Strict；經過 HTTPS（或信任的反向
+  代理送來 `X-Forwarded-Proto: https`）時另外加上 Secure。**一定要放在
+  HTTPS 後面**，不要讓瀏覽器直接用 http 連到伺服器傳送密碼。
 
 **3. 用反向代理加上 HTTPS**
 
@@ -1521,6 +1552,7 @@ server {
         proxy_pass http://127.0.0.1:4321;
         proxy_set_header Host $http_host;  # 一定要傳瀏覽器送來的 Host
         proxy_set_header X-Forwarded-Proto $scheme;  # 讓登入的 cookie 加上 Secure
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # 使用者的 IP
         proxy_http_version 1.1;
         proxy_buffering off;               # 即時串流回覆（SSE）需要
         proxy_read_timeout 1h;
@@ -1542,7 +1574,7 @@ After=network-online.target docker.service
 User=harness
 WorkingDirectory=/srv/my_bot
 EnvironmentFile=/etc/harness.env
-ExecStart=/home/harness/venv/bin/pyharness web --allowed-host ai.example.com
+ExecStart=/home/harness/venv/bin/pyharness web --allowed-host ai.example.com --trusted-proxy 127.0.0.1
 Restart=on-failure
 
 [Install]
@@ -1577,9 +1609,11 @@ sudo systemctl enable --now harness
 - **共用資料夾裡的檔案，所有能使用它的人都拿得到**（agent 可以讀裡面的
   任何檔案），上傳的檔案也不會自動刪除。敏感文件請放在自己的「我的
   檔案」，分析完自行清理。
-- 登入失敗的限制（同一個帳號名稱加 IP 連續錯 5 次暫停 30 秒）只記在
-  記憶體裡，重新啟動後歸零；放在網際網路上時，請另外在反向代理加上
-  流量限制。
+- 登入失敗的限制（見[帳號與成員](#帳號與成員)）只記在記憶體裡，重新
+  啟動後歸零；放在網際網路上時，請另外在反向代理加上流量限制，並設定
+  `--trusted-proxy`。
+- 沙盒裡的程式可以在工作資料夾裡建立捷徑，所以伺服器存取工作資料夾時
+  一律不跟著捷徑走；`web_fetch` 不能讀內部網路（見[工作資料夾](#工作資料夾)）。
 
 ## 和 TypeScript 版的差異
 

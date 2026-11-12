@@ -122,10 +122,14 @@ def word_count(text: str) -> dict[str, int]:
     return {"characters": len(text), "lines": len(text.splitlines())}
 '''
 
+# private/ 與 shared/ 是網頁版多人使用時每個人的「我的檔案」與預設的
+# 「共用」資料夾。
 _GITIGNORE = """\
 .harness/
 __pycache__/
 workspace/
+private/
+shared/
 """
 
 _FILES = {
@@ -156,7 +160,8 @@ memory: true
 
 _SANDBOX_ON = """
 # 沙盒：讓助手寫 Python 程式解析上傳的檔案、分析資料，在 Docker 容器裡
-# 執行，沒有網路。上傳的檔案與產生的結果都在 workspace/。
+# 執行，沒有網路。容器只看得到工作資料夾（掛載在 /workspace）：單人使用
+# 時是 workspace/，多人使用時是每段對話選的資料夾。
 sandbox: true
 """
 
@@ -191,12 +196,13 @@ skills:
 
 - 用使用者的語言回答，先講結論，再補充必要的說明。
 - 不確定的事情照實說，不要編造資料、數字或出處。
-- 使用者上傳的檔案在 workspace/uploads/。
+- 使用者上傳的檔案在工作資料夾的 uploads/ 裡，訊息後面的附件說明會
+  寫出完整的路徑。
 {file_hint}
 - 需要網路上的資料時用 web_fetch 讀取網頁，並附上來源網址。
 - 工作有好幾個步驟時，先用 update_plan 列出計畫，再一步一步完成。
-- 產生的檔案（報告、圖表、整理好的資料）存在 workspace/ 裡，並告訴
-  使用者檔名。
+- 產生的檔案（報告、圖表、整理好的資料）存在工作資料夾裡（用
+  run_python 時寫在 /workspace），並告訴使用者檔名。
 """
 
 _FILE_HINT_SANDBOX = """\

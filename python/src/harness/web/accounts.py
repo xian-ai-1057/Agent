@@ -23,6 +23,7 @@ import base64
 import dataclasses
 import hashlib
 import hmac
+import math
 import pathlib
 import re
 import secrets
@@ -40,9 +41,18 @@ LOCAL_ID = "local"
 SESSION_LIFETIME = 14 * 24 * 3600
 IDLE_TIMEOUT = 12 * 3600
 MIN_PASSWORD_LENGTH = 10
-# 失敗太多次時暫停登入：同一個帳號名稱加上同一個 IP。
+# 登入失敗的限制（見 LoginThrottle）。
+# 同一個帳號名稱連續失敗 MAX_FAILURES 次後，每次失敗都要等一段時間才能
+# 再試：BACKOFF_SECONDS 秒起跳、每次加倍，最多 MAX_BACKOFF_SECONDS 秒。
 MAX_FAILURES = 5
-LOCK_SECONDS = 30
+BACKOFF_SECONDS = 2
+MAX_BACKOFF_SECONDS = 60
+# 同一個 IP 在 IP_WINDOW_SECONDS 秒內最多失敗幾次（不分帳號名稱）。
+MAX_IP_FAILURES = 50
+IP_WINDOW_SECONDS = 10 * 60
+# 這麼久沒有失敗的記錄就忘掉；記錄的總數也有上限。
+FORGET_SECONDS = 15 * 60
+MAX_THROTTLE_ENTRIES = 10_000
 # 最後使用時間最多每分鐘寫一次，避免每個請求都寫資料庫。
 _TOUCH_INTERVAL = 60
 # scrypt 的參數：約 16 MB 記憶體；存進雜湊裡，之後調整不影響舊密碼。
@@ -522,39 +532,139 @@ class _Transaction:
             self._db.close()
 
 
-class LoginThrottle:
-    """記在記憶體裡的登入失敗次數：同一個帳號名稱加 IP 失敗太多次時暫停。
+@dataclasses.dataclass
+class _Attempts:
+    """一個帳號名稱（或 IP）的登入記錄。"""
 
-    伺服器重新啟動後歸零；目的只是拖慢線上猜密碼，不是完整的防護。
+    failures: int = 0
+    # 在這個時間（clock 的秒數）之前不能再試。
+    until: float = 0.0
+    # 已經開始、還沒有結果的登入。
+    in_flight: int = 0
+    # IP 的計數從什麼時候開始。
+    window: float = 0.0
+    seen: float = 0.0
+
+
+class LoginThrottle:
+    """記在記憶體裡的登入限制，拖慢線上猜密碼。
+
+    - 帳號名稱：連續失敗 MAX_FAILURES 次之後，每次失敗都要等一段時間
+      （BACKOFF_SECONDS 秒起跳、每次加倍，最多 MAX_BACKOFF_SECONDS 秒）
+      才能再試，換 IP 也一樣；成功登入後歸零。等待時間很短，所以真正
+      的使用者不會因為別人亂試而被擋在外面太久。
+    - IP：IP_WINDOW_SECONDS 秒內最多失敗 MAX_IP_FAILURES 次，避免同一個
+      來源一次試很多帳號名稱。
+    - 同時進行：還沒有結果的登入也算一次（reserve 時先占位），所以同時
+      送出一大堆密碼也只有剩下的次數會被檢查。
+
+    記錄 FORGET_SECONDS 秒沒有動靜就忘掉，總數最多 MAX_THROTTLE_ENTRIES
+    筆。伺服器重新啟動後歸零；目的只是拖慢線上猜密碼，不是完整的防護。
+    呼叫前請先確認帳號名稱的格式（見 valid_username），亂打的名稱不會
+    占用記錄。
     """
 
     def __init__(self, clock=time.monotonic) -> None:
         self._clock = clock
-        self._failures: dict[tuple[str, str], tuple[int, float]] = {}
+        self._names: dict[str, _Attempts] = {}
+        self._addresses: dict[str, _Attempts] = {}
+        self._pruned = 0.0
 
-    def locked(self, username: str, address: str) -> bool:
-        """這個帳號名稱與 IP 現在是不是暫停登入。"""
-        count, until = self._failures.get(
-            _throttle_key(username, address), (0, 0)
-        )
-        return count >= MAX_FAILURES and self._clock() < until
+    def reserve(self, username: str, address: str) -> int:
+        """開始一次登入：可以試的話先占位並回傳 0，否則回傳要等幾秒。
 
-    def failed(self, username: str, address: str) -> None:
-        """記下一次失敗；達到上限時暫停 LOCK_SECONDS 秒。"""
-        key = _throttle_key(username, address)
-        count, until = self._failures.get(key, (0, 0))
-        if count >= MAX_FAILURES and self._clock() >= until:
-            count = 0
-        count += 1
-        self._failures[key] = (count, self._clock() + LOCK_SECONDS)
+        回傳 0 之後一定要呼叫 release。
 
-    def succeeded(self, username: str, address: str) -> None:
-        """登入成功後清掉失敗記錄。"""
-        self._failures.pop(_throttle_key(username, address), None)
+        Args:
+            username: 帳號名稱（已經確認過格式）。
+            address: 用戶端的 IP。
+        """
+        now = self._clock()
+        self._prune(now)
+        name = self._names.setdefault(_name_key(username), _Attempts())
+        source = self._addresses.setdefault(address, _Attempts())
+        if now - source.window >= IP_WINDOW_SECONDS:
+            source.failures = 0
+            source.window = now
+        wait = 0.0
+        if now < name.until:
+            wait = name.until - now
+        elif name.in_flight >= max(1, MAX_FAILURES - name.failures):
+            wait = 1.0
+        if source.failures >= MAX_IP_FAILURES:
+            wait = max(wait, source.window + IP_WINDOW_SECONDS - now)
+        if wait > 0:
+            return max(1, math.ceil(wait))
+        for record in (name, source):
+            record.in_flight += 1
+            record.seen = now
+        return 0
+
+    def release(
+        self, username: str, address: str, succeeded: bool | None
+    ) -> None:
+        """結束 reserve 開始的登入，記下成功或失敗。
+
+        Args:
+            username: 帳號名稱。
+            address: 用戶端的 IP。
+            succeeded: 密碼對不對；None 表示沒有驗證完（例如請求被取消），
+                不算一次失敗。
+        """
+        now = self._clock()
+        name = self._names.setdefault(_name_key(username), _Attempts())
+        source = self._addresses.setdefault(address, _Attempts())
+        for record in (name, source):
+            record.in_flight = max(0, record.in_flight - 1)
+            record.seen = now
+        if succeeded is None:
+            return
+        if succeeded:
+            name.failures = 0
+            name.until = 0.0
+            return
+        name.failures += 1
+        if name.failures >= MAX_FAILURES:
+            extra = name.failures - MAX_FAILURES
+            delay = BACKOFF_SECONDS * 2 ** min(extra, 16)
+            name.until = now + min(delay, MAX_BACKOFF_SECONDS)
+        source.failures += 1
+
+    def _prune(self, now: float) -> None:
+        """忘掉太久沒有動靜的記錄；太多時從最舊的開始忘。"""
+        total = len(self._names) + len(self._addresses)
+        if total <= MAX_THROTTLE_ENTRIES and now - self._pruned < 60:
+            return
+        self._pruned = now
+        for table in (self._names, self._addresses):
+            idle = [
+                key
+                for key, record in table.items()
+                if record.in_flight == 0
+                and now - record.seen >= FORGET_SECONDS
+                and now >= record.until
+            ]
+            for key in idle:
+                del table[key]
+            excess = len(table) - MAX_THROTTLE_ENTRIES // 2
+            if excess > 0:
+                # 還在等待中的記錄最後才忘。
+                oldest = sorted(
+                    (now < r.until, r.seen, k)
+                    for k, r in table.items()
+                    if r.in_flight == 0
+                )
+                for *_, key in oldest[:excess]:
+                    del table[key]
 
 
-def _throttle_key(username: str, address: str) -> tuple[str, str]:
-    return (str(username).strip().lower(), address)
+def valid_username(username: object) -> bool:
+    """帳號名稱的格式對不對（2–32 個英文字母、數字或 . _ -）。"""
+    return isinstance(username, str) and bool(_USERNAME.match(username.strip()))
+
+
+def _name_key(username: str) -> str:
+    return str(username).strip().lower()
 
 
 def _user(row: sqlite3.Row) -> User:
