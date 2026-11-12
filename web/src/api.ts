@@ -3,8 +3,11 @@
 import type {
   ApprovalDecision,
   ConnectionSettings,
+  CurrentUser,
   Feedback,
   FileEntry,
+  IssuedPassword,
+  MemberInfo,
   ModelTestResult,
   PermissionMode,
   PermissionSettings,
@@ -111,15 +114,53 @@ export const api = {
     request<SessionOptions>("PUT", `/sessions/${id}/options`, options),
   setFeedback: (id: string, index: number, feedback: Feedback | null) =>
     request("PUT", `/sessions/${id}/feedback`, { index, feedback }),
-  listFiles: (dir = "") =>
-    request<FileEntry[]>("GET", `/files/list?dir=${encodeURIComponent(dir)}`),
+  listFiles: (dir = "", folder?: string | null) =>
+    request<FileEntry[]>(
+      "GET",
+      `/files/list?dir=${encodeURIComponent(dir)}${folderQuery(folder)}`,
+    ),
+
+  // 帳號（Python 版，ProjectInfo.features.accounts 為 true 時）。
+  login: (username: string, password: string) =>
+    request<CurrentUser>("POST", "/auth/login", { username, password }),
+  logout: () => request("POST", "/auth/logout", {}),
+  me: () => request<CurrentUser>("GET", "/auth/me"),
+  changePassword: (current: string, next: string) =>
+    request("PUT", "/auth/password", { current, next }),
+  members: () => request<MemberInfo[]>("GET", "/admin/users"),
+  addMember: (
+    username: string,
+    displayName: string,
+    role: CurrentUser["role"],
+  ) =>
+    request<IssuedPassword>("POST", "/admin/users", {
+      username,
+      displayName,
+      role,
+    }),
+  updateMember: (
+    id: string,
+    changes: Partial<Pick<MemberInfo, "displayName" | "role" | "disabled">>,
+  ) => request<MemberInfo>("PATCH", `/admin/users/${id}`, changes),
+  resetPassword: (id: string) =>
+    request<IssuedPassword>("POST", `/admin/users/${id}/password`, {}),
 };
+
+function folderQuery(folder?: string | null): string {
+  return folder ? `&folder=${encodeURIComponent(folder)}` : "";
+}
 
 /**
  * 工作資料夾裡一個檔案的網址（Python 版），可以直接放進 <img>、<iframe>
  * 或用 fetch 讀取文字。download 為 true 時瀏覽器會下載而不是顯示。
+ * folder 是 FolderInfo.id（通常是這段對話的資料夾）；沒有時伺服器用
+ * 這個人自己的「我的檔案」。
  */
-export function fileUrl(path: string, download = false): string {
-  const query = `path=${encodeURIComponent(path)}`;
+export function fileUrl(
+  path: string,
+  download = false,
+  folder?: string | null,
+): string {
+  const query = `path=${encodeURIComponent(path)}${folderQuery(folder)}`;
   return `/api/files?${query}${download ? "&download=1" : ""}`;
 }
