@@ -1053,6 +1053,47 @@ WRITE = ("write_file", {"path": "a.md", "content": "# A\n"})
 class TestIsolation:
     """每個人只看得到、改得到自己的對話與檔案。"""
 
+    async def test_categories_belong_to_one_person(self, site):
+        s = await site([conftest.text_response("好")])
+        alice = await s.login("alice", password_of("alice"))
+        bob = await s.login("bob", password_of("bob"))
+        _, created = await alice.api("POST", "/sessions", {"text": "嗨"})
+        await alice.wait_idle(created["id"])
+        _, mine = await alice.api("POST", "/categories", {"name": "月報"})
+
+        listed_status, listed = await bob.api("GET", "/categories")
+        rename, _ = await bob.api(
+            "PATCH", f"/categories/{mine['id']}", {"name": "偷改"}
+        )
+        delete, _ = await bob.api("DELETE", f"/categories/{mine['id']}")
+        _, bobs = await bob.api("POST", "/categories", {"name": "月報"})
+        # 不能把別人的對話移進自己的專案，也不能批次刪掉別人的對話。
+        move, _ = await bob.api(
+            "PATCH", f"/sessions/{created['id']}", {"category": bobs["id"]}
+        )
+        _, bulk = await bob.api(
+            "POST",
+            "/sessions/bulk",
+            {"action": "delete", "ids": [created["id"]]},
+        )
+        own, _ = await alice.api(
+            "PATCH", f"/sessions/{created['id']}", {"category": bobs["id"]}
+        )
+
+        assert listed_status == 200
+        assert listed == []
+        assert rename == 404
+        assert delete == 404
+        assert move == 404
+        assert bulk["done"] == []
+        assert own == 404
+        _, still = await alice.api("GET", "/categories")
+        assert [item["name"] for item in still] == ["月報"]
+        alice_id = user_id(s.root, "alice")
+        assert (
+            s.root / ".harness" / "users" / alice_id / "categories.json"
+        ).exists()
+
     async def test_other_users_sessions_are_not_found(self, site):
         s = await site(
             [conftest.tool_response(WRITE), conftest.text_response("好了")]

@@ -14,7 +14,7 @@ import type { SessionOptions } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
 import { isMember } from "../auth.ts";
 import { activeFolder, foldersEnabled } from "../folders.ts";
-import { navigate } from "../router.ts";
+import { navigate, useSearchParam } from "../router.ts";
 import { upsertSummary, useStore } from "../store.ts";
 import "./chat/chat.css";
 import { Composer } from "./Composer.tsx";
@@ -29,7 +29,7 @@ import {
 } from "./chat/options.ts";
 import { handOff } from "./chat/pending.ts";
 import { Thinking } from "./chat/Thinking.tsx";
-import { AlertIcon, ChevronDownIcon } from "./Icons.tsx";
+import { AlertIcon, ChevronDownIcon, CloseIcon, FolderIcon } from "./Icons.tsx";
 
 /** 輸入框底下的建議：點了把文字填進輸入框。 */
 const SUGGESTIONS = [
@@ -50,6 +50,13 @@ export function NewChat() {
   }>();
   const [options, setOptions] = useState<SessionOptions>(EMPTY_OPTIONS);
   const [chosenFolder, setChosenFolder] = useState<string>();
+  // 從專案頁開的新對話（?category=）放進那個專案。
+  const categoryId = useSearchParam("category");
+  const category = useStore((s) =>
+    categoryId
+      ? s.categories.find((item) => item.id === categoryId)
+      : undefined,
+  );
 
   useEffect(() => {
     document.title = project ? `${project.name} · Harness` : "Harness";
@@ -135,6 +142,7 @@ export function NewChat() {
         agent.name,
         attachments,
         sessionOptions,
+        category?.id,
       );
       upsertSummary(summary);
       handOff(summary.id, { text, attachments, base: 0, folder });
@@ -185,7 +193,23 @@ export function NewChat() {
                 <Thinking />
               </div>
             ) : (
-              <h1 className="ch-greeting anim-in">今天要做什麼？</h1>
+              <>
+                {category && (
+                  <div className="new-category anim-in">
+                    <FolderIcon size={14} />
+                    <span>在專案「{category.name}」開新對話</span>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label="不要放進專案"
+                      onClick={() => navigate("/", { replace: true })}
+                    >
+                      <CloseIcon size={13} />
+                    </button>
+                  </div>
+                )}
+                <h1 className="ch-greeting anim-in">今天要做什麼？</h1>
+              </>
             )}
 
             <div className="anim-in" style={{ animationDelay: "0.06s" }}>

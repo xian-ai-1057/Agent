@@ -2,6 +2,9 @@
 
 import type {
   ApprovalDecision,
+  BulkRequest,
+  BulkResult,
+  ChatCategory,
   ConnectionSettings,
   CurrentUser,
   Feedback,
@@ -76,12 +79,14 @@ export const api = {
     agent: string,
     attachments: string[] = [],
     options?: Partial<SessionOptions>,
+    category?: string,
   ) =>
     request<SessionSummary>("POST", "/sessions", {
       text,
       agent,
       attachments,
       ...(options ? { options } : {}),
+      ...(category ? { category } : {}),
     }),
   send: (id: string, text: string, attachments: string[] = []) =>
     request<SessionSummary>("POST", `/sessions/${id}/messages`, {
@@ -129,6 +134,16 @@ export const api = {
   renameSession: (id: string, title: string) =>
     request<SessionSummary>("PATCH", `/sessions/${id}`, { title }),
   deleteSession: (id: string) => request("DELETE", `/sessions/${id}`),
+  moveSession: (id: string, category: string | null) =>
+    request<SessionSummary>("PATCH", `/sessions/${id}`, { category }),
+  bulkSessions: (body: BulkRequest) =>
+    request<BulkResult>("POST", "/sessions/bulk", body),
+  categories: () => request<ChatCategory[]>("GET", "/categories"),
+  createCategory: (name: string) =>
+    request<ChatCategory>("POST", "/categories", { name }),
+  renameCategory: (id: string, name: string) =>
+    request<ChatCategory>("PATCH", `/categories/${id}`, { name }),
+  deleteCategory: (id: string) => request("DELETE", `/categories/${id}`),
   searchSessions: (q: string) =>
     request<SearchResult[]>(
       "GET",
