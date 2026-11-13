@@ -12,7 +12,6 @@
 
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import type {
-  Effort,
   ModelTestResult,
   PermissionMode,
   PermissionSettings,
@@ -37,8 +36,6 @@ import {
 interface Draft {
   model: string;
   maxTurns: string;
-  /** 空字串表示不指定；伺服器不支援（TypeScript 版）時是 undefined。 */
-  effort?: "" | Effort;
   permissions: PermissionSettings;
 }
 
@@ -96,9 +93,7 @@ export function Settings({ section }: { section: SettingsSection }) {
   const base = toDraft(project);
   const current = draft ?? base;
   const modelDirty =
-    current.model !== base.model ||
-    current.maxTurns !== base.maxTurns ||
-    current.effort !== base.effort;
+    current.model !== base.model || current.maxTurns !== base.maxTurns;
   const permissionsDirty =
     JSON.stringify(current.permissions) !== JSON.stringify(base.permissions);
   const dirty = modelDirty || permissionsDirty;
@@ -117,11 +112,7 @@ export function Settings({ section }: { section: SettingsSection }) {
     setSaving(true);
     try {
       if (modelDirty) {
-        await api.saveModel(
-          current.model.trim() || null,
-          maxTurns,
-          current.effort === undefined ? undefined : current.effort || null,
-        );
+        await api.saveModel(current.model.trim() || null, maxTurns);
       }
       if (permissionsDirty) await api.savePermissions(current.permissions);
       await refreshProject();
@@ -250,7 +241,6 @@ function toDraft(project: ProjectInfo): Draft {
   return {
     model: config.model ?? "",
     maxTurns: config.maxTurns === null ? "" : String(config.maxTurns),
-    effort: "effort" in config ? (config.effort ?? "") : undefined,
     permissions: structuredClone(project.permissions),
   };
 }
@@ -327,7 +317,7 @@ function ModelSection({
       ) : (
         <>
           <div className="form-row">
-            <label htmlFor="model-name">預設模型</label>
+            <label htmlFor="model-name">模型名稱</label>
             <input
               id="model-name"
               className="field mono"
@@ -459,35 +449,6 @@ function ModelSection({
           留空使用預設值 20。agent 檔案自己有寫的話以 agent 檔案為準。
         </div>
       </div>
-
-      {draft.effort !== undefined && (
-        <div className="form-row">
-          <label htmlFor="effort">思考程度（effort）</label>
-          <select
-            id="effort"
-            className="field"
-            style={{ width: "100%", maxWidth: 380 }}
-            value={draft.effort}
-            onChange={(event) =>
-              edit((d) => ({
-                ...d,
-                effort: event.target.value as Draft["effort"],
-              }))
-            }
-          >
-            <option value="">預設（由模型決定）</option>
-            <option value="low">低：回答快、比較省</option>
-            <option value="medium">中</option>
-            <option value="high">高：想得比較仔細，比較慢也比較貴</option>
-          </select>
-          <div className="help">
-            模型回答前思考的程度，套用在所有沒有自己設定的 agent。存在{" "}
-            <code>harness.yaml</code> 的{" "}
-            <code>modelParams.reasoning_effort</code>
-            ，不支援的模型會自動略過。
-          </div>
-        </div>
-      )}
     </section>
   );
 }

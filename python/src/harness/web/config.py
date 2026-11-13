@@ -17,12 +17,6 @@ from harness import project as project_lib
 PERMISSION_KEYS = ("mode", "allow", "ask", "deny")
 
 
-# 模型思考的程度：harness.yaml 的 modelParams.reasoning_effort（litellm 依
-# 模型換成各家的參數，不支援的模型會略過，見 llm.complete 的 drop_params）。
-EFFORT_PARAM = "reasoning_effort"
-EFFORTS = ("low", "medium", "high")
-
-
 def read_config(root: pathlib.Path) -> dict[str, Any]:
     """讀取 harness.yaml 的內容。
 
@@ -43,26 +37,17 @@ def read_model_settings(root: pathlib.Path) -> dict[str, Any]:
         root: 專案根目錄。
 
     Returns:
-        {"model": str | None, "maxTurns": int | None, "effort": str | None}；
-        effort 是 modelParams 的 reasoning_effort（模型思考的程度）。
+        {"model": str | None, "maxTurns": int | None}。
     """
     config = read_config(root)
     model = config.get("model")
     max_turns = config.get("maxTurns")
-    effort = read_model_params(root).get(EFFORT_PARAM)
     return {
         "model": model if isinstance(model, str) else None,
         "maxTurns": max_turns
         if isinstance(max_turns, int) and not isinstance(max_turns, bool)
         else None,
-        "effort": effort if effort in EFFORTS else None,
     }
-
-
-def read_model_params(root: pathlib.Path) -> dict[str, Any]:
-    """harness.yaml 的 modelParams（額外傳給 litellm 的參數）；沒有時是空的。"""
-    params = read_config(root).get("modelParams")
-    return dict(params) if isinstance(params, dict) else {}
 
 
 def read_model_choices(root: pathlib.Path) -> list[dict[str, str]]:
@@ -107,21 +92,14 @@ def read_model_choices(root: pathlib.Path) -> list[dict[str, str]]:
 
 
 def save_model_settings(
-    root: pathlib.Path,
-    model: str | None,
-    max_turns: int | None,
-    effort: str | None = None,
+    root: pathlib.Path, model: str | None, max_turns: int | None
 ) -> None:
-    """把 model、maxTurns 與思考程度寫回 harness.yaml；None 表示刪掉。
-
-    思考程度寫在 modelParams 的 reasoning_effort，modelParams 裡的其他
-    參數保留（整段改寫成一行）。
+    """把 model 與 maxTurns 寫回 harness.yaml；None 表示刪掉這個欄位。
 
     Args:
         root: 專案根目錄。
         model: 模型名稱。
         max_turns: 一輪最多呼叫模型幾次。
-        effort: low、medium、high，或 None（不指定，用模型的預設）。
 
     Raises:
         ValueError: 檔案格式特殊，無法安全地只改這幾行。
@@ -129,22 +107,11 @@ def save_model_settings(
     lines = _read_lines(root)
     _set_top_level(lines, "model", _scalar(model))
     _set_top_level(lines, "maxTurns", _scalar(max_turns))
-    params = read_model_params(root)
-    if params.get(EFFORT_PARAM) != effort:
-        if effort is None:
-            params.pop(EFFORT_PARAM, None)
-        else:
-            params[EFFORT_PARAM] = effort
-        _remove_block(lines, "modelParams")
-        value = json.dumps(params, ensure_ascii=False) if params else None
-        _set_top_level(lines, "modelParams", value)
     _write_checked(
         root,
         lines,
         lambda config: (
-            config.get("model") == model
-            and config.get("maxTurns") == max_turns
-            and (config.get("modelParams") or {}) == params
+            config.get("model") == model and config.get("maxTurns") == max_turns
         ),
     )
 
@@ -250,8 +217,6 @@ def read_agent_overrides(root: pathlib.Path) -> dict[str, dict[str, Any]]:
             found["model"] = meta["model"]
         if isinstance(meta.get("maxTurns"), int):
             found["maxTurns"] = meta["maxTurns"]
-        if isinstance(meta.get("modelParams"), dict):
-            found["modelParams"] = meta["modelParams"]
         overrides[str(meta.get("name") or path.stem)] = found
     return overrides
 
