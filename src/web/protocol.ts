@@ -65,6 +65,8 @@ export interface SessionSummary {
    * 下一輪開始時生效。
    */
   model?: string | null;
+  /** 這段對話放在哪個專案（ChatCategory.id，Python 版）；沒有時是未分類。 */
+  category?: string;
   status: SessionStatus;
   activity?: Activity;
   /** 這一輪開始的時間（毫秒）。 */
@@ -235,6 +237,42 @@ export interface ServerFeatures {
    * 網頁改用瀏覽器裡的簡易預覽。
    */
   officePdf?: boolean;
+  /**
+   * 專案（對話的分類，見 ChatCategory）：GET/POST /api/categories、
+   * PATCH/DELETE /api/categories/:id、PATCH /api/sessions/:id 的 category、
+   * POST /api/sessions 的 category、POST /api/sessions/bulk（見 BulkRequest）。
+   */
+  categories?: boolean;
+}
+
+/**
+ * 使用者自己建立的專案，用來把對話分類整理（和 ChatGPT、Claude 的專案
+ * 一樣；和 harness 的專案資料夾無關）。每個人只看得到自己的專案。刪除
+ * 專案不會刪除裡面的對話，對話改成未分類。
+ */
+export interface ChatCategory {
+  id: string;
+  /** 1 到 50 個字，同一個人的專案名稱不能重複（不分大小寫）。 */
+  name: string;
+  createdAt: number;
+  /** 裡面有幾段對話。 */
+  sessionCount: number;
+}
+
+/**
+ * POST /api/sessions/bulk：一次刪除或移動好幾段對話（最多 500 段）。
+ * move 時 category 是目標專案，null 表示移出專案。
+ */
+export interface BulkRequest {
+  action: "delete" | "move";
+  ids: string[];
+  category?: string | null;
+}
+
+/** 處理好的對話，以及略過的對話與原因（例如還在執行的對話不能刪除）。 */
+export interface BulkResult {
+  done: string[];
+  skipped: { id: string; reason: string }[];
 }
 
 /**
@@ -492,4 +530,6 @@ export type ServerEvent =
   | { type: "session_reload"; sessionId: string }
   /** 對話被刪除（Python 版）。 */
   | { type: "session_deleted"; sessionId: string }
-  | { type: "project" };
+  | { type: "project" }
+  /** 專案（ChatCategory）有變動：重新讀取 GET /api/categories。 */
+  | { type: "categories" };

@@ -210,3 +210,24 @@ export const UserPlusIcon = (p: IconProps) => (
     <path d="M16 11h6" />
   </Svg>
 );
+
+export const ChatsIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12Z" />
+  </Svg>
+);
+
+export const AddIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 5v14" />
+    <path d="M5 12h14" />
+  </Svg>
+);
+
+export const MoveIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+    <path d="M10 13h6" />
+    <path d="m13 10 3 3-3 3" />
+  </Svg>
+);

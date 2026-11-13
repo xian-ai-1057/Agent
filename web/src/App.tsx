@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CategoryView, ChatsView } from "./components/ChatsView.tsx";
 import { Conversation } from "./components/Conversation.tsx";
 import { MenuIcon, PenIcon } from "./components/Icons.tsx";
 import { NewChat } from "./components/NewChat.tsx";
@@ -26,6 +27,10 @@ function pageTitle(route: Route, state: State): string {
   if (route.page === "session")
     return state.sessions[route.id]?.title ?? "對話";
   if (route.page === "work") return "工作中";
+  if (route.page === "chats") return "對話紀錄";
+  if (route.page === "category") {
+    return state.categories.find((c) => c.id === route.id)?.name ?? "專案";
+  }
   if (route.page === "settings") return "設定";
   return "新對話";
 }
@@ -166,6 +171,10 @@ function Shell() {
           <Conversation key={route.id} id={route.id} />
         )}
         {route.page === "work" && <WorkView />}
+        {route.page === "chats" && <ChatsView />}
+        {route.page === "category" && (
+          <CategoryView key={route.id} id={route.id} />
+        )}
         {route.page === "settings" && <Settings section={route.section} />}
       </div>
       {searching && <SearchDialog onClose={() => setSearching(false)} />}

@@ -32,6 +32,7 @@ web: {allowPrivateNetworks: true} 開放給自己。
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import datetime
 import functools
@@ -67,6 +68,7 @@ from harness.builtin import paths
 from harness.builtin import shell
 from harness.builtin import web as web_tools
 from harness.web import accounts as accounts_lib
+from harness.web import categories as categories_lib
 from harness.web import config as config_lib
 from harness.web import folders as folders_lib
 from harness.web import migration
@@ -106,6 +108,8 @@ _SESSION_ID = re.compile(r"^[\w-]+$")
 # subagent 步驟的結果只是給人瀏覽的，太長的部分不保留。
 _SUBAGENT_RESULT_LIMIT = 4000
 _CUSTOM_TITLE_LIMIT = 100
+# 批次刪除或移動時，一次最多幾段對話。
+_BULK_LIMIT = 500
 _SEARCH_LIMIT = 30
 _RECENT_LIMIT = 20
 _SNIPPET_LENGTH = 60
@@ -184,6 +188,8 @@ class _State:
     run_folder: folders_lib.Folder | None = None
     # 以下存在 .meta.json，伺服器重新啟動後仍然保留。
     custom_title: str | None = None
+    # 這段對話放在哪個專案（見 harness.web.categories）；None 表示未分類。
+    category: str | None = None
     options: dict[str, Any] = dataclasses.field(
         default_factory=lambda: _default_options()
     )
@@ -379,6 +385,7 @@ class Workspace:
                 "sessionApproval": True,
                 "accounts": True,
                 "folders": self.auth_mode == "accounts",
+                "categories": True,
             },
             "auth": {
                 "mode": self.auth_mode,
@@ -473,6 +480,7 @@ class Workspace:
         agent: str | None = None,
         attachments: list[str] | None = None,
         options: dict[str, Any] | None = None,
+        category: str | None = None,
     ) -> dict[str, Any]:
         """送出一則訊息並在背景開始執行。沒給 session_id 時建立新的對話。
 
@@ -484,10 +492,12 @@ class Workspace:
             attachments: 上傳時回傳的檔案路徑（相對於對話的工作資料夾），
                 說明會接在訊息後面。
             options: 新對話的選項（見 set_options），只需要給要改的欄位。
+            category: 新對話放進哪個專案（見 list_categories）。
 
         Raises:
             WebError: 訊息與附件都是空的、附件不是上傳的檔案、agent 不
-                存在、選項不合法、工作資料夾不能使用，或這段對話還在執行。
+                存在、選項不合法、專案不存在、工作資料夾不能使用，或這段
+                對話還在執行。
         """
         text = text.strip()
         state = None
@@ -502,6 +512,8 @@ class Workspace:
             chosen = self._checked_options(
                 user, options or {}, _default_options(), agent
             )
+            if category is not None:
+                self._require_category(user, category)
         folder = self._run_folder(user, chosen["folder"])
         try:
             notes = self._uploads(folder).describe(attachments or [])
@@ -511,7 +523,8 @@ class Workspace:
             raise WebError(400, "訊息不可以是空的")
         if state is None:
             state = self._create(user, agent)
-            if chosen != state.options:
+            state.category = category
+            if chosen != state.options or category is not None:
                 state.options = chosen
                 if chosen["tools"] is not None:
                     state.tools_agent = agent
@@ -630,6 +643,160 @@ class Workspace:
         )
         del self._states[session_id]
         self._send(state, {"type": "session_deleted", "sessionId": session_id})
+
+    # ── 專案（對話的分類）─────────────────────────────────
+
+    def list_categories(self, user: accounts_lib.User) -> list[dict[str, Any]]:
+        """這個人的專案，附上每個專案有幾段對話。"""
+        counts: dict[str, int] = {}
+        for state in self._own_states(user):
+            if state.category is not None:
+                counts[state.category] = counts.get(state.category, 0) + 1
+        return [
+            {**item.to_json(), "sessionCount": counts.get(item.id, 0)}
+            for item in self._categories(user).all()
+        ]
+
+    def create_category(
+        self, user: accounts_lib.User, name: str
+    ) -> dict[str, Any]:
+        """新增專案。
+
+        Raises:
+            WebError: 名稱是空的、太長、和別的專案重複，或專案太多。
+        """
+        with _category_errors():
+            category = self._categories(user).create(name)
+        self._emit({"type": "categories"}, user.id)
+        return {**category.to_json(), "sessionCount": 0}
+
+    def rename_category(
+        self, user: accounts_lib.User, category_id: str, name: str
+    ) -> dict[str, Any]:
+        """幫專案改名。
+
+        Raises:
+            WebError: 找不到專案，或名稱不合法、重複。
+        """
+        with _category_errors():
+            category = self._categories(user).rename(category_id, name)
+        self._emit({"type": "categories"}, user.id)
+        count = sum(
+            1 for s in self._own_states(user) if s.category == category_id
+        )
+        return {**category.to_json(), "sessionCount": count}
+
+    def delete_category(
+        self, user: accounts_lib.User, category_id: str
+    ) -> None:
+        """刪除專案；裡面的對話不刪，改成未分類。
+
+        Raises:
+            WebError: 找不到專案。
+        """
+        with _category_errors():
+            self._categories(user).delete(category_id)
+        for state in self._own_states(user):
+            if state.category == category_id:
+                self._set_category(state, None)
+        self._emit({"type": "categories"}, user.id)
+
+    def update_session(
+        self,
+        user: accounts_lib.User,
+        session_id: str,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        """改對話的名稱（title）或專案（category，null 表示移出專案）。
+
+        Raises:
+            WebError: 找不到對話、沒有要改的欄位、名稱不合法，或專案不存在。
+        """
+        state = self._require(user, session_id)
+        if "title" not in changes and "category" not in changes:
+            raise WebError(400, "要提供 title 或 category")
+        if "category" in changes:
+            category = changes["category"]
+            if category is not None:
+                if not isinstance(category, str):
+                    raise WebError(400, "category 必須是字串或 null")
+                self._require_category(user, category)
+        if "title" in changes:
+            title = changes["title"]
+            if not isinstance(title, str):
+                raise WebError(400, "title 必須是字串")
+            summary = self.rename(user, session_id, title)
+        if "category" in changes:
+            summary = self._set_category(state, changes["category"])
+        return summary
+
+    def bulk(
+        self,
+        user: accounts_lib.User,
+        action: str,
+        session_ids: list[str],
+        category: str | None = None,
+    ) -> dict[str, Any]:
+        """一次刪除或移動好幾段對話。
+
+        還在執行的對話不能刪除，找不到的對話（或別人的）略過；都會列在
+        skipped 裡說明原因，其他的照常處理。
+
+        Args:
+            user: 發出請求的人。
+            action: delete（刪除）或 move（移到 category 這個專案）。
+            session_ids: 要處理的對話。
+            category: action 是 move 時的目標專案；None 表示移出專案。
+
+        Returns:
+            {"done": [處理好的對話], "skipped": [{"id", "reason"}]}
+
+        Raises:
+            WebError: action 不對、沒有給對話、一次太多，或專案不存在。
+        """
+        if action not in ("delete", "move"):
+            raise WebError(400, "action 必須是 delete 或 move")
+        if not session_ids:
+            raise WebError(400, "沒有選擇對話")
+        if len(session_ids) > _BULK_LIMIT:
+            raise WebError(400, f"一次最多處理 {_BULK_LIMIT} 段對話")
+        if action == "move" and category is not None:
+            self._require_category(user, category)
+        done: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for session_id in dict.fromkeys(session_ids):
+            try:
+                if action == "delete":
+                    self.delete(user, session_id)
+                else:
+                    state = self._require(user, session_id)
+                    self._set_category(state, category)
+            except WebError as error:
+                skipped.append({"id": session_id, "reason": str(error)})
+                continue
+            done.append(session_id)
+        if done:
+            self._emit({"type": "categories"}, user.id)
+        return {"done": done, "skipped": skipped}
+
+    def _categories(
+        self, user: accounts_lib.User
+    ) -> categories_lib.CategoryStore:
+        # 和對話紀錄放在同一個人的資料夾：本機模式是 .harness/。
+        return categories_lib.CategoryStore(self._sessions_dir(user.id).parent)
+
+    def _require_category(self, user: accounts_lib.User, category: str) -> None:
+        if self._categories(user).get(category) is None:
+            raise WebError(404, "找不到這個專案")
+
+    def _set_category(
+        self, state: _State, category: str | None
+    ) -> dict[str, Any]:
+        state.category = category
+        self._save_meta(state)
+        summary = self._summary(state)
+        self._send(state, {"type": "session", "summary": summary})
+        return summary
 
     def search(
         self, user: accounts_lib.User, query: str
@@ -1832,6 +1999,8 @@ class Workspace:
         meta: dict[str, Any] = {"agent": state.agent}
         if state.custom_title is not None:
             meta["title"] = state.custom_title
+        if state.category is not None:
+            meta["category"] = state.category
         if state.options != _default_options():
             meta["options"] = state.options
         if state.options["tools"] is not None and state.tools_agent:
@@ -1921,6 +2090,7 @@ class Workspace:
             "notice": state.notice,
             "stopReason": state.stop_reason,
             "approval": pending.approval if pending else None,
+            "category": state.category,
         }
         summary.update({k: v for k, v in optional.items() if v is not None})
         return summary
@@ -2135,6 +2305,15 @@ def _write_json(path: pathlib.Path, data: Any) -> None:
     os.replace(temporary, path)
 
 
+@contextlib.contextmanager
+def _category_errors():
+    """把 CategoryError 轉成 WebError。"""
+    try:
+        yield
+    except categories_lib.CategoryError as error:
+        raise WebError(error.status, str(error)) from error
+
+
 def _meta_path(directory: pathlib.Path, session_id: str) -> pathlib.Path:
     return directory / f"{session_id}.meta.json"
 
@@ -2170,6 +2349,9 @@ def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
     title = meta.get("title")
     if isinstance(title, str) and title.strip():
         state.custom_title = title
+    category = meta.get("category")
+    if isinstance(category, str) and category:
+        state.category = category
     options = meta.get("options")
     if isinstance(options, dict):
         model = options.get("model")

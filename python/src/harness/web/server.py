@@ -367,8 +367,56 @@ def _session_routes(routes: web.RouteTableDef) -> None:
             agent=_optional_string(body, "agent"),
             attachments=_attachments(body),
             options=body.get("options"),
+            category=_optional_string(body, "category"),
         )
         return _json(summary, status=201)
+
+    # 要在 /api/sessions/{id} 之前註冊。
+    @routes.post("/api/sessions/bulk")
+    async def bulk_sessions(request: web.Request) -> web.Response:
+        body = await _body(request)
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not all(
+            isinstance(item, str) for item in ids
+        ):
+            raise workspace_lib.WebError(400, "ids 必須是字串的陣列")
+        category = body.get("category")
+        if category is not None and not isinstance(category, str):
+            raise workspace_lib.WebError(400, "category 必須是字串或 null")
+        result = _ws(request).bulk(
+            _user(request), _string(body, "action"), ids, category
+        )
+        return _json(result)
+
+    @routes.get("/api/categories")
+    async def list_categories(request: web.Request) -> web.Response:
+        return _json(_ws(request).list_categories(_user(request)))
+
+    @routes.post("/api/categories")
+    async def create_category(request: web.Request) -> web.Response:
+        body = await _body(request)
+        category = _ws(request).create_category(
+            _user(request), _string(body, "name")
+        )
+        return _json(category, status=201)
+
+    @routes.patch("/api/categories/{category_id:[\\w-]+}")
+    async def rename_category(request: web.Request) -> web.Response:
+        body = await _body(request)
+        category = _ws(request).rename_category(
+            _user(request),
+            request.match_info["category_id"],
+            _string(body, "name"),
+        )
+        return _json(category)
+
+    @routes.delete("/api/categories/{category_id:[\\w-]+}")
+    async def delete_category(request: web.Request) -> web.Response:
+        await _body(request)
+        _ws(request).delete_category(
+            _user(request), request.match_info["category_id"]
+        )
+        return _json({"ok": True})
 
     # 要在 /api/sessions/{id} 之前註冊，否則 search 會被當成對話 id。
     @routes.get("/api/sessions/search")
@@ -381,10 +429,11 @@ def _session_routes(routes: web.RouteTableDef) -> None:
         return _json(_ws(request).get_session(_user(request), _id(request)))
 
     @routes.patch(f"/api/sessions/{session_id}")
-    async def rename_session(request: web.Request) -> web.Response:
+    async def update_session(request: web.Request) -> web.Response:
         body = await _body(request)
-        title = _string(body, "title")
-        return _json(_ws(request).rename(_user(request), _id(request), title))
+        return _json(
+            _ws(request).update_session(_user(request), _id(request), body)
+        )
 
     @routes.delete(f"/api/sessions/{session_id}")
     async def delete_session(request: web.Request) -> web.Response:

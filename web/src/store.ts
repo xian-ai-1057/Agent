@@ -7,6 +7,8 @@
 
 import { useSyncExternalStore } from "react";
 import type {
+  BulkResult,
+  ChatCategory,
   FilePreview,
   Message,
   ProjectInfo,
@@ -37,6 +39,8 @@ export interface State {
    * 終端機上的網址」，不顯示登入畫面。
    */
   needsLocalKey?: boolean;
+  /** 自己的專案（features.categories），依建立時間排列。 */
+  categories: ChatCategory[];
 }
 
 type Listener = () => void;
@@ -47,6 +51,7 @@ let state: State = {
   previews: {},
   connected: false,
   needsLogin: false,
+  categories: [],
 };
 const listeners = new Set<Listener>();
 
@@ -189,6 +194,7 @@ function handle(event: ServerEvent): void {
     setState((s) => ({ ...s, connected: true }));
     void refreshProject();
     void refreshSessions().catch(() => undefined);
+    void refreshCategories();
     for (const id of Object.keys(state.details)) {
       void loadSession(id).catch(() => undefined);
     }
@@ -196,6 +202,10 @@ function handle(event: ServerEvent): void {
   }
   if (event.type === "project") {
     void refreshProject();
+    return;
+  }
+  if (event.type === "categories") {
+    void refreshCategories();
     return;
   }
   if (event.type === "session") {
@@ -353,4 +363,92 @@ export async function renameSession(id: string, title: string): Promise<void> {
 export async function deleteSession(id: string): Promise<void> {
   await api.deleteSession(id);
   forget(id);
+}
+
+/**
+ * 重新讀取專案清單。伺服器不支援專案（TypeScript 版）時是空的；讀不到時
+ * 保留原本的清單。
+ */
+export async function refreshCategories(): Promise<void> {
+  try {
+    const categories = await api.categories();
+    setState((s) => ({ ...s, categories }));
+  } catch {
+    // 不支援或暫時讀不到：畫面維持原狀。
+  }
+}
+
+/** 新增專案，回傳新的專案。 */
+export async function createCategory(name: string): Promise<ChatCategory> {
+  const created = await api.createCategory(name);
+  setState((s) => ({ ...s, categories: [...s.categories, created] }));
+  return created;
+}
+
+export async function renameCategory(id: string, name: string): Promise<void> {
+  const renamed = await api.renameCategory(id, name);
+  setState((s) => ({
+    ...s,
+    categories: s.categories.map((item) => (item.id === id ? renamed : item)),
+  }));
+}
+
+/** 刪除專案；裡面的對話留著，改成未分類。 */
+export async function deleteCategory(id: string): Promise<void> {
+  await api.deleteCategory(id);
+  setState((s) => ({
+    ...s,
+    categories: s.categories.filter((item) => item.id !== id),
+    sessions: Object.fromEntries(
+      Object.entries(s.sessions).map(([key, summary]) => [
+        key,
+        summary.category === id ? withoutCategory(summary) : summary,
+      ]),
+    ),
+  }));
+}
+
+function withoutCategory(summary: SessionSummary): SessionSummary {
+  const { category: _removed, ...rest } = summary;
+  return rest;
+}
+
+/** 把一段對話移到專案（null 表示移出專案）。 */
+export async function moveSession(
+  id: string,
+  category: string | null,
+): Promise<void> {
+  upsertSummary(await api.moveSession(id, category));
+  void refreshCategories();
+}
+
+/**
+ * 一次刪除或移動好幾段對話。伺服器處理好的才更新畫面；回傳略過的對話
+ * 與原因（例如還在執行的對話不能刪除）。
+ */
+export async function bulkSessions(
+  action: "delete" | "move",
+  ids: string[],
+  category: string | null = null,
+): Promise<BulkResult> {
+  const result = await api.bulkSessions(
+    action === "move" ? { action, ids, category } : { action, ids },
+  );
+  if (action === "delete") {
+    for (const id of result.done) forget(id);
+  } else {
+    setState((s) => {
+      const sessions = { ...s.sessions };
+      for (const id of result.done) {
+        const summary = sessions[id];
+        if (!summary) continue;
+        sessions[id] = category
+          ? { ...summary, category }
+          : withoutCategory(summary);
+      }
+      return { ...s, sessions };
+    });
+  }
+  void refreshCategories();
+  return result;
 }

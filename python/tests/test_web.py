@@ -1532,6 +1532,7 @@ class TestProjectChoices:
             "accounts": True,
             # 本機模式沒有工作資料夾可選：和加入帳號之前一樣是專案根目錄。
             "folders": False,
+            "categories": True,
         }
         assert info["auth"] == {
             "mode": "local",
@@ -1829,6 +1830,175 @@ class TestSessionOptions:
 
         assert detail["options"]["model"] == "m2"
         assert detail["summary"]["model"] == "m2"
+
+
+class TestCategories:
+    """專案：把對話分類、批次刪除與移動。"""
+
+    @staticmethod
+    async def _sessions(h, count):
+        ids = []
+        for index in range(count):
+            _, created = await h.api(
+                "POST", "/sessions", {"text": f"第 {index}"}
+            )
+            await h.wait_for(
+                "run_end", lambda e, sid=created["id"]: e["sessionId"] == sid
+            )
+            ids.append(created["id"])
+        return ids
+
+    async def test_categories_can_be_created_renamed_and_listed(self, start):
+        h = await start()
+
+        status, created = await h.api("POST", "/categories", {"name": " 月報 "})
+        duplicate, error = await h.api("POST", "/categories", {"name": "月報"})
+        empty, _ = await h.api("POST", "/categories", {"name": "  "})
+        renamed_status, renamed = await h.api(
+            "PATCH", f"/categories/{created['id']}", {"name": "營運月報"}
+        )
+        _, listed = await h.api("GET", "/categories")
+        _, project = await h.api("GET", "/project")
+
+        assert status == 201
+        assert created["name"] == "月報"
+        assert created["sessionCount"] == 0
+        assert duplicate == 409
+        assert "月報" in error["error"]
+        assert empty == 400
+        assert renamed_status == 200
+        assert [item["name"] for item in listed] == ["營運月報"]
+        assert project["features"]["categories"] is True
+        await h.wait_for("categories")
+        # 本機模式和對話紀錄一樣放在 .harness/。
+        assert (h.root / ".harness" / "categories.json").exists()
+
+    async def test_conversations_move_in_and_out_of_a_category(self, start):
+        h = await start([conftest.text_response("好")] * 2)
+        first, second = await self._sessions(h, 2)
+        _, category = await h.api("POST", "/categories", {"name": "月報"})
+
+        status, moved = await h.api(
+            "PATCH", f"/sessions/{first}", {"category": category["id"]}
+        )
+        missing, _ = await h.api(
+            "PATCH", f"/sessions/{second}", {"category": "nope"}
+        )
+        _, listed = await h.api("GET", "/categories")
+        with project_lib.load_project(h.root) as loaded:
+            fresh = workspace_lib.Workspace(loaded)
+            restored = {s["id"]: s for s in fresh.list_sessions(LOCAL)}
+        _, out = await h.api("PATCH", f"/sessions/{first}", {"category": None})
+
+        assert status == 200
+        assert moved["category"] == category["id"]
+        assert missing == 404
+        assert listed[0]["sessionCount"] == 1
+        # 存在 .meta.json，重新啟動後仍然在專案裡。
+        assert restored[first]["category"] == category["id"]
+        assert "category" not in restored[second]
+        assert "category" not in out
+        await h.wait_for(
+            "session",
+            lambda e: (
+                e["summary"]["id"] == first
+                and e["summary"].get("category") == category["id"]
+            ),
+        )
+
+    async def test_new_conversations_can_start_in_a_category(self, start):
+        h = await start([conftest.text_response("好")])
+        _, category = await h.api("POST", "/categories", {"name": "月報"})
+
+        _, created = await h.api(
+            "POST", "/sessions", {"text": "嗨", "category": category["id"]}
+        )
+        refused, _ = await h.api(
+            "POST", "/sessions", {"text": "嗨", "category": "nope"}
+        )
+
+        assert created["category"] == category["id"]
+        assert refused == 404
+        # 不合法的專案不會留下空的對話。
+        _, sessions = await h.api("GET", "/sessions")
+        assert [s["id"] for s in sessions] == [created["id"]]
+
+    async def test_deleting_a_category_keeps_its_conversations(self, start):
+        h = await start([conftest.text_response("好")])
+        [session] = await self._sessions(h, 1)
+        _, category = await h.api("POST", "/categories", {"name": "月報"})
+        await h.api(
+            "PATCH", f"/sessions/{session}", {"category": category["id"]}
+        )
+
+        response = await h.client.delete(f"/api/categories/{category['id']}")
+        _, sessions = await h.api("GET", "/sessions")
+        _, listed = await h.api("GET", "/categories")
+
+        assert response.status == 200
+        assert [s["id"] for s in sessions] == [session]
+        assert "category" not in sessions[0]
+        assert listed == []
+
+    async def test_bulk_move_and_delete(self, start):
+        h = await start(
+            [conftest.text_response("好")] * 3
+            + [conftest.tool_response(WRITE_CALL)]
+        )
+        ids = await self._sessions(h, 3)
+        _, waiting = await h.api("POST", "/sessions", {"text": "寫報告"})
+        await h.wait_for("approval")
+        _, category = await h.api("POST", "/categories", {"name": "月報"})
+
+        moved_status, moved = await h.api(
+            "POST",
+            "/sessions/bulk",
+            {
+                "action": "move",
+                "ids": [*ids[:2], "nope"],
+                "category": category["id"],
+            },
+        )
+        deleted_status, deleted = await h.api(
+            "POST",
+            "/sessions/bulk",
+            {"action": "delete", "ids": [ids[0], ids[2], waiting["id"]]},
+        )
+        _, sessions = await h.api("GET", "/sessions")
+        bad_action, _ = await h.api(
+            "POST", "/sessions/bulk", {"action": "archive", "ids": ids}
+        )
+        empty, _ = await h.api(
+            "POST", "/sessions/bulk", {"action": "delete", "ids": []}
+        )
+
+        assert moved_status == 200
+        assert moved["done"] == ids[:2]
+        assert [s["id"] for s in moved["skipped"]] == ["nope"]
+        assert deleted_status == 200
+        assert deleted["done"] == [ids[0], ids[2]]
+        # 還在等確認的對話不能刪，其他的照常刪除。
+        assert deleted["skipped"] == [
+            {"id": waiting["id"], "reason": "這段對話還在執行，請先停止再刪除"}
+        ]
+        assert sorted(s["id"] for s in sessions) == sorted(
+            [ids[1], waiting["id"]]
+        )
+        assert (
+            next(s for s in sessions if s["id"] == ids[1])["category"]
+            == (category["id"])
+        )
+        assert bad_action == 400
+        assert empty == 400
+
+    async def test_patch_needs_title_or_category(self, start):
+        h = await start([conftest.text_response("好")])
+        [session] = await self._sessions(h, 1)
+
+        status, body = await h.api("PATCH", f"/sessions/{session}", {})
+
+        assert status == 400
+        assert "title" in body["error"]
 
 
 class TestSessionAdmin:

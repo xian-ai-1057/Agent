@@ -1,5 +1,9 @@
 /**
- * 左側欄：新對話、搜尋、工作中、專案的對話列表、設定。
+ * 左側欄：新對話、搜尋、工作中、對話紀錄、專案、最近的對話、設定。
+ *
+ * 伺服器支援專案時（features.categories），「專案」列出自己建立的專案，
+ * 點了打開專案頁，旁邊的 ＋ 新增專案；對話的 ⋮ 選單可以移到專案。不支援
+ * 時只顯示 harness 專案的名稱。
  *
  * 對話依最後更新時間分成今天、昨天、過去 7 天、更早。伺服器支援時
  * （Python 版），每段對話有 ⋮ 選單可以改名或刪除。窄螢幕時側欄變成
@@ -18,12 +22,22 @@ import { createPortal } from "react-dom";
 import type { SessionSummary } from "../../../src/web/protocol.ts";
 import { settingsHome } from "../auth.ts";
 import { navigate, type Route } from "../router.ts";
-import { deleteSession, renameSession, useStore } from "../store.ts";
 import {
+  createCategory,
+  deleteSession,
+  moveSession,
+  renameSession,
+  useStore,
+} from "../store.ts";
+import { CategoryNameDialog, MoveDialog } from "./CategoryDialogs.tsx";
+import {
+  AddIcon,
+  ChatsIcon,
   FolderIcon,
   GearIcon,
   ListIcon,
   MoreIcon,
+  MoveIcon,
   PenIcon,
   SearchIcon,
   TrashIcon,
@@ -107,6 +121,10 @@ export function Sidebar({
   const [menu, setMenu] = useState<{ id: string; anchor: HTMLElement }>();
   const [renaming, setRenaming] = useState<string>();
   const [deleting, setDeleting] = useState<SessionSummary>();
+  const [moving, setMoving] = useState<SessionSummary>();
+  const [creating, setCreating] = useState(false);
+  const categories = useStore((s) => s.categories);
+  const grouping = project?.features?.categories === true;
   const list = Object.values(sessions).sort(
     (a, b) => b.updatedAt - a.updatedAt,
   );
@@ -138,6 +156,11 @@ export function Sidebar({
       <div className="side-brand">
         <span className="logo" aria-hidden="true" />
         Harness
+        {grouping && project && (
+          <span className="side-brand-project" title="harness 專案資料夾">
+            {project.name}
+          </span>
+        )}
       </div>
       <Link
         to="/"
@@ -163,13 +186,75 @@ export function Sidebar({
         <span className="grow">工作中</span>
         {active > 0 && <span className="hint">{active}</span>}
       </Link>
+      {grouping && (
+        <Link
+          to="/chats"
+          className={`side-item ${route.page === "chats" ? "active" : ""}`}
+          current={route.page === "chats"}
+        >
+          <ChatsIcon />
+          <span className="grow">對話紀錄</span>
+        </Link>
+      )}
 
-      <div className="side-heading">專案</div>
-      <div className="side-project">
-        <FolderIcon size={15} />
-        <span className="grow">{project?.name ?? "…"}</span>
-      </div>
       <div className="side-sessions">
+        {grouping ? (
+          <>
+            <div className="side-heading side-heading-row">
+              <span className="grow">專案</span>
+              <button
+                type="button"
+                className="side-add"
+                aria-label="新增專案"
+                title="新增專案"
+                onClick={() => setCreating(true)}
+              >
+                <AddIcon size={14} />
+              </button>
+            </div>
+            {categories.length === 0 ? (
+              <button
+                type="button"
+                className="side-item side-hint"
+                onClick={() => setCreating(true)}
+              >
+                <AddIcon size={15} />
+                <span className="grow">新增專案來整理對話</span>
+              </button>
+            ) : (
+              <ul className="side-list side-categories">
+                {categories.map((item) => {
+                  const here =
+                    route.page === "category" && route.id === item.id;
+                  return (
+                    <li key={item.id} className="side-row">
+                      <Link
+                        to={`/p/${item.id}`}
+                        className={`side-item ${here ? "active" : ""}`}
+                        current={here}
+                      >
+                        <FolderIcon size={15} />
+                        <span className="grow">{item.name}</span>
+                        {item.sessionCount > 0 && (
+                          <span className="hint">{item.sessionCount}</span>
+                        )}
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            <div className="side-heading">最近的對話</div>
+          </>
+        ) : (
+          <>
+            <div className="side-heading">專案</div>
+            <div className="side-project">
+              <FolderIcon size={15} />
+              <span className="grow">{project?.name ?? "…"}</span>
+            </div>
+          </>
+        )}
         {list.length === 0 && <p className="side-empty">還沒有對話</p>}
         {groupByDay(list).map(([label, items]) => (
           <section key={label} className="side-group" aria-label={label}>
@@ -222,8 +307,43 @@ export function Sidebar({
             setDeleting(sessions[menu.id]);
             setMenu(undefined);
           }}
+          onMove={
+            grouping
+              ? () => {
+                  setMoving(sessions[menu.id]);
+                  setMenu(undefined);
+                }
+              : undefined
+          }
         />
       )}
+      {moving &&
+        createPortal(
+          <MoveDialog
+            count={1}
+            current={moving.category ?? null}
+            onMove={async (category) => {
+              await moveSession(moving.id, category);
+              const name = categories.find((c) => c.id === category)?.name;
+              showToast(name ? `已移到「${name}」` : "已移出專案");
+            }}
+            onClose={() => setMoving(undefined)}
+          />,
+          document.body,
+        )}
+      {creating &&
+        createPortal(
+          <CategoryNameDialog
+            title="新增專案"
+            confirmLabel="新增"
+            onSubmit={async (name) => {
+              const created = await createCategory(name);
+              navigate(`/p/${created.id}`);
+            }}
+            onClose={() => setCreating(false)}
+          />,
+          document.body,
+        )}
       {deleting &&
         // 放在 body 底下：刪除正在看的對話會換頁並收起抽屜，對話框不能跟著被藏起來。
         createPortal(
@@ -367,11 +487,14 @@ function SessionMenu({
   onClose,
   onRename,
   onDelete,
+  onMove,
 }: {
   anchor: HTMLElement;
   onClose: () => void;
   onRename: () => void;
   onDelete: () => void;
+  /** 移到專案；伺服器不支援專案時沒有。 */
+  onMove?: () => void;
 }) {
   return (
     <FloatingMenu anchor={anchor} label="對話選項" onClose={onClose}>
@@ -384,6 +507,17 @@ function SessionMenu({
         <PenIcon size={15} />
         重新命名
       </button>
+      {onMove && (
+        <button
+          type="button"
+          role="menuitem"
+          className="menu-item"
+          onClick={onMove}
+        >
+          <MoveIcon size={15} />
+          移到專案
+        </button>
+      )}
       <button
         type="button"
         role="menuitem"
