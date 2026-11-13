@@ -449,39 +449,6 @@ async def test_saved_model_settings_apply_to_next_run(start):
     assert info["agents"][0]["maxTurns"] == 5
 
 
-async def test_effort_is_saved_with_other_model_params(start):
-    h = await start(
-        [conftest.text_response("好")] * 2,
-        extra="modelParams:\n  max_tokens: 4096\n",
-    )
-
-    status, _ = await h.api(
-        "PUT", "/settings/model", {"model": None, "effort": "high"}
-    )
-    await h.api("POST", "/sessions", {"text": "嗨"})
-    await h.wait_for("run_end")
-    _, info = await h.api("GET", "/project")
-    saved = yaml.safe_load((h.root / "harness.yaml").read_text("utf-8"))
-    bad, _ = await h.api("PUT", "/settings/model", {"effort": "max"})
-    cleared, _ = await h.api("PUT", "/settings/model", {"effort": None})
-    after = yaml.safe_load((h.root / "harness.yaml").read_text("utf-8"))
-
-    assert status == 200
-    # 下一輪就用新的思考程度；原本的 max_tokens 保留。
-    assert h.model.requests[0]["params"] == {
-        "max_tokens": 4096,
-        "reasoning_effort": "high",
-    }
-    assert info["model"]["config"]["effort"] == "high"
-    assert saved["modelParams"] == {
-        "max_tokens": 4096,
-        "reasoning_effort": "high",
-    }
-    assert bad == 400
-    assert cleared == 200
-    assert after["modelParams"] == {"max_tokens": 4096}
-
-
 async def test_model_connection_test(start):
     h = await start([conftest.text_response("pong")])
 
@@ -1207,47 +1174,6 @@ class TestConnectionSettings:
 
         assert status == 400
         assert body["error"] == "金鑰不正確，或沒有權限列出模型"
-
-    async def test_menu_lists_the_connections_models_until_some_are_chosen(
-        self, start, monkeypatch
-    ):
-        calls = []
-
-        async def fake_list(provider, base_url="", api_key="", saved_key=True):
-            calls.append(provider)
-            return [
-                model_catalog.ModelChoice(
-                    "anthropic/claude-haiku-5-5", "Haiku"
-                ),
-                model_catalog.ModelChoice("anthropic/claude-opus-5-5", "Opus"),
-            ]
-
-        monkeypatch.setattr(model_catalog, "list_models", fake_list)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        h = await start(extra="model: anthropic/claude-opus-5-5\n")
-        workspace = h.client.app[server_lib._WORKSPACE]  # noqa: SLF001
-        _, before = await h.api("GET", "/project")
-
-        workspace.auto_catalog = True
-        workspace.refresh_catalog()
-        await h.wait_for("project")
-        await workspace._catalog_task  # noqa: SLF001
-        _, listed = await h.api("GET", "/project")
-        await h.api("PUT", "/settings/models", {"models": ["openai/gpt-5"]})
-        _, chosen = await h.api("GET", "/project")
-
-        def names(info):
-            return [item["name"] for item in info["models"]]
-
-        assert calls == ["anthropic"]
-        assert names(before) == ["anthropic/claude-opus-5-5"]
-        # 預設模型排第一，重複的只留一個。
-        assert names(listed) == [
-            "anthropic/claude-opus-5-5",
-            "anthropic/claude-haiku-5-5",
-        ]
-        # 管理者勾選了要開放的模型後，只列那些。
-        assert names(chosen) == ["anthropic/claude-opus-5-5", "openai/gpt-5"]
 
     async def test_model_choices_are_saved_to_harness_yaml(self, start):
         h = await start(

@@ -7,7 +7,6 @@ import type {
   ChatCategory,
   ConnectionSettings,
   CurrentUser,
-  Effort,
   Feedback,
   FileEntry,
   IssuedPassword,
@@ -126,16 +125,8 @@ export const api = {
     }),
   savePermissions: (settings: PermissionSettings) =>
     request("PUT", "/settings/permissions", settings),
-  saveModel: (
-    model: string | null,
-    maxTurns: number | null,
-    effort?: Effort | null,
-  ) =>
-    request("PUT", "/settings/model", {
-      model,
-      maxTurns,
-      ...(effort !== undefined ? { effort } : {}),
-    }),
+  saveModel: (model: string | null, maxTurns: number | null) =>
+    request("PUT", "/settings/model", { model, maxTurns }),
   saveConnection: (settings: ConnectionSettings) =>
     request("PUT", "/settings/connection", settings),
   testModel: () => request<ModelTestResult>("POST", "/settings/model/test", {}),

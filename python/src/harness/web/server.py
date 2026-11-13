@@ -724,10 +724,7 @@ def _settings_routes(routes: web.RouteTableDef) -> None:
         max_turns = body.get("maxTurns")
         if isinstance(max_turns, float) and max_turns.is_integer():
             max_turns = int(max_turns)
-        effort = body.get("effort")
-        if effort is not None and not isinstance(effort, str):
-            raise workspace_lib.WebError(400, "effort 必須是字串或 null")
-        _ws(request).update_model_settings(model, max_turns, effort)
+        _ws(request).update_model_settings(model, max_turns)
         return _json({"ok": True})
 
     @routes.put("/api/settings/connection")
@@ -810,9 +807,6 @@ async def serve(
     workspace = app[_WORKSPACE]
     warm_up = asyncio.get_running_loop().run_in_executor(None, _warm_up)
     warm_up.add_done_callback(lambda _: workspace.refresh_project())
-    # 查詢連線上有哪些模型，給輸入框的模型選單用。
-    workspace.auto_catalog = True
-    workspace.refresh_catalog()
     actual = site._server.sockets[0].getsockname()[1]  # noqa: SLF001
     shown = f"[{host}]" if ":" in host else host
     url = f"http://{shown}:{actual}"
