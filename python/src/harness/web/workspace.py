@@ -111,6 +111,8 @@ _SUBAGENT_RESULT_LIMIT = 4000
 _CUSTOM_TITLE_LIMIT = 100
 # 批次刪除或移動時，一次最多幾段對話。
 _BULK_LIMIT = 500
+# 輸入框的模型選單最多列出連線上的幾個模型。
+_CATALOG_LIMIT = 500
 _SEARCH_LIMIT = 30
 _RECENT_LIMIT = 20
 _SNIPPET_LENGTH = 60
@@ -263,6 +265,8 @@ class Workspace:
         self._listeners: dict[Listener, str] = {}
         self._settings = config_lib.read_model_settings(project.root)
         self._overrides = config_lib.read_agent_overrides(project.root)
+        # harness.yaml 的 modelParams；agent 檔案沒寫 modelParams 時使用。
+        self._model_params = config_lib.read_model_params(project.root)
         # 啟動時的模型設定；網頁上改過 harness.yaml 之後，沒有自己設定
         # 的 agent 都跟著換。
         self._base_agents = {
@@ -271,6 +275,12 @@ class Workspace:
         }
         # harness.yaml 的 models：管理者另外開放給使用者選的模型。
         self._model_choices = config_lib.read_model_choices(project.root)
+        # 沒有寫 models 時，輸入框列出目前連線的供應商或端點的所有模型
+        # （見 refresh_catalog）。
+        self._catalog: list[dict[str, str]] = []
+        self._catalog_task: asyncio.Task | None = None
+        # 只有真的啟動伺服器時（serve）才向外查詢，測試不會連網路。
+        self.auto_catalog = False
         self._builtin_skills = project_lib.builtin_skills()
 
     def subscribe(
@@ -344,6 +354,35 @@ class Workspace:
 
     def refresh_project(self) -> None:
         """通知瀏覽器重新讀取專案資訊（例如 litellm 在背景載入完成後）。"""
+        self._emit({"type": "project"})
+
+    def refresh_catalog(self) -> None:
+        """在背景向目前連線的供應商或端點查詢有哪些模型。
+
+        harness.yaml 沒有寫 models 時，輸入框的模型選單列出這些模型；
+        查到後通知瀏覽器重新讀取專案資訊。查不到時（金鑰沒設定、端點
+        不支援）選單只有預設模型，和以前一樣。伺服器啟動時與換了連線
+        設定後呼叫。
+        """
+        if not self.auto_catalog:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._catalog_task is not None and not self._catalog_task.done():
+            self._catalog_task.cancel()
+        self._catalog_task = loop.create_task(self._load_catalog())
+
+    async def _load_catalog(self) -> None:
+        provider = self._connection_info()["provider"]
+        found: list[model_catalog.ModelChoice] = []
+        if provider is not None:
+            try:
+                found = await model_catalog.list_models(provider)
+            except model_catalog.CatalogError:
+                found = []
+        self._catalog = [item.to_json() for item in found[:_CATALOG_LIMIT]]
         self._emit({"type": "project"})
 
     def project_info(self, user: accounts_lib.User) -> dict[str, Any]:
@@ -1031,10 +1070,15 @@ class Workspace:
         self._emit({"type": "project"})
 
     def update_model_settings(
-        self, model: str | None, max_turns: int | None
+        self,
+        model: str | None,
+        max_turns: int | None,
+        effort: str | None = None,
     ) -> None:
-        """更新 harness.yaml 的 model 與 maxTurns，下一輪開始生效。"""
+        """更新 harness.yaml 的 model、maxTurns 與思考程度，下一輪開始生效。"""
         model = (model or "").strip() or None
+        if effort is not None and effort not in config_lib.EFFORTS:
+            raise WebError(400, "思考程度必須是 low、medium 或 high")
         if max_turns is not None and (
             isinstance(max_turns, bool)
             or not isinstance(max_turns, int)
@@ -1042,10 +1086,17 @@ class Workspace:
         ):
             raise WebError(400, "每次最多回合必須是正整數")
         try:
-            config_lib.save_model_settings(self.project.root, model, max_turns)
+            config_lib.save_model_settings(
+                self.project.root, model, max_turns, effort
+            )
         except ValueError as error:
             raise WebError(400, str(error)) from error
-        self._settings = {"model": model, "maxTurns": max_turns}
+        self._settings = {
+            "model": model,
+            "maxTurns": max_turns,
+            "effort": effort,
+        }
+        self._model_params = config_lib.read_model_params(self.project.root)
         self._apply_settings()
         self._emit({"type": "project"})
 
@@ -1075,7 +1126,10 @@ class Workspace:
             raise WebError(400, _explain_failure(result["message"], error))
         try:
             config_lib.save_model_settings(
-                self.project.root, model, self._settings["maxTurns"]
+                self.project.root,
+                model,
+                self._settings["maxTurns"],
+                self._settings.get("effort"),
             )
         except ValueError as error:
             _set_environment(before)
@@ -1084,6 +1138,7 @@ class Workspace:
         self._settings = {**self._settings, "model": model}
         self._apply_settings()
         self._emit({"type": "project"})
+        self.refresh_catalog()
 
     async def test_model(self, model: str | None = None) -> dict[str, Any]:
         """送一個很短的請求，確認連得上模型。
@@ -1126,6 +1181,8 @@ class Workspace:
         被中斷，可以按重試接著做（見 _mark_interrupted）。
         """
         self._closing = True
+        if self._catalog_task is not None:
+            self._catalog_task.cancel()
         tasks = [s.task for s in self._states.values() if s.task is not None]
         for task in tasks:
             task.cancel()
@@ -1684,6 +1741,8 @@ class Workspace:
                 agent.model = self._settings["model"]
             if "maxTurns" not in own:
                 agent.max_turns = self._settings["maxTurns"] or 20
+            if "modelParams" not in own:
+                agent.model_params = dict(self._model_params)
 
     def _hidden_tools(self, user: accounts_lib.User) -> set[int]:
         """用不到的工具（以 id() 表示）：沒有沙盒時成員不能用 run_command。"""
@@ -1736,7 +1795,8 @@ class Workspace:
             {"name": agent.model or llm.default_model()}
             for agent in self.project.agents.values()
         ]
-        choices += self._model_choices
+        # 管理者勾選了要開放的模型時只列那些，否則列出連線上所有的模型。
+        choices += self._model_choices or self._catalog
         options: dict[str, dict[str, Any]] = {}
         for choice in choices:
             name = choice["name"]

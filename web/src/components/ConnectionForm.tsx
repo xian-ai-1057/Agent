@@ -206,7 +206,7 @@ export function ConnectionForm({
       )}
 
       <div className="form-row">
-        <label htmlFor="connection-model">模型</label>
+        <label htmlFor="connection-model">預設模型</label>
         {picking ? (
           <select
             id="connection-model"
@@ -368,8 +368,9 @@ function ModelChoices({
     <fieldset className="form-row model-choices">
       <legend>對話中可以切換的模型</legend>
       <div className="help">
-        勾選的模型會出現在輸入框的模型選單，預設模型不用勾。已勾選{" "}
-        {chosen.length} 個。
+        {chosen.length === 0
+          ? "目前都沒有勾選：輸入框的模型選單會列出這個接口的所有模型。勾選後只列出勾選的模型（預設模型一定會列出）。"
+          : `輸入框的模型選單只列出勾選的 ${chosen.length} 個模型和預設模型；全部取消勾選就會列出這個接口的所有模型。`}
       </div>
       {all.length > 12 && (
         <input

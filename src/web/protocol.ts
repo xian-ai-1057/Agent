@@ -397,7 +397,15 @@ export interface ProjectInfo {
   skills?: SkillInfo[];
   model: {
     /** harness.yaml 裡的值，沒寫時為 null。 */
-    config: { model: string | null; maxTurns: number | null };
+    config: {
+      model: string | null;
+      maxTurns: number | null;
+      /**
+       * 模型思考的程度（Python 版）：harness.yaml 的 modelParams.reasoning_effort。
+       * null 表示不指定、用模型的預設。PUT /api/settings/model 的 effort。
+       */
+      effort?: Effort | null;
+    };
     env: {
       model: string | null;
       baseURL: string | null;
@@ -456,6 +464,9 @@ export interface ModelChoice {
   name: string;
   label: string;
 }
+
+/** 模型思考的程度；不支援的模型會略過這個設定。 */
+export type Effort = "low" | "medium" | "high";
 
 /** 連 OpenAI 相容端點時，連線設定裡的供應商代號。 */
 export const ENDPOINT_PROVIDER = "endpoint";
