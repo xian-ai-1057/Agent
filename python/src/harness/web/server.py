@@ -807,6 +807,9 @@ async def serve(
     workspace = app[_WORKSPACE]
     warm_up = asyncio.get_running_loop().run_in_executor(None, _warm_up)
     warm_up.add_done_callback(lambda _: workspace.refresh_project())
+    # 查詢連線上有哪些模型，給輸入框的模型選單用。
+    workspace.auto_catalog = True
+    workspace.refresh_catalog()
     actual = site._server.sockets[0].getsockname()[1]  # noqa: SLF001
     shown = f"[{host}]" if ":" in host else host
     url = f"http://{shown}:{actual}"

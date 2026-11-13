@@ -1175,6 +1175,47 @@ class TestConnectionSettings:
         assert status == 400
         assert body["error"] == "金鑰不正確，或沒有權限列出模型"
 
+    async def test_menu_lists_the_connections_models_until_some_are_chosen(
+        self, start, monkeypatch
+    ):
+        calls = []
+
+        async def fake_list(provider, base_url="", api_key="", saved_key=True):
+            calls.append(provider)
+            return [
+                model_catalog.ModelChoice(
+                    "anthropic/claude-haiku-5-5", "Haiku"
+                ),
+                model_catalog.ModelChoice("anthropic/claude-opus-5-5", "Opus"),
+            ]
+
+        monkeypatch.setattr(model_catalog, "list_models", fake_list)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        h = await start(extra="model: anthropic/claude-opus-5-5\n")
+        workspace = h.client.app[server_lib._WORKSPACE]  # noqa: SLF001
+        _, before = await h.api("GET", "/project")
+
+        workspace.auto_catalog = True
+        workspace.refresh_catalog()
+        await h.wait_for("project")
+        await workspace._catalog_task  # noqa: SLF001
+        _, listed = await h.api("GET", "/project")
+        await h.api("PUT", "/settings/models", {"models": ["openai/gpt-5"]})
+        _, chosen = await h.api("GET", "/project")
+
+        def names(info):
+            return [item["name"] for item in info["models"]]
+
+        assert calls == ["anthropic"]
+        assert names(before) == ["anthropic/claude-opus-5-5"]
+        # 預設模型排第一，重複的只留一個。
+        assert names(listed) == [
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-haiku-5-5",
+        ]
+        # 管理者勾選了要開放的模型後，只列那些。
+        assert names(chosen) == ["anthropic/claude-opus-5-5", "openai/gpt-5"]
+
     async def test_model_choices_are_saved_to_harness_yaml(self, start):
         h = await start(
             extra=(

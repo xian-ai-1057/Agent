@@ -155,7 +155,7 @@ web:
   - 工具只能在 agent 原本就有的範圍內關閉，不能多加。
   - 勾選的 skill 會在送給模型的系統提示裡註明「先讀取這些 skill」。
 
-清單裡的模型來自：專案的預設模型、各個 agent 檔案寫的模型，以及 `harness.yaml` 的 `models`。要多開放幾個模型給使用者選，在 `harness.yaml` 加上：
+清單裡的模型來自：專案的預設模型、各個 agent 檔案寫的模型，以及 `harness.yaml` 的 `models`。**沒有寫 `models` 時，清單列出目前連線的供應商或端點的所有模型**（伺服器啟動時自動查詢，見[在網頁上連接模型](#在網頁上連接模型)）；查不到時只有預設模型。只想開放其中幾個模型，在「設定 → 模型」勾選，或在 `harness.yaml` 寫上：
 
 ```yaml
 models:
@@ -215,7 +215,7 @@ models:
 
 1. 選供應商：Anthropic、OpenAI、Google、OpenRouter、Ollama（本機模型，不需要金鑰），或自己的 OpenAI 相容端點（LiteLLM Proxy、vLLM 等，填端點網址）。
 2. 貼上金鑰（或填好端點網址）。**填好後會自動列出這家供應商或端點可以用的模型**，從選單選一個當作預設模型；清單裡沒有的，選「其他（自行輸入模型名稱）」直接填。列不出來時（例如端點不支援 `/models`）會說明原因，一樣可以直接填。
-3. 需要的話，在「對話中可以切換的模型」勾選其他模型，它們會出現在輸入框的模型選單（寫進 `harness.yaml` 的 `models`，原本有寫 `label` 的模型保留顯示名稱）。
+3. 輸入框的模型選單**預設列出這個接口的所有模型**（伺服器啟動時與換了連線設定後自動查詢），使用者每段對話都可以換。只想開放其中幾個時，在「對話中可以切換的模型」勾選，選單就只列出勾選的模型和預設模型（寫進 `harness.yaml` 的 `models`，原本有寫 `label` 的模型保留顯示名稱）；全部取消勾選就回到列出所有模型。
 4. 按「測試連線並儲存」。**伺服器會先用新的設定實際連一次模型，連得上才儲存**；金鑰打錯、模型名稱不對或連不到伺服器時，會顯示原因（依錯誤的種類判斷，後面附上原始的錯誤訊息），原本的設定保持不變。
 
 列出模型的方式：OpenAI 相容端點用 `GET /models`（網址沒有 `/v1` 而找不到時再試 `/v1/models`）；Anthropic、OpenAI、Google、OpenRouter 用各自官方的模型清單 API（OpenAI 只留對話用的模型，Google 只留支援 `generateContent` 的模型）；Ollama 用 `GET /api/tags`。API 是 `POST /api/settings/models/discover {provider, baseURL, apiKey}`，只有管理者能用；金鑰留空時用已經存好的金鑰，但**換成別的端點網址時不會送出存好的金鑰**。勾選的模型用 `PUT /api/settings/models {models}` 儲存。
