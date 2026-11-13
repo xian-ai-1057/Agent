@@ -99,7 +99,10 @@ pyharness sandbox     # 檢查 Docker、映像檔與限制是否正常
 
 用 [Docker Compose 部署](/guide/deploy)時這些都已經做好：映像檔來自
 `docker/sandbox.Dockerfile`，並用三個環境變數提供預設值（`harness.yaml`
-有寫的話以它為準）：
+有寫的話以它為準）。這個映像檔另外裝了 LibreOffice，網頁版用它把 Word、
+PowerPoint 轉成 PDF 預覽（見[網頁版](/guide/web#預覽檔案)），agent 也可以用
+`soffice --headless --convert-to pdf 檔名` 轉檔；自己的映像檔沒有
+LibreOffice 時，網頁改用瀏覽器裡的簡易預覽。
 
 | 環境變數 | 用途 |
 |---|---|

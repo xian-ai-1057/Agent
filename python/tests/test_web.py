@@ -1518,7 +1518,10 @@ class TestProjectChoices:
         h = await start()
 
         _, info = await h.api("GET", "/project")
+        # 要看這台電腦有沒有安裝 LibreOffice（見 test_web_office）。
+        office_pdf = info["features"].pop("officePdf")
 
+        assert isinstance(office_pdf, bool)
         assert info["features"] == {
             "files": True,
             "sessionAdmin": True,

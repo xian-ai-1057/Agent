@@ -2,8 +2,9 @@
  * 預覽工作資料夾裡的檔案（Python 版的 /api/files）。
  *
  * 圖片、PDF 直接顯示；Markdown 排版；CSV 做成表格；程式碼與文字上色；
- * HTML、SVG 只顯示原始碼，不會執行。其他格式（Word、Excel、壓縮檔…）顯示
- * 檔案卡片與下載按鈕。
+ * HTML、SVG 只顯示原始碼，不會執行。Word、Excel、PowerPoint 在瀏覽器裡轉
+ * 換後顯示（見 OfficePreview）。其他格式（舊版 Office、壓縮檔…）顯示檔案
+ * 卡片與下載按鈕。
  */
 
 import { useEffect, useState } from "react";
@@ -15,6 +16,7 @@ import { FileBadge } from "./FileBadge.tsx";
 import { fileName, languageOf, previewKind } from "./filetype.ts";
 import { useFolder } from "./folder.ts";
 import { DownloadIcon } from "./icons.tsx";
+import { SheetPreview, SlidesPreview, WordPreview } from "./OfficePreview.tsx";
 
 /** 最多讀幾個位元組；大檔案只讀開頭，不整個下載。 */
 const TEXT_LIMIT = 300_000;
@@ -56,6 +58,9 @@ export function FilePreview({ path }: { path: string }) {
       </div>
     );
   }
+  if (kind === "word") return <WordPreview path={path} title={name} />;
+  if (kind === "slides") return <SlidesPreview path={path} title={name} />;
+  if (kind === "sheet") return <SheetPreview key={path} path={path} />;
   if (kind === "binary") return <BinaryCard path={path} />;
   return <TextPreview path={path} kind={kind} />;
 }

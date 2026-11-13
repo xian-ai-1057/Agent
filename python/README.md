@@ -58,7 +58,7 @@ docker compose logs harness      # 看管理者 admin 自動產生的密碼
 | 專案 | 建立一個通用助手：可以讀寫檔案、列計畫、讀取網頁、記住交代的事、寫程式分析上傳的檔案 | 修改 volume 裡的 `harness.yaml`、`agents/main.md`、`AGENTS.md` |
 | 管理者密碼 | 第一次啟動時建立帳號 `admin` 並產生密碼，之後每次啟動都會顯示（admin 改過密碼後就不顯示） | `.env` 的 `HARNESS_WEB_PASSWORD`（只在建立 admin 時使用） |
 | 模型與金鑰 | 在網頁上填寫（見[在網頁上連接模型](#在網頁上連接模型)） | `.env` 的 `ANTHROPIC_API_KEY` 等 |
-| 沙盒 | 一併建置裝好 pandas、matplotlib 等套件的映像檔 | 修改 `docker/sandbox.Dockerfile` |
+| 沙盒 | 一併建置裝好 pandas、matplotlib、LibreOffice（Word、PowerPoint 預覽）等套件的映像檔 | 修改 `docker/sandbox.Dockerfile` |
 | 埠號 | 4321 | `.env` 的 `HARNESS_PORT` |
 
 要調整時，把 `.env.example` 複製成 `.env` 再修改，然後重新執行
@@ -1325,7 +1325,10 @@ Python 版另外會處理：
   檔案與記憶各自分開；每段對話選一個工作資料夾，agent 只看得到那裡
   （見下方的[帳號與成員](#帳號與成員)與[工作資料夾](#工作資料夾)）。
 - **預覽檔案**：點附件或 agent 寫的檔案，右側面板直接顯示圖片、PDF、
-  CSV、Markdown 與程式碼，也可以下載。只看得到這段對話的工作資料夾裡的
+  CSV、Markdown、程式碼、Word、PowerPoint 與 Excel，也可以下載。Word、
+  PowerPoint 由 LibreOffice 轉成 PDF（有沙盒時在沙盒裡轉換，結果快取在
+  `.harness/previews/`），不能轉換時改用瀏覽器裡的簡易預覽；Excel 每個
+  工作表一個分頁，顯示成表格。只看得到這段對話的工作資料夾裡的
   檔案，以點開頭的檔案一律不提供；HTML、SVG 只顯示原始碼。
   `run_python` 新增或修改的檔案也會以檔案卡片出現。拖曳對話區與面板
   之間的分隔線可以調整面板寬度（雙擊回到預設，寬度記在瀏覽器）。

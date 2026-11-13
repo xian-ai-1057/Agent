@@ -2009,3 +2009,130 @@ body.ch-resizing .panel {
     display: none;
   }
 }
+
+/* ── Word、Excel、PowerPoint 預覽 ───────────────────── */
+
+/* 文件、投影片與 PDF 填滿面板剩下的高度（捲動在 iframe 裡）。 */
+.ch-tab-body .scroll:has(> .anim-in > :is(.ch-office, .ch-preview-pdf)) {
+  display: flex;
+  flex-direction: column;
+}
+
+.ch-tab-body .scroll > .anim-in:has(> :is(.ch-office, .ch-preview-pdf)) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ch-office {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 320px;
+}
+
+.ch-office-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 320px;
+  border: 0;
+  background: #e9e9ec;
+}
+
+.ch-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px 24px;
+  min-height: 0;
+}
+
+.ch-sheet-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border-bottom: 1px solid var(--line);
+}
+
+.ch-sheet-tab {
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  transition:
+    color var(--dur-1, 120ms) ease,
+    border-color var(--dur-1, 120ms) ease;
+}
+
+.ch-sheet-tab:hover {
+  color: var(--ink);
+}
+
+.ch-sheet-tab[aria-selected="true"] {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+.ch-sheet-scroll {
+  max-height: calc(100vh - 220px);
+}
+
+.ch-sheet table {
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-sheet th,
+.ch-sheet td {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ch-sheet thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--soft);
+  color: var(--muted);
+  font-weight: 500;
+  text-align: center;
+}
+
+.ch-sheet .ch-sheet-row,
+.ch-sheet .ch-sheet-corner {
+  position: sticky;
+  left: 0;
+  background: var(--soft);
+  color: var(--muted);
+  font-weight: 500;
+  text-align: right;
+}
+
+.ch-sheet .ch-sheet-corner {
+  z-index: 2;
+}
+
+.ch-tab-body .scroll > .anim-in > .ch-preview-pdf {
+  flex: 1;
+  height: auto;
+  min-height: 320px;
+}
+
+.ch-office-note {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
