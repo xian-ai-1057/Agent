@@ -22,7 +22,7 @@ docker compose logs harness      # 看網址與管理者 admin 自動產生的�
 | 專案 | 建立一個通用助手：讀寫檔案、列計畫、讀取網頁、記住交代的事、寫程式分析上傳的檔案 | 修改 volume 裡的 `harness.yaml`、`agents/main.md`、`AGENTS.md` |
 | 管理者密碼 | 第一次啟動時建立帳號 `admin` 並產生密碼，之後每次啟動都會顯示（admin 改過密碼後就不顯示） | `.env` 的 `HARNESS_WEB_PASSWORD`（只在建立 admin 時使用） |
 | 模型與金鑰 | 在網頁上填寫 | `.env` 的 `ANTHROPIC_API_KEY` 等 |
-| 沙盒 | 一併建置裝好 pandas、matplotlib 等套件的映像檔 | 修改 `docker/sandbox.Dockerfile` |
+| 沙盒 | 一併建置裝好 pandas、matplotlib、LibreOffice（Word、PowerPoint 預覽）等套件的映像檔 | 修改 `docker/sandbox.Dockerfile` |
 | 埠號 | 4321 | `.env` 的 `HARNESS_PORT` |
 
 要調整時，把 `.env.example` 複製成 `.env` 再修改，然後重新執行 `docker compose up -d`。

@@ -7,7 +7,15 @@ export type PreviewKind =
   | "csv"
   | "html"
   | "text"
+  | "word"
+  | "sheet"
+  | "slides"
   | "binary";
+
+// Office 檔案（Open XML 格式）。舊版的 .doc、.xls、.ppt 不支援，顯示下載。
+const WORD = ["docx", "docm", "dotx"];
+const SHEET = ["xlsx", "xlsm", "xltx"];
+const SLIDES = ["pptx", "pptm", "ppsx", "potx"];
 
 // SVG 不在這裡：伺服器把它當純文字送（裡面可以有程式），所以顯示原始碼。
 const IMAGE = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"];
@@ -74,6 +82,9 @@ export function previewKind(path: string): PreviewKind {
   if (ext === "pdf") return "pdf";
   if (ext === "md" || ext === "markdown") return "markdown";
   if (ext === "csv") return "csv";
+  if (WORD.includes(ext)) return "word";
+  if (SHEET.includes(ext)) return "sheet";
+  if (SLIDES.includes(ext)) return "slides";
   if (ext === "html" || ext === "htm") return "html";
   if (ext in TEXT_LANGUAGES) return "text";
   // 沒有副檔名的檔案（README、Makefile）多半是文字。

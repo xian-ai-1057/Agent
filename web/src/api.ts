@@ -180,6 +180,11 @@ function folderQuery(folder?: string | null): string {
  * folder 是 FolderInfo.id（通常是這段對話的資料夾）；沒有時伺服器用
  * 這個人自己的「我的檔案」。
  */
+/** 把 Word、PowerPoint 檔轉成 PDF 的網址（features.officePdf）。 */
+export function officePdfUrl(path: string, folder?: string | null): string {
+  return `/api/files/pdf?path=${encodeURIComponent(path)}${folderQuery(folder)}`;
+}
+
 export function fileUrl(
   path: string,
   download = false,

@@ -217,7 +217,8 @@ describe("previewKind", () => {
     expect(previewKind("main.py")).toBe("text");
     expect(previewKind("Makefile")).toBe("text");
     expect(previewKind("Dockerfile")).toBe("text");
-    expect(previewKind("book.xlsx")).toBe("binary");
+    expect(previewKind("book.xlsx")).toBe("sheet");
+    expect(previewKind("archive.zip")).toBe("binary");
   });
 
   it("SVG 顯示原始碼，不當成圖片", () => {

@@ -79,9 +79,11 @@ from aiohttp import web
 
 from harness import llm
 from harness import project as project_lib
+from harness.builtin import paths as paths_lib
 from harness.web import accounts as accounts_lib
 from harness.web import files as files_lib
 from harness.web import folders as folders_lib
+from harness.web import office as office_lib
 from harness.web import uploads as uploads_lib
 from harness.web import workspace as workspace_lib
 
@@ -134,6 +136,8 @@ _STREAMS = web.AppKey("streams", set)
 _LOGINS = web.AppKey("logins", asyncio.Semaphore)
 _PROXIES = web.AppKey("proxies", tuple)
 _LOCAL_KEY = web.AppKey("local_key", object)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_OFFICE = web.AppKey("office", office_lib.OfficeConverter)
 # 登入的人（aiohttp 3.13 之後建議用 RequestKey，較舊的版本用字串）。
 _USER: Any = (
     web.RequestKey("user", accounts_lib.User)
@@ -310,6 +314,11 @@ def create_app(
     app[_LOGINS] = asyncio.Semaphore(LOGIN_CONCURRENCY)
     app[_PROXIES] = proxies
     app[_LOCAL_KEY] = local_key if mode == "local" else None
+    # 本機模式（只有自己）可以用這台電腦的 LibreOffice；要登入時一律在
+    # 沙盒裡轉換，別人上傳的檔案不在伺服器上解析。
+    app[_OFFICE] = office_lib.OfficeConverter(
+        project.root, project.sandbox, allow_host=mode == "local"
+    )
     routes = web.RouteTableDef()
     _session_routes(routes)
     _file_routes(routes)
@@ -341,7 +350,9 @@ def _session_routes(routes: web.RouteTableDef) -> None:
 
     @routes.get("/api/project")
     async def get_project(request: web.Request) -> web.Response:
-        return _json(_ws(request).project_info(_user(request)))
+        info = _ws(request).project_info(_user(request))
+        info["features"]["officePdf"] = request.app[_OFFICE].available
+        return _json(info)
 
     @routes.get("/api/sessions")
     async def list_sessions(request: web.Request) -> web.Response:
@@ -461,6 +472,37 @@ def _file_routes(routes: web.RouteTableDef) -> None:
         download = request.query.get("download") == "1"
         headers = files_lib.response_headers(name, download)
         return await _send_file(request, fd, info.st_size, headers)
+
+    @routes.get("/api/files/pdf")
+    async def get_office_pdf(request: web.Request) -> web.StreamResponse:
+        folder = _request_folder(request)
+        path = request.query.get("path", "")
+        try:
+            fd, info = files_lib.open_file(folder.path, path, folder.hidden)
+        except files_lib.FileError as error:
+            raise workspace_lib.WebError(error.status, str(error)) from error
+        name = pathlib.PurePosixPath(path.replace("\\", "/")).name
+        try:
+            pdf = await request.app[_OFFICE].to_pdf(
+                fd, info.st_size, pathlib.PurePosixPath(name).suffix.lower()
+            )
+        except office_lib.ConvertError as error:
+            raise workspace_lib.WebError(error.status, str(error)) from error
+        finally:
+            os.close(fd)
+        try:
+            out = paths_lib.open_dir(pdf.parent, ())
+            try:
+                pdf_fd = os.open(pdf.name, os.O_RDONLY | _NOFOLLOW, dir_fd=out)
+            finally:
+                os.close(out)
+        except OSError as error:
+            raise workspace_lib.WebError(404, "找不到轉好的 PDF") from error
+        size = os.fstat(pdf_fd).st_size
+        headers = files_lib.response_headers(
+            f"{pathlib.PurePosixPath(name).stem}.pdf", False
+        )
+        return await _send_file(request, pdf_fd, size, headers)
 
     @routes.get("/api/files/list")
     async def list_files(request: web.Request) -> web.Response:

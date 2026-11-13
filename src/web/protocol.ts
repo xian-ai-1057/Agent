@@ -229,6 +229,12 @@ export interface ServerFeatures {
   accounts?: boolean;
   /** 每段對話選工作資料夾（見 FolderInfo、SessionOptions.folder）。 */
   folders?: boolean;
+  /**
+   * GET /api/files/pdf?path=…&folder=…：把 Word、PowerPoint 檔轉成 PDF 送出
+   * （伺服器用 LibreOffice 轉換並快取）。回 501 表示這台伺服器不能轉換，
+   * 網頁改用瀏覽器裡的簡易預覽。
+   */
+  officePdf?: boolean;
 }
 
 /**
