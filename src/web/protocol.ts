@@ -437,6 +437,24 @@ export interface ConnectionInfo {
   /** 目前使用的供應商代號、"endpoint"（OpenAI 相容端點），或清單以外時為 null。 */
   provider: string | null;
   providers: ProviderInfo[];
+  /**
+   * POST /api/settings/models/discover {provider, baseURL, apiKey} 可以列出
+   * 供應商或端點的模型（Python 版，見 ModelChoice）。換成別的端點網址時
+   * 伺服器不會送出存好的金鑰。
+   */
+  canDiscover?: boolean;
+  /**
+   * harness.yaml 的 models：開放在對話中切換的模型名稱（Python 版）。
+   * PUT /api/settings/models {models: string[]} 整份換掉。
+   */
+  choices?: string[];
+}
+
+/** 供應商或端點提供的一個模型（POST /api/settings/models/discover）。 */
+export interface ModelChoice {
+  /** 寫進設定的模型名稱（litellm 格式；端點則是端點上的名稱）。 */
+  name: string;
+  label: string;
 }
 
 /** 連 OpenAI 相容端點時，連線設定裡的供應商代號。 */
