@@ -56,6 +56,7 @@ from harness import delegation
 from harness import llm
 from harness import loop
 from harness import memory as memory_lib
+from harness import model_catalog
 from harness import permissions as permissions_lib
 from harness import project as project_lib
 from harness import providers
@@ -1540,6 +1541,69 @@ class Workspace:
             "deny": list(shared.deny),
         }
 
+    async def discover_models(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """向供應商或端點查詢可以用的模型（見 harness.model_catalog）。
+
+        Args:
+            settings: {"provider", "baseURL", "apiKey"}，和連線設定相同；
+                留空表示用目前存好的值。換成別的端點網址時不會送出存好的
+                金鑰。
+
+        Returns:
+            {"models": [{"name", "label"}]}
+
+        Raises:
+            WebError: 設定不完整，或查不到模型清單。
+        """
+        provider_id = _clean(settings.get("provider")) or providers.ENDPOINT
+        base_url = _clean(settings.get("baseURL"))
+        if base_url:
+            base_url = _checked_url(base_url)
+        saved = (os.environ.get(providers.BASE_URL_VAR) or "").rstrip("/")
+        same_endpoint = not base_url or base_url.rstrip("/") == saved
+        try:
+            found = await model_catalog.list_models(
+                provider_id,
+                base_url,
+                _clean(settings.get("apiKey")),
+                saved_key=same_endpoint,
+            )
+        except model_catalog.CatalogError as error:
+            raise WebError(400, str(error)) from error
+        return {"models": [item.to_json() for item in found]}
+
+    def update_model_choices(self, names: list[str]) -> None:
+        """設定對話中可以切換的模型（寫進 harness.yaml 的 models）。
+
+        原本有寫顯示名稱（label）的模型保留它的名稱。
+
+        Raises:
+            WebError: 名稱不合法，或 harness.yaml 無法安全地修改。
+        """
+        cleaned = list(dict.fromkeys(name.strip() for name in names))
+        if any(not name or len(name) > 200 for name in cleaned):
+            raise WebError(400, "模型名稱不可以是空的，也不能超過 200 個字")
+        if len(cleaned) > 100:
+            raise WebError(400, "最多開放 100 個模型")
+        labels = {
+            item["name"]: item["label"]
+            for item in self._model_choices
+            if item.get("label")
+        }
+        choices = [
+            {
+                "name": name,
+                **({"label": labels[name]} if name in labels else {}),
+            }
+            for name in cleaned
+        ]
+        try:
+            config_lib.save_model_choices(self.project.root, choices)
+        except ValueError as error:
+            raise WebError(400, str(error)) from error
+        self._model_choices = choices
+        self._emit({"type": "project"})
+
     def _connection_values(
         self, settings: dict[str, Any]
     ) -> tuple[dict[str, str], str]:
@@ -1593,6 +1657,8 @@ class Workspace:
         return {
             "ready": providers.is_ready(model),
             "provider": current,
+            "canDiscover": True,
+            "choices": [item["name"] for item in self._model_choices],
             "providers": [
                 {
                     "id": item.id,

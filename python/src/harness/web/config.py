@@ -116,6 +116,59 @@ def save_model_settings(
     )
 
 
+def save_model_choices(
+    root: pathlib.Path, choices: list[dict[str, str]]
+) -> None:
+    """把對話中可以切換的模型寫回 harness.yaml 的 models；空的時刪掉。
+
+    寫成一行（JSON 也是合法的 YAML），原本有 label 的項目保留 label。
+    原本的 models 不論寫成一行或多行都會整段換掉。
+
+    Args:
+        root: 專案根目錄。
+        choices: [{"name": ..., "label": ...}]，label 可以沒有。
+
+    Raises:
+        ValueError: 檔案格式特殊，無法安全地只改這幾行。
+    """
+    lines = _read_lines(root)
+    _remove_block(lines, "models")
+    items: list[Any] = [
+        {"name": c["name"], "label": c["label"]}
+        if c.get("label")
+        else c["name"]
+        for c in choices
+    ]
+    value = json.dumps(items, ensure_ascii=False) if items else None
+    _set_top_level(lines, "models", value)
+
+    def matches(config: dict[str, Any]) -> bool:
+        return (config.get("models") or []) == items
+
+    _write_checked(root, lines, matches)
+
+
+def _remove_block(lines: list[str], key: str) -> None:
+    """刪掉頂層的 key 和它底下縮排的內容（多行的清單或設定）。"""
+    pattern = re.compile(rf"^{re.escape(key)}\s*:")
+    start = next(
+        (i for i, line in enumerate(lines) if pattern.match(line)), None
+    )
+    if start is None:
+        return
+    end = start + 1
+    while end < len(lines) and (
+        _indented(lines[end])
+        or not lines[end].strip()
+        or lines[end].lstrip().startswith("- ")
+    ):
+        end += 1
+    # 區塊後面的空行留著，維持原本的段落。
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    del lines[start:end]
+
+
 def save_permissions(root: pathlib.Path, settings: dict[str, Any]) -> None:
     """把權限設定寫回 harness.yaml；空的規則清單會整行拿掉。
 

@@ -22,6 +22,7 @@ from harness import credentials
 from harness import datatypes
 from harness import llm
 from harness import loop
+from harness import model_catalog
 from harness import project as project_lib
 from harness import providers
 from harness import sandbox as sandbox_lib
@@ -1122,6 +1123,89 @@ class TestConnectionSettings:
         ]
         for name in names:
             monkeypatch.delenv(name, raising=False)
+
+    async def test_discovering_models_from_an_endpoint(
+        self, start, monkeypatch
+    ):
+        calls = []
+
+        async def fake_list(provider, base_url, api_key, saved_key=True):
+            calls.append((provider, base_url, api_key, saved_key))
+            return [model_catalog.ModelChoice("qwen3", "qwen3")]
+
+        monkeypatch.setattr(model_catalog, "list_models", fake_list)
+        monkeypatch.setenv("HARNESS_BASE_URL", "http://saved:4000/v1")
+        h = await start()
+
+        status, found = await h.api(
+            "POST",
+            "/settings/models/discover",
+            {"provider": "endpoint", "baseURL": "http://other:4000/v1"},
+        )
+        same, _ = await h.api(
+            "POST",
+            "/settings/models/discover",
+            {"provider": "endpoint", "baseURL": "http://saved:4000/v1/"},
+        )
+        bad_url, _ = await h.api(
+            "POST",
+            "/settings/models/discover",
+            {"provider": "endpoint", "baseURL": "file:///etc/passwd"},
+        )
+
+        assert status == 200
+        assert found == {"models": [{"name": "qwen3", "label": "qwen3"}]}
+        assert same == 200
+        # 換成別的網址時，存好的金鑰不能送過去。
+        assert calls[0] == ("endpoint", "http://other:4000/v1", "", False)
+        assert calls[1][3] is True
+        assert bad_url == 400
+
+    async def test_discovery_problems_are_explained(self, start, monkeypatch):
+        async def failing(*args, **kwargs):
+            raise model_catalog.CatalogError("金鑰不正確，或沒有權限列出模型")
+
+        monkeypatch.setattr(model_catalog, "list_models", failing)
+        h = await start()
+
+        status, body = await h.api(
+            "POST", "/settings/models/discover", {"provider": "anthropic"}
+        )
+
+        assert status == 400
+        assert body["error"] == "金鑰不正確，或沒有權限列出模型"
+
+    async def test_model_choices_are_saved_to_harness_yaml(self, start):
+        h = await start(
+            extra=(
+                "models:\n"
+                "  - openai/gpt-5\n"
+                "  - name: anthropic/claude-haiku-5-5\n"
+                "    label: Claude Haiku（快）\n"
+                "\n"
+                "# 後面的設定\n"
+            )
+        )
+
+        status, _ = await h.api(
+            "PUT",
+            "/settings/models",
+            {"models": ["anthropic/claude-haiku-5-5", "gemini/gemini-2.5-pro"]},
+        )
+        _, info = await h.api("GET", "/project")
+        cleared, _ = await h.api("PUT", "/settings/models", {"models": []})
+        bad, _ = await h.api("PUT", "/settings/models", {"models": [""]})
+
+        assert status == 200
+        names = {m["name"]: m["label"] for m in info["models"]}
+        assert names["anthropic/claude-haiku-5-5"] == "Claude Haiku（快）"
+        assert "gemini/gemini-2.5-pro" in names
+        assert "openai/gpt-5" not in names
+        assert cleared == 200
+        assert bad == 400
+        text = (h.root / "harness.yaml").read_text("utf-8")
+        assert "models" not in yaml.safe_load(text)
+        assert "# 後面的設定" in text
 
     async def test_project_reports_missing_key(self, start):
         h = await start()

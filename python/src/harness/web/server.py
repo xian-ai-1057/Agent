@@ -733,6 +733,24 @@ def _settings_routes(routes: web.RouteTableDef) -> None:
         await _ws(request).update_connection(await _body(request))
         return _json({"ok": True})
 
+    @routes.post("/api/settings/models/discover")
+    async def discover_models(request: web.Request) -> web.Response:
+        _require_admin(request)
+        body = await _body(request)
+        return _json(await _ws(request).discover_models(body))
+
+    @routes.put("/api/settings/models")
+    async def save_model_choices(request: web.Request) -> web.Response:
+        _require_admin(request)
+        body = await _body(request)
+        names = body.get("models")
+        if not isinstance(names, list) or not all(
+            isinstance(item, str) for item in names
+        ):
+            raise workspace_lib.WebError(400, "models 必須是字串的陣列")
+        _ws(request).update_model_choices(names)
+        return _json({"ok": True})
+
     @routes.post("/api/settings/model/test")
     async def test_model(request: web.Request) -> web.Response:
         _require_admin(request)

@@ -960,6 +960,8 @@ class TestAdmin:
                 {"provider": "endpoint", "model": "x"},
             ),
             ("POST", "/settings/model/test", {}),
+            ("POST", "/settings/models/discover", {"provider": "anthropic"}),
+            ("PUT", "/settings/models", {"models": ["x"]}),
         ]
         for method, path, body in calls:
             status, _ = await alice.api(method, path, body)

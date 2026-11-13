@@ -11,6 +11,7 @@ import type {
   FileEntry,
   IssuedPassword,
   MemberInfo,
+  ModelChoice,
   ModelTestResult,
   PermissionMode,
   PermissionSettings,
@@ -129,6 +130,14 @@ export const api = {
   saveConnection: (settings: ConnectionSettings) =>
     request("PUT", "/settings/connection", settings),
   testModel: () => request<ModelTestResult>("POST", "/settings/model/test", {}),
+  discoverModels: (settings: Omit<ConnectionSettings, "model">) =>
+    request<{ models: ModelChoice[] }>(
+      "POST",
+      "/settings/models/discover",
+      settings,
+    ),
+  saveModelChoices: (models: string[]) =>
+    request("PUT", "/settings/models", { models }),
 
   // 以下只有 Python 版的伺服器支援，先看 ProjectInfo.features 再呼叫。
   renameSession: (id: string, title: string) =>
