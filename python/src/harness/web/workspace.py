@@ -265,6 +265,8 @@ class Workspace:
         self._listeners: dict[Listener, str] = {}
         self._settings = config_lib.read_model_settings(project.root)
         self._overrides = config_lib.read_agent_overrides(project.root)
+        # harness.yaml 的 modelParams；agent 檔案沒寫 modelParams 時使用。
+        self._model_params = config_lib.read_model_params(project.root)
         # 啟動時的模型設定；網頁上改過 harness.yaml 之後，沒有自己設定
         # 的 agent 都跟著換。
         self._base_agents = {
@@ -1068,10 +1070,15 @@ class Workspace:
         self._emit({"type": "project"})
 
     def update_model_settings(
-        self, model: str | None, max_turns: int | None
+        self,
+        model: str | None,
+        max_turns: int | None,
+        effort: str | None = None,
     ) -> None:
-        """更新 harness.yaml 的 model 與 maxTurns，下一輪開始生效。"""
+        """更新 harness.yaml 的 model、maxTurns 與思考程度，下一輪開始生效。"""
         model = (model or "").strip() or None
+        if effort is not None and effort not in config_lib.EFFORTS:
+            raise WebError(400, "思考程度必須是 low、medium 或 high")
         if max_turns is not None and (
             isinstance(max_turns, bool)
             or not isinstance(max_turns, int)
@@ -1079,10 +1086,17 @@ class Workspace:
         ):
             raise WebError(400, "每次最多回合必須是正整數")
         try:
-            config_lib.save_model_settings(self.project.root, model, max_turns)
+            config_lib.save_model_settings(
+                self.project.root, model, max_turns, effort
+            )
         except ValueError as error:
             raise WebError(400, str(error)) from error
-        self._settings = {"model": model, "maxTurns": max_turns}
+        self._settings = {
+            "model": model,
+            "maxTurns": max_turns,
+            "effort": effort,
+        }
+        self._model_params = config_lib.read_model_params(self.project.root)
         self._apply_settings()
         self._emit({"type": "project"})
 
@@ -1112,7 +1126,10 @@ class Workspace:
             raise WebError(400, _explain_failure(result["message"], error))
         try:
             config_lib.save_model_settings(
-                self.project.root, model, self._settings["maxTurns"]
+                self.project.root,
+                model,
+                self._settings["maxTurns"],
+                self._settings.get("effort"),
             )
         except ValueError as error:
             _set_environment(before)
@@ -1724,6 +1741,8 @@ class Workspace:
                 agent.model = self._settings["model"]
             if "maxTurns" not in own:
                 agent.max_turns = self._settings["maxTurns"] or 20
+            if "modelParams" not in own:
+                agent.model_params = dict(self._model_params)
 
     def _hidden_tools(self, user: accounts_lib.User) -> set[int]:
         """用不到的工具（以 id() 表示）：沒有沙盒時成員不能用 run_command。"""

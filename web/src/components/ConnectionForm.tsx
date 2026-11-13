@@ -206,7 +206,7 @@ export function ConnectionForm({
       )}
 
       <div className="form-row">
-        <label htmlFor="connection-model">模型</label>
+        <label htmlFor="connection-model">預設模型</label>
         {picking ? (
           <select
             id="connection-model"

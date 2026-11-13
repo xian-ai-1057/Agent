@@ -1493,8 +1493,10 @@ agent 可以直接用 `run_python` 解析，也可以用 `files` 工具讀取。
 
 TypeScript 版的 `harness web` 不支援上傳，網頁上不會出現迴紋針。
 
-設定頁修改 `harness.yaml` 時只改 `model`、`maxTurns` 與 `permissions`
-那幾行，其他內容和註解都保持不動。檔案用了錨點（`&`、`*`）等特殊
+設定頁可以改預設模型、`maxTurns` 與思考程度（effort：預設、低、中、高，
+寫在 `modelParams.reasoning_effort`，不支援的模型會自動略過）。修改
+`harness.yaml` 時只改 `model`、`maxTurns`、`modelParams`、`models` 與
+`permissions` 那幾行，其他內容和註解都保持不動。檔案用了錨點（`&`、`*`）等特殊
 寫法、無法安全修改時，會請你直接編輯檔案。
 
 伺服器可以執行專案的工具，所以預設只接受本機連線，並拒絕其他網站

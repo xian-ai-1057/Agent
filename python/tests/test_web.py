@@ -449,6 +449,39 @@ async def test_saved_model_settings_apply_to_next_run(start):
     assert info["agents"][0]["maxTurns"] == 5
 
 
+async def test_effort_is_saved_with_other_model_params(start):
+    h = await start(
+        [conftest.text_response("好")] * 2,
+        extra="modelParams:\n  max_tokens: 4096\n",
+    )
+
+    status, _ = await h.api(
+        "PUT", "/settings/model", {"model": None, "effort": "high"}
+    )
+    await h.api("POST", "/sessions", {"text": "嗨"})
+    await h.wait_for("run_end")
+    _, info = await h.api("GET", "/project")
+    saved = yaml.safe_load((h.root / "harness.yaml").read_text("utf-8"))
+    bad, _ = await h.api("PUT", "/settings/model", {"effort": "max"})
+    cleared, _ = await h.api("PUT", "/settings/model", {"effort": None})
+    after = yaml.safe_load((h.root / "harness.yaml").read_text("utf-8"))
+
+    assert status == 200
+    # 下一輪就用新的思考程度；原本的 max_tokens 保留。
+    assert h.model.requests[0]["params"] == {
+        "max_tokens": 4096,
+        "reasoning_effort": "high",
+    }
+    assert info["model"]["config"]["effort"] == "high"
+    assert saved["modelParams"] == {
+        "max_tokens": 4096,
+        "reasoning_effort": "high",
+    }
+    assert bad == 400
+    assert cleared == 200
+    assert after["modelParams"] == {"max_tokens": 4096}
+
+
 async def test_model_connection_test(start):
     h = await start([conftest.text_response("pong")])
 
