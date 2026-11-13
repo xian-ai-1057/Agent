@@ -383,7 +383,10 @@ function WordSimple({ path, title }: { path: string; title: string }) {
       ignoreLastRenderedPageBreak: true,
       experimental: true,
       useBase64URL: true,
+      // altChunk 是嵌在 Word 檔裡的整段 HTML，不顯示。
+      renderAltChunks: false,
     });
+    safeLinks(body);
     fitWidth(body, ".docx-wrapper");
   });
   if (load.state !== "ready") return <Status load={load} />;
@@ -404,10 +407,29 @@ function SlidesSimple({ path, title }: { path: string; title: string }) {
       mode: "list",
     });
     await previewer.preview(data);
+    safeLinks(body);
     fitWidth(body, ".ch-slides");
   });
   if (load.state !== "ready") return <Status load={load} />;
   return <IsolatedFrame title={title} render={render} />;
+}
+
+/**
+ * 拿掉 http、https、mailto 以外的連結（例如 javascript:）。iframe 本身不能
+ * 執行程式，這是多一層保險。
+ */
+function safeLinks(body: HTMLElement) {
+  for (const link of body.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+    let protocol = "";
+    try {
+      protocol = new URL(link.href).protocol;
+    } catch {
+      // 不是合法網址：一樣拿掉。
+    }
+    if (!["http:", "https:", "mailto:"].includes(protocol)) {
+      link.removeAttribute("href");
+    }
+  }
 }
 
 /**
