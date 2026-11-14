@@ -39,6 +39,7 @@ import "./chat/chat.css";
 import { Composer } from "./Composer.tsx";
 import { FolderContext } from "./chat/folder.ts";
 import {
+  agentKnowledge,
   agentTools,
   type ComposerOptions,
   effectiveModel,
@@ -263,6 +264,8 @@ export function Conversation({ id }: { id: string }) {
           models,
           skills: project.skills ?? [],
           tools: agentInfo ? agentTools(project, agentInfo) : [],
+          knowledgeBases: project.knowledgeBases ?? [],
+          defaultKnowledge: agentKnowledge(project, agentInfo),
           value: optionsValue,
           fallbackModel: agentInfo?.model,
           onChange: changeOptions,

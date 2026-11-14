@@ -263,3 +263,11 @@ export const UserIcon = (p: IconProps) => (
     <path d="M5 21a7 7 0 0 1 14 0" />
   </Svg>
 );
+
+export const BookIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 19.5V5a2 2 0 0 1 2-2h14v15H6.5A2.5 2.5 0 0 0 4 20.5Z" />
+    <path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5" />
+    <path d="M9 7h7M9 11h5" />
+  </Svg>
+);

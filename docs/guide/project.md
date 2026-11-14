@@ -12,7 +12,7 @@ my_bot/
 │   ├── report.py     Python 工具（Python 版直接 import，或 MCP 伺服器）
 │   └── extra.ts      TypeScript 工具（TypeScript 版，可省略）
 ├── skills/           需要時才載入的能力單元（Python 版，可省略）
-├── knowledge/        知識庫文件（Python 版，可省略）
+├── knowledge/        知識庫文件，子資料夾可以是另外的知識庫（Python 版，可省略）
 ├── workspace/        沙盒掛載的資料夾（Python 版，可省略）
 └── .harness/         對話紀錄、記憶、索引快取（自動產生，不用進版控）
 ```
@@ -40,7 +40,8 @@ permissions:
 | `maxTurns` | 一輪對話最多呼叫模型幾次 | |
 | `mcpServers` | 要啟動或連線的 MCP 伺服器 | [連接 MCP 伺服器](/guide/mcp) |
 | `permissions` | 權限模式與規則 | [權限](/guide/permissions) |
-| `knowledge`、`memory`、`guardrails`、`compaction`、`sandbox` | Python 版的進階功能 | [進階功能](/advanced/multi-agent) |
+| `knowledge`、`knowledgeBases` | 知識庫與檢索設定（Python 版） | [知識庫](/advanced/knowledge) |
+| `memory`、`guardrails`、`compaction`、`sandbox` | Python 版的進階功能 | [進階功能](/advanced/multi-agent) |
 
 TypeScript 版會忽略只有 Python 版支援的區塊，同一個專案仍然可以用兩個版本執行。
 
@@ -74,7 +75,7 @@ agent 檔案的其他欄位：
 | `model`、`modelParams` | 這個 agent 專用的模型與參數 |
 | `subagents`、`handoffs` | 可以找哪些 agent 幫忙（Python 版，見[多個 agent 協作](/advanced/multi-agent)） |
 | `skills` | 可以使用的 skills（Python 版，見 [Skills](/advanced/skills)） |
-| `knowledge` | 能不能搜尋知識庫（Python 版，見[知識庫](/advanced/knowledge)） |
+| `knowledge` | 要搜尋哪些知識庫：`true`（預設知識庫）或知識庫清單（Python 版，見[知識庫](/advanced/knowledge#分成好幾個知識庫)） |
 
 ## `AGENTS.md`
 

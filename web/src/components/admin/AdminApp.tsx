@@ -16,6 +16,7 @@ import { type AdminSection, navigate } from "../../router.ts";
 import { refreshProject, useStore } from "../../store.ts";
 import {
   ArrowLeftIcon,
+  BookIcon,
   CheckIcon,
   ChipIcon,
   ShieldIcon,
@@ -26,6 +27,7 @@ import { Members } from "../Members.tsx";
 import { Link } from "../Sidebar.tsx";
 import { UserMenu } from "../shell/UserMenu.tsx";
 import { Groups } from "./Groups.tsx";
+import { Knowledge } from "./Knowledge.tsx";
 import {
   type Draft,
   ModelSection,
@@ -36,6 +38,7 @@ import {
 export const ADMIN_LABELS: Record<AdminSection, string> = {
   model: "模型",
   permissions: "權限",
+  knowledge: "知識庫",
   members: "成員",
   groups: "群組",
 };
@@ -43,6 +46,7 @@ export const ADMIN_LABELS: Record<AdminSection, string> = {
 const ADMIN_ICONS: Record<AdminSection, typeof ChipIcon> = {
   model: ChipIcon,
   permissions: ShieldIcon,
+  knowledge: BookIcon,
   members: UserIcon,
   groups: UsersIcon,
 };
@@ -162,7 +166,9 @@ function AdminMain({ section }: { section: AdminSection }) {
         <div className="main-title">
           <h1>管理平台</h1>
           <span className="subtle mono">
-            {section === "members" || section === "groups"
+            {section === "members" ||
+            section === "groups" ||
+            section === "knowledge"
               ? project.name
               : `${project.name} / harness.yaml`}
           </span>
@@ -188,6 +194,7 @@ function AdminMain({ section }: { section: AdminSection }) {
             )}
             {section === "members" && <Members />}
             {section === "groups" && <Groups />}
+            {section === "knowledge" && <Knowledge />}
           </div>
         </div>
       </div>

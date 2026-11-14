@@ -66,18 +66,30 @@ export function isMember(project: ProjectInfo | undefined): boolean {
 }
 
 /**
- * 能不能使用管理平台。沒有帳號功能（TypeScript 版）或只在本機使用時，
- * 使用者就是這台電腦的管理者。
+ * 是不是管理者。沒有帳號功能（TypeScript 版）或只在本機使用時，使用者
+ * 就是這台電腦的管理者。
+ */
+export function isAdmin(project: ProjectInfo | undefined): boolean {
+  return project !== undefined && !isMember(project);
+}
+
+/**
+ * 能不能使用管理平台：管理者，或知識庫的維護者（只看得到知識庫頁）。
  */
 export function canAdmin(project: ProjectInfo | undefined): boolean {
-  return project !== undefined && !isMember(project);
+  return isAdmin(project) || project?.manageKnowledge === true;
 }
 
 /** 管理平台有哪些分類，第一個是打開管理平台時的預設分類。 */
 export function adminSections(
   project: ProjectInfo | undefined,
 ): AdminSection[] {
+  const knowledge = project?.features?.knowledgeBases === true;
+  if (!isAdmin(project)) {
+    return knowledge && project?.manageKnowledge ? ["knowledge"] : [];
+  }
   const sections: AdminSection[] = ["model", "permissions"];
+  if (knowledge) sections.push("knowledge");
   if (accountsMode(project)) sections.push("members");
   if (accountsMode(project) && project?.features?.groups) {
     sections.push("groups");

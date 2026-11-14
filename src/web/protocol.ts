@@ -153,6 +153,12 @@ export interface SessionOptions {
   /** 這段對話一定要用的 skill 名稱，會在送給模型的訊息裡提示它先讀取。 */
   skills: string[];
   /**
+   * 這段對話要搜尋的知識庫（KnowledgeBaseInfo.id）；null 或沒有時跟著 agent
+   * 的設定（AgentInfo.knowledge）。只能選 ProjectInfo.knowledgeBases 裡的。
+   * 空陣列表示這段對話不搜尋知識庫。
+   */
+  knowledge?: string[] | null;
+  /**
    * 這段對話的工作資料夾（FolderInfo.id）；沒有時是自己的「我的檔案」。
    * 訊息裡的附件、工具參數與 PRODUCED_MARKER 的路徑都相對於這個資料夾。
    */
@@ -249,6 +255,11 @@ export interface ServerFeatures {
    * 開放給他的部分。
    */
   groups?: boolean;
+  /**
+   * 多個知識庫（見 KnowledgeBaseInfo）：ProjectInfo.knowledgeBases、
+   * SessionOptions.knowledge 與管理平台的知識庫頁（/api/knowledge）。
+   */
+  knowledgeBases?: boolean;
 }
 
 /**
@@ -324,8 +335,16 @@ export interface IssuedPassword {
   password: string;
 }
 
-/** 存取群組可以控制的資源類別。 */
-export type AccessKind = "models" | "agents" | "toolsets" | "knowledge";
+/**
+ * 存取群組可以控制的資源類別。knowledgeBases 是知識庫（KnowledgeBaseInfo.id），
+ * knowledge 是知識庫裡的標籤（細部過濾）。
+ */
+export type AccessKind =
+  | "models"
+  | "agents"
+  | "toolsets"
+  | "knowledgeBases"
+  | "knowledge";
 
 /**
  * 存取群組（Python 版帳號模式，只有管理者能讀寫）。每一類資源是名稱清單，
@@ -347,6 +366,8 @@ export interface AccessGroup {
   models: string[] | null;
   agents: string[] | null;
   toolsets: string[] | null;
+  /** 可以搜尋的知識庫（KnowledgeBaseInfo.id）。 */
+  knowledgeBases: string[] | null;
   /** 可以搜尋的知識庫標籤；沒有標籤的文件所有人都搜尋得到。 */
   knowledge: string[] | null;
 }
@@ -356,6 +377,8 @@ export interface GroupCatalog {
   models: { name: string; label: string }[];
   agents: { name: string; description: string }[];
   toolsets: { name: string; tools: string[] }[];
+  knowledgeBases: KnowledgeBaseInfo[];
+  /** 所有知識庫裡用到的標籤。 */
   knowledge: string[];
   /** 專案有沒有知識庫。 */
   hasKnowledge: boolean;
@@ -364,6 +387,105 @@ export interface GroupCatalog {
 export interface GroupList {
   groups: AccessGroup[];
   catalog: GroupCatalog;
+}
+
+/**
+ * 一個知識庫（Python 版）。預設知識庫的 id 是 "default"（harness.yaml 的
+ * knowledge 區塊或 knowledge/ 資料夾），其他的寫在 harness.yaml 的
+ * knowledgeBases，資料夾預設是 knowledge/<id>/。
+ */
+export interface KnowledgeBaseInfo {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/** 知識庫的檢索設定（和 harness.yaml 的鍵相同）。 */
+export interface KnowledgeSettings {
+  name?: string;
+  description?: string;
+  embeddingModel?: string | null;
+  chunkSize?: number | null;
+  reranker?: string | null;
+  rerankCandidates?: number | null;
+  minSimilarity?: number | null;
+  minRerankScore?: number | null;
+}
+
+/**
+ * 管理平台的一個知識庫。管理者看到全部，維護者只看到自己維護的（沒有
+ * maintainers 欄位）。
+ *   GET    /api/knowledge → KnowledgeAdminList
+ *   POST   /api/knowledge {id, name, description?, …KnowledgeSettings}（管理者）
+ *   PATCH  /api/knowledge/:id {…KnowledgeSettings, maintainers?}（管理者；
+ *          值是 null 表示刪掉這個設定）
+ *   DELETE /api/knowledge/:id（管理者；只從 harness.yaml 拿掉，文件留著）
+ *   GET    /api/knowledge/:id/documents → KnowledgeDocuments
+ *   POST   /api/knowledge/:id/documents?dir=&replace=（multipart，要帶
+ *          X-Harness-Upload: 1）→ {files: {path, size}[]}
+ *   DELETE /api/knowledge/:id/documents?path=
+ *   POST   /api/knowledge/:id/search {query, topK?} → {hits: KnowledgeHit[]}
+ */
+export interface KnowledgeAdminBase extends KnowledgeBaseInfo {
+  /** 預設知識庫（不能刪除）。 */
+  builtin: boolean;
+  /** 資料夾，相對於專案根目錄。 */
+  path: string;
+  /** 文件數（含不支援的格式）。 */
+  documents: number;
+  /** harness.yaml 裡這個知識庫自己寫的設定。 */
+  settings: KnowledgeSettings;
+  /** 實際生效的檢索設定（含沿用 knowledge 區塊與預設值的）。 */
+  retrieval: Required<Omit<KnowledgeSettings, "name" | "description">>;
+  /** 預設會搜尋這個知識庫的 agent。 */
+  agents: string[];
+  /** 維護者的 id（MemberInfo.id）；只有管理者看得到。 */
+  maintainers?: string[];
+}
+
+export interface KnowledgeAdminList {
+  bases: KnowledgeAdminBase[];
+  /** 能不能新增、刪除知識庫與修改設定（管理者）。 */
+  canCreate: boolean;
+  /** 能不能指定維護者（帳號模式）。 */
+  maintainers: boolean;
+  /** 支援的副檔名，例如 [".docx", ".md", …]。 */
+  formats: string[];
+}
+
+export interface KnowledgeDocument {
+  /** 相對於知識庫資料夾的路徑。 */
+  path: string;
+  size: number;
+  /** 秒（Unix time）。 */
+  modifiedAt: number;
+  /** 是不是支援的格式（不支援的不會被搜尋到）。 */
+  supported: boolean;
+  /** 切成幾個片段（索引建立失敗時是 0）。 */
+  chunks: number;
+  labels: string[];
+}
+
+export interface KnowledgeDocuments {
+  documents: KnowledgeDocument[];
+  index:
+    | {
+        chunks: number;
+        embedding: boolean;
+        reranker: boolean;
+        /** 略過的檔案與原因。 */
+        warnings: string[];
+      }
+    | { error: string };
+}
+
+export interface KnowledgeHit {
+  source: string;
+  location: string;
+  text: string;
+  labels: string[];
+  similarity: number | null;
+  rerankScore: number | null;
 }
 
 /**
@@ -409,6 +531,11 @@ export interface AgentInfo {
   modelSource: SettingSource;
   maxTurns: number;
   maxTurnsSource: SettingSource;
+  /**
+   * 預設搜尋的知識庫（Python 版，只列這個人可以用的）；null 或沒有表示
+   * 這個 agent 沒有設定知識庫。
+   */
+  knowledge?: string[] | null;
 }
 
 export interface PermissionSettings {
@@ -443,6 +570,10 @@ export interface ProjectInfo {
   models?: ModelOption[];
   /** ＋ 選單可以選的 skills（Python 版）。 */
   skills?: SkillInfo[];
+  /** 這個人在對話裡可以勾選的知識庫（Python 版，群組開放的）。 */
+  knowledgeBases?: KnowledgeBaseInfo[];
+  /** 這個人能不能打開管理平台的知識庫頁（管理者或知識庫的維護者）。 */
+  manageKnowledge?: boolean;
   model: {
     /** harness.yaml 裡的值，沒寫時為 null。 */
     config: { model: string | null; maxTurns: number | null };

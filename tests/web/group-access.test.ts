@@ -18,6 +18,10 @@ const CATALOG: GroupCatalog = {
     { name: "files", tools: ["read_file"] },
     { name: "shell", tools: ["run_command"] },
   ],
+  knowledgeBases: [
+    { id: "default", name: "預設知識庫", description: "" },
+    { id: "hr", name: "人資規章", description: "" },
+  ],
   knowledge: ["hr"],
   hasKnowledge: true,
 };
@@ -31,6 +35,7 @@ const GROUP: AccessGroup = {
   models: ["a"],
   agents: null,
   toolsets: [],
+  knowledgeBases: ["hr"],
   knowledge: ["hr"],
 };
 
@@ -43,9 +48,9 @@ describe("kindSummary", () => {
 });
 
 describe("accessSummary", () => {
-  it("列出四類資源", () => {
+  it("列出每一類資源", () => {
     expect(accessSummary(GROUP, CATALOG)).toBe(
-      "模型 1 / 2 · Agent 全部 · 工具組 無 · 知識庫標籤 1 / 1",
+      "模型 1 / 2 · Agent 全部 · 工具組 無 · 知識庫 1 / 2 · 知識庫標籤 1 / 1",
     );
   });
 

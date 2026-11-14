@@ -12,6 +12,10 @@ import type {
   FileEntry,
   GroupList,
   IssuedPassword,
+  KnowledgeAdminList,
+  KnowledgeDocuments,
+  KnowledgeHit,
+  KnowledgeSettings,
   MemberInfo,
   ModelChoice,
   ModelTestResult,
@@ -98,21 +102,8 @@ export const api = {
     }),
   /** folder 是要放進的工作資料夾（FolderInfo.id）；沒有時是「我的檔案」。 */
   upload: async (file: File, folder?: string | null): Promise<UploadedFile> => {
-    const form = new FormData();
-    form.append("file", file, file.name);
     const query = folder ? `?folder=${encodeURIComponent(folder)}` : "";
-    const response = await fetch(`/api/uploads${query}`, {
-      method: "POST",
-      headers: { "X-Harness-Upload": "1" },
-      body: form,
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      checkUnauthorized(response.status, "/uploads", data);
-      const message = (data as { error?: string }).error ?? response.statusText;
-      throw new ApiError(response.status, message);
-    }
-    const [uploaded] = (data as { files: UploadedFile[] }).files;
+    const [uploaded] = await sendFile<UploadedFile>(`/uploads${query}`, file);
     if (!uploaded) throw new ApiError(500, "上傳失敗");
     return uploaded;
   },
@@ -202,7 +193,62 @@ export const api = {
   updateGroup: (id: string, changes: GroupChanges) =>
     request<AccessGroup>("PATCH", `/admin/groups/${id}`, changes),
   deleteGroup: (id: string) => request("DELETE", `/admin/groups/${id}`),
+
+  // 知識庫（features.knowledgeBases）。
+  knowledge: () => request<KnowledgeAdminList>("GET", "/knowledge"),
+  createKnowledge: (base: { id: string } & KnowledgeSettings) =>
+    request<{ id: string }>("POST", "/knowledge", base),
+  updateKnowledge: (
+    id: string,
+    changes: KnowledgeSettings & { maintainers?: string[] },
+  ) => request<{ id: string }>("PATCH", `/knowledge/${id}`, changes),
+  deleteKnowledge: (id: string) => request("DELETE", `/knowledge/${id}`),
+  knowledgeDocuments: (id: string) =>
+    request<KnowledgeDocuments>("GET", `/knowledge/${id}/documents`),
+  /** replace 是要換掉的文件路徑；沒有時新增（同名的已經存在時失敗）。 */
+  uploadKnowledge: (
+    id: string,
+    file: File,
+    options: { dir?: string; replace?: string } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (options.dir) query.set("dir", options.dir);
+    if (options.replace) query.set("replace", options.replace);
+    const suffix = query.size ? `?${query}` : "";
+    return sendFile<{ path: string; size: number }>(
+      `/knowledge/${id}/documents${suffix}`,
+      file,
+    );
+  },
+  deleteKnowledgeDocument: (id: string, path: string) =>
+    request(
+      "DELETE",
+      `/knowledge/${id}/documents?path=${encodeURIComponent(path)}`,
+    ),
+  searchKnowledge: (id: string, query: string, topK = 5) =>
+    request<{ hits: KnowledgeHit[] }>("POST", `/knowledge/${id}/search`, {
+      query,
+      topK,
+    }),
 };
+
+/** 用 multipart 上傳一個檔案（要帶 X-Harness-Upload 標頭），回傳 files。 */
+async function sendFile<T>(path: string, file: File): Promise<T[]> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const response = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: { "X-Harness-Upload": "1" },
+    body: form,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    checkUnauthorized(response.status, path, data);
+    const message = (data as { error?: string }).error ?? response.statusText;
+    throw new ApiError(response.status, message);
+  }
+  return (data as { files?: T[] }).files ?? [];
+}
 
 /** 新增或修改群組時送出的欄位。 */
 export type GroupChanges = Partial<Omit<AccessGroup, "id" | "builtin">>;

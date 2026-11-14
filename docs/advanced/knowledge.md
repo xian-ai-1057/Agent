@@ -22,6 +22,9 @@ knowledge: true       # 這個 agent 可以用 search_knowledge 搜尋知識庫
 agent 會得到 `search_knowledge` 工具，搜尋結果附上來源檔案與所在標題
 （PDF 則是頁碼），例如 `[1] 來源：hr/leave.md › 請假規定 › 特休`。
 
+文件多了以後，可以依主題或部門分成[好幾個知識庫](#分成好幾個知識庫)，
+各自有自己的資料夾、檢索設定與維護者。
+
 - **檢索方式。** 預設用關鍵字比對（BM25），不需要任何模型，中文也能
   用（以單字與相鄰兩字比對，不用另外斷詞）。設定 `embeddingModel` 後
   再加上語意檢索，兩者的排名合併（hybrid search），同義詞、換句話說
@@ -33,12 +36,15 @@ agent 會得到 `search_knowledge` 工具，搜尋結果附上來源檔案與所
   相似的片段丟掉；也可以用 reranker 重新評估前幾名的相關度（見
   [相似度門檻與 reranker](#相似度門檻與-reranker)）。
 - **切片。** 依段落切成約 `chunkSize` 字的片段，不會從段落中間切開。
-- 支援 `.md`、`.txt`、`.pdf`；其他格式會略過，用 `pyharness knowledge`
-  可以看到哪些檔案被略過。讀取 PDF 需要 pypdf：
+- 支援 `.md`、`.txt`、`.pdf`、`.docx`、`.pptx`、`.xlsx`；其他格式會略過，
+  用 `pyharness knowledge` 可以看到哪些檔案被略過。Word、PowerPoint、
+  Excel 用 Python 內建的套件讀取，不需要另外安裝；讀取 PDF 需要 pypdf：
 
   ```bash
   pip install "agent-harness[pdf] @ git+https://github.com/xian-ai-1057/AgentHarness.git#subdirectory=python"
   ```
+
+  各格式讀出的內容與出處見[文件解析](#文件解析)，也可以換成自己的解析器。
 
 `harness.yaml`（整個區塊可省略，有 `knowledge/` 資料夾就會啟用）：
 
@@ -58,6 +64,122 @@ knowledge:
 模型一樣，名稱要寫端點上的名稱；用 LiteLLM Proxy 時就是它設定檔裡的
 `model_name`（見[模型設定](/guide/model)）。reranker 走 Proxy 的
 `/v1/rerank`。
+
+## 分成好幾個知識庫
+
+一個知識庫放所有文件，管理上容易混在一起：誰可以更新哪些文件、哪些
+人可以搜尋哪些內容都不好分。可以在 `harness.yaml` 的 `knowledgeBases`
+區塊依主題或部門分成好幾個知識庫：
+
+```yaml
+knowledge:                       # 預設知識庫（識別碼 default），可省略
+  embeddingModel: openai/text-embedding-3-small
+  reranker: cohere/rerank-v3.5
+
+knowledgeBases:
+  hr:                            # 識別碼：小寫英文、數字、- 與 _
+    name: 人資規章
+    description: 請假、出勤、薪資與福利
+    # path: knowledge/hr         # 預設是 knowledge/<識別碼>
+  it:
+    name: IT 支援
+    description: 帳號、VPN、設備申請
+    chunkSize: 500               # 可以有自己的檢索設定
+```
+
+```
+knowledge/
+├── faq.md            預設知識庫
+├── hr/               知識庫 hr
+│   ├── labels.yaml   每個知識庫各自的標籤設定
+│   └── 請假規定.docx
+└── it/               知識庫 it
+    └── VPN 設定.pdf
+```
+
+- **每個知識庫是獨立的。** 有自己的名稱、說明、資料夾與檢索設定
+  （`embeddingModel`、`chunkSize`、`reranker`、`rerankCandidates`、
+  `minSimilarity`、`minRerankScore`）；沒寫的檢索設定沿用 `knowledge`
+  區塊的。
+- **原本的 `knowledge/` 就是預設知識庫**（識別碼 `default`），舊的設定
+  不用改。其他知識庫的資料夾放在 `knowledge/` 裡面時，預設知識庫不會
+  重複讀它們。不要預設知識庫時寫 `knowledge: false`。
+- **向量資料庫分開存。** 預設知識庫在 `.harness/knowledge/`，其他知識庫
+  在 `.harness/knowledge/bases/<識別碼>/`。
+
+agent 用 `knowledge` 欄位選擇要搜尋哪些知識庫：
+
+```markdown
+---
+name: helpdesk
+knowledge: [hr, it]   # 搜尋 hr 與 it 兩個知識庫
+---
+```
+
+| 寫法 | 搜尋範圍 |
+| --- | --- |
+| `knowledge: true` | 預設知識庫（沒有預設知識庫時是全部） |
+| `knowledge: [hr, it]` | 列出的知識庫 |
+| `knowledge: {bases: [hr], labels: [manager], topK: 8}` | 指定知識庫，再加上標籤與筆數限制 |
+
+**同時搜尋好幾個知識庫時，結果合併成一份排序。** 各知識庫的分數彼此
+不能直接比較（切片、檢索方式不同），所以：每個知識庫都用同一個
+reranker 時依 rerank 分數排序；否則依各自的名次輪流取（Reciprocal Rank
+Fusion）。每筆結果的出處前面加上知識庫名稱，例如
+`[1] 來源：人資規章 / 請假規定.docx › 特休`。工具說明也會列出每個
+知識庫的名稱與說明，讓 agent 知道去哪裡找。
+
+`pyharness knowledge` 會列出每個知識庫的檔案與片段數；試搜尋時可以用
+`-b` 只搜尋某幾個知識庫：
+
+```bash
+pyharness knowledge -b hr,it "特休怎麼算"
+```
+
+用網頁版時，管理者可以直接在「管理平台 → 知識庫」新增知識庫、上傳
+文件、調整設定與試搜尋，不必手動改 `harness.yaml`；每個知識庫還可以
+指定維護者，讓部門自己更新文件。群組決定成員可以搜尋哪些知識庫，成員
+在對話裡勾選這次要搜尋的知識庫（見[網頁版的知識庫](/guide/web#知識庫)）。
+
+## 文件解析
+
+讀文件與切片是分開的兩步：先由**解析器**把檔案讀成一段段文字（並記下
+位置，例如頁碼），再依段落切成片段。內建的解析器：
+
+| 副檔名 | 讀出的內容 | 出處 |
+| --- | --- | --- |
+| `.md`、`.markdown`、`.txt` | 全文，frontmatter 的 `labels` 當成標籤 | 所在標題 |
+| `.pdf` | 每一頁的文字（需要 pypdf） | `第 3 頁` |
+| `.docx` | 段落與表格，Word 的標題樣式轉成 Markdown 標題 | 所在標題 |
+| `.pptx` | 每張投影片的文字 | `第 2 張投影片` |
+| `.xlsx` | 每個工作表一段，每列一行、儲存格之間用直線隔開 | 工作表名稱 |
+
+Office 檔案在伺服器上用 Python 內建的套件讀取，有大小限制（解壓縮後
+單一部分 50 MB、每個工作表 2 萬列），壞掉或太大的檔案會被略過並列在
+警告裡。
+
+解析器可以替換或新增：它收到檔案路徑，回傳 `Section` 清單。例如改用
+外部服務解析 PDF（含掃描檔 OCR），或加上 HTML：
+
+```python
+from harness.knowledge import Section
+
+def parse_html(path):
+    text = html_to_text(path.read_text(encoding="utf-8"))
+    return [Section(text)]
+
+def parse_pdf_with_ocr(path):
+    pages = my_ocr_service(path)
+    return [Section(page.text, location=f"第 {page.number} 頁") for page in pages]
+
+project = harness.load_project(".")
+for base in project.knowledge_bases.values():
+    base.knowledge.parsers[".html"] = parse_html
+    base.knowledge.parsers[".pdf"] = parse_pdf_with_ocr
+```
+
+讀不了的檔案丟出 `OSError`、`UnicodeDecodeError`、`ImportError` 或
+`ValueError`，該檔案會被略過並記在警告裡，不會讓整個知識庫壞掉。
 
 ## 相似度門檻與 reranker
 
@@ -129,7 +251,8 @@ labels: [hr]
 ...
 ```
 
-或在 `knowledge/labels.yaml` 用路徑樣式指定（PDF 只能用這種寫法）：
+或在知識庫資料夾的 `labels.yaml` 用路徑樣式指定（PDF、Office 檔案只能
+用這種寫法；每個知識庫各有一份，路徑相對於該知識庫的資料夾）：
 
 ```yaml
 "hr/*": [hr]
@@ -161,8 +284,10 @@ agent 設定的 `labels` 與 `label_filter` 同時存在時，兩者都允許的
 才搜尋得到。
 
 用網頁版（`pyharness web`）讓多人登入時不必寫程式：管理者在「管理平台 →
-群組」為每個群組勾選可以搜尋的標籤，成員搜尋得到的是所屬群組開放的標籤，
-再和 agent 自己的 `labels` 取交集（見[存取群組](/guide/web#存取群組)）。
+群組」為每個群組勾選可以搜尋的**知識庫**與**標籤**。知識庫是大範圍的權限
+（例如人資的知識庫只開放給人資群組），標籤是知識庫裡更細的過濾；成員
+搜尋得到的是所屬群組開放的知識庫與標籤，再和 agent 自己的設定取交集
+（見[存取群組](/guide/web#存取群組)）。
 
 ## 在程式裡使用
 
@@ -170,6 +295,7 @@ agent 設定的 `labels` 與 `label_filter` 同時存在時，兩者都允許的
 kb = harness.Knowledge(
     "knowledge",
     embedding_model="openai/text-embedding-3-small",  # 可省略
+    parsers={".html": parse_html},  # 可省略，替換或新增解析器
     cache_dir="data/kb-cache",  # 向量資料庫的位置，省略時只存在記憶體
     min_similarity=0.3,  # 可省略
     reranker="cohere/rerank-v3.5",  # 可省略
@@ -181,6 +307,20 @@ agent = harness.Agent(name="faq", instructions="...", tools=[kb.as_tool()])
 
 hits = await kb.search("退貨期限")  # 也可以直接搜尋
 hits[0].similarity, hits[0].rerank_score  # 沒有使用時是 None
+```
+
+好幾個知識庫一起搜尋：
+
+```python
+from harness import knowledge
+
+bases = [
+    knowledge.KnowledgeBase("hr", "人資規章", harness.Knowledge("docs/hr")),
+    knowledge.KnowledgeBase("it", "IT 支援", harness.Knowledge("docs/it")),
+]
+tool = knowledge.search_tool(bases)  # 合併排序的 search_knowledge 工具
+hits = await knowledge.search_bases(bases, "VPN 連不上")
+hits[0].base  # 結果來自哪個知識庫
 ```
 
 用自己的 reranker（例如本機的 cross-encoder）時，傳入

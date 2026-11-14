@@ -30,7 +30,8 @@ web 的選項：
 pyharness run -c /compact    壓縮最新的對話（聊天時直接輸入 /compact）
 pyharness memory             查看長期記憶（forget <識別碼> / clear）
 pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
-                             （-l hr,sales 模擬受限的 agent）
+                             （-l hr,sales 模擬受限的 agent，
+                             -b hr,it 只搜尋這幾個知識庫）
 pyharness sandbox            檢查沙盒（Docker）能不能正常執行程式
 pyharness user add <名稱>     新增網頁版的帳號，印出產生的密碼
                              （--name 顯示名稱、--admin 設為管理者）
