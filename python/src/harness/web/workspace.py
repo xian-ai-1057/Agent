@@ -1113,7 +1113,7 @@ class Workspace:
         except TimeoutError as error:
             message = f"{_MODEL_TEST_TIMEOUT} 秒內沒有回應"
             return {"ok": False, "model": model, "message": message}, error
-        # 錯誤種類取決於模型供應商，全部轉成訊息顯示在設定頁。
+        # 錯誤種類取決於模型供應商，全部轉成訊息顯示在管理平台。
         except Exception as error:  # noqa: BLE001
             message = _describe(error)
             return {"ok": False, "model": model, "message": message}, error
@@ -1363,7 +1363,7 @@ class Workspace:
     def _permissions_for(self, state: _State) -> permissions_lib.Permissions:
         """這段對話使用的權限設定。
 
-        規則永遠讀專案目前的值，所以在設定頁或「以後都允許」改過的
+        規則永遠讀專案目前的值，所以在管理平台或「以後都允許」改過的
         規則，執行中的對話也會立刻套用。是不是管理者也每次向帳號資料庫
         確認（被降級的管理者不能再用 bypass）。成員另外加上自己在這個
         工作資料夾「以後都允許」的工具。

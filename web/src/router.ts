@@ -1,7 +1,12 @@
 /** 最簡單的路由：只用 history API，不需要額外套件。 */
 
 import { useSyncExternalStore } from "react";
-import { SETTINGS_SECTIONS, type SettingsSection } from "./sections.ts";
+import {
+  ADMIN_SECTIONS,
+  type AdminSection,
+  SETTINGS_SECTIONS,
+  type SettingsSection,
+} from "./sections.ts";
 
 export type Route =
   | { page: "new" }
@@ -11,11 +16,15 @@ export type Route =
   | { page: "chats" }
   /** 一個專案（對話的分類）裡的對話。 */
   | { page: "category"; id: string }
-  | { page: "settings"; section: SettingsSection };
+  | { page: "settings"; section: SettingsSection }
+  /**
+   * 管理平台：和聊天介面分開的版面，只有管理者能用。section 沒有指定
+   * （網址只有 /admin）時由管理平台決定預設分類。
+   */
+  | { page: "admin"; section?: AdminSection };
 
-export type { SettingsSection };
+export type { AdminSection, SettingsSection };
 
-const SECTIONS = SETTINGS_SECTIONS;
 const listeners = new Set<() => void>();
 
 window.addEventListener("popstate", () => {
@@ -55,9 +64,20 @@ function parse(path: string): Route {
   if (parts[0] === "work") return { page: "work" };
   if (parts[0] === "chats") return { page: "chats" };
   if (parts[0] === "p" && parts[1]) return { page: "category", id: parts[1] };
+  if (parts[0] === "admin") {
+    return { page: "admin", section: adminSection(parts[1]) };
+  }
   if (parts[0] === "settings") {
-    const section = SECTIONS.find((item) => item === parts[1]);
-    return { page: "settings", section: section ?? "permissions" };
+    // 舊網址 /settings/model、/settings/permissions、/settings/members
+    // 搬到管理平台了，管理平台會把網址換成 /admin/<分類>。
+    const moved = adminSection(parts[1]);
+    if (moved) return { page: "admin", section: moved };
+    const section = SETTINGS_SECTIONS.find((item) => item === parts[1]);
+    return { page: "settings", section: section ?? "tools" };
   }
   return { page: "new" };
+}
+
+function adminSection(value: string | undefined): AdminSection | undefined {
+  return ADMIN_SECTIONS.find((item) => item === value);
 }

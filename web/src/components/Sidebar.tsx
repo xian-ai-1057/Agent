@@ -1,5 +1,6 @@
 /**
  * 左側欄：新對話、搜尋、工作中、對話紀錄、專案、最近的對話、設定。
+ * 管理者另外有「管理平台」的入口（要登入時在帳號選單裡）。
  *
  * 伺服器支援專案時（features.categories），「專案」列出自己建立的專案，
  * 點了打開專案頁，旁邊的 ＋ 新增專案；對話的 ⋮ 選單可以移到專案。不支援
@@ -20,7 +21,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { SessionSummary } from "../../../src/web/protocol.ts";
-import { settingsHome } from "../auth.ts";
+import { canAdmin, currentUser } from "../auth.ts";
 import { navigate, type Route } from "../router.ts";
 import {
   createCategory,
@@ -40,6 +41,7 @@ import {
   MoveIcon,
   PenIcon,
   SearchIcon,
+  ShieldIcon,
   TrashIcon,
 } from "./Icons.tsx";
 import { ConfirmDialog } from "./shell/Dialog.tsx";
@@ -285,13 +287,21 @@ export function Sidebar({
 
       <div className="side-footer">
         <Link
-          to={settingsHome(project)}
+          to="/settings/tools"
           className={`side-item ${route.page === "settings" ? "active" : ""}`}
           current={route.page === "settings"}
         >
           <GearIcon />
           <span className="grow">設定</span>
         </Link>
+        {/* 要登入時管理平台在帳號選單裡；不必登入（只有自己一個人）時沒有
+            帳號選單，直接放在這裡。 */}
+        {canAdmin(project) && !currentUser(project) && (
+          <Link to="/admin" className="side-item">
+            <ShieldIcon />
+            <span className="grow">管理平台</span>
+          </Link>
+        )}
         <UserMenu />
       </div>
 

@@ -1,6 +1,7 @@
 /**
  * 側欄底部登入的人（多人帳號模式才顯示）：頭像、名稱、管理者標籤，
- * 點了打開選單，可以修改密碼或登出。
+ * 點了打開選單，可以修改密碼或登出。管理者在聊天介面多一個「管理平台」，
+ * 在管理平台裡則是「回到聊天」（放在側欄，這裡不重複）。
  */
 
 import {
@@ -21,8 +22,9 @@ import {
   type PasswordForm,
   passwordFormErrors,
 } from "../../auth.ts";
+import { navigate, useRoute } from "../../router.ts";
 import { signOut, useStore } from "../../store.ts";
-import { KeyIcon, LogoutIcon } from "../Icons.tsx";
+import { KeyIcon, LogoutIcon, ShieldIcon } from "../Icons.tsx";
 import { Modal } from "./Dialog.tsx";
 import { Field } from "./Field.tsx";
 import { FloatingMenu } from "./FloatingMenu.tsx";
@@ -30,6 +32,7 @@ import { showToast } from "./toast.tsx";
 
 export function UserMenu() {
   const user = useStore((s) => currentUser(s.project));
+  const inAdmin = useRoute().page === "admin";
   const [anchor, setAnchor] = useState<HTMLElement>();
   const [changing, setChanging] = useState(false);
   const close = useCallback(() => setAnchor(undefined), []);
@@ -58,6 +61,20 @@ export function UserMenu() {
           label="帳號選項"
           onClose={close}
         >
+          {user.role === "admin" && !inAdmin && (
+            <button
+              type="button"
+              role="menuitem"
+              className="menu-item"
+              onClick={() => {
+                close();
+                navigate("/admin");
+              }}
+            >
+              <ShieldIcon size={15} />
+              管理平台
+            </button>
+          )}
           <button
             type="button"
             role="menuitem"

@@ -6,9 +6,13 @@
  *
  * 多人帳號模式下任何 API 回 401 時只顯示登入畫面；網址不變，登入後
  * 回到原本的頁面。
+ *
+ * /admin 開頭的網址是管理平台：另一套版面，不顯示聊天的側欄。聊天介面
+ * 對管理者與成員都一樣。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AdminApp } from "./components/admin/AdminApp.tsx";
 import { CategoryView, ChatsView } from "./components/ChatsView.tsx";
 import { Conversation } from "./components/Conversation.tsx";
 import { MenuIcon, PenIcon } from "./components/Icons.tsx";
@@ -32,12 +36,14 @@ function pageTitle(route: Route, state: State): string {
     return state.categories.find((c) => c.id === route.id)?.name ?? "專案";
   }
   if (route.page === "settings") return "設定";
+  if (route.page === "admin") return "管理平台";
   return "新對話";
 }
 
 export function App() {
   const needsLogin = useStore((s) => s.needsLogin);
   const needsLocalKey = useStore((s) => s.needsLocalKey === true);
+  const route = useRoute();
   // 要登入時不連 SSE；登入後重新連上，伺服器的 hello 會讓畫面重新讀取。
   useEffect(() => (needsLogin ? undefined : connect()), [needsLogin]);
   if (needsLogin) {
@@ -48,13 +54,32 @@ export function App() {
       </>
     );
   }
+  if (route.page === "admin") {
+    return (
+      <>
+        <AdminApp section={route.section} />
+        <Toaster />
+        <ConnectionBanner />
+      </>
+    );
+  }
   return <Shell />;
+}
+
+/** 和伺服器的連線中斷或讀取失敗時，畫面上方的提示。 */
+function ConnectionBanner() {
+  const connected = useStore((s) => s.connected);
+  const loadError = useStore((s) => s.loadError);
+  if (connected && !loadError) return null;
+  return (
+    <div className="banner banner-fixed" role="status">
+      {loadError ?? "和 harness web 的連線中斷了，正在重新連線…"}
+    </div>
+  );
 }
 
 function Shell() {
   const route = useRoute();
-  const connected = useStore((s) => s.connected);
-  const loadError = useStore((s) => s.loadError);
   const searchEnabled = useStore((s) => s.project?.features?.search === true);
   const title = useStore((s) => pageTitle(route, s));
   const [drawer, setDrawer] = useState(false);
@@ -179,11 +204,7 @@ function Shell() {
       </div>
       {searching && <SearchDialog onClose={() => setSearching(false)} />}
       <Toaster />
-      {(!connected || loadError) && (
-        <div className="banner banner-fixed" role="status">
-          {loadError ?? "和 harness web 的連線中斷了，正在重新連線…"}
-        </div>
-      )}
+      <ConnectionBanner />
     </div>
   );
 }

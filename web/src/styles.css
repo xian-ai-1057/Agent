@@ -2996,17 +2996,6 @@ h3 {
   width: fit-content;
 }
 
-/* 成員看的設定頁：說明這些設定由管理者管理。 */
-.settings-note {
-  margin: 10px 0 0;
-  padding: 8px 12px;
-  border-radius: var(--r-md);
-  background: var(--soft);
-  color: var(--ink-2);
-  font-size: 13px;
-  width: fit-content;
-}
-
 .members-head {
   display: flex;
   flex-wrap: wrap;
@@ -3548,4 +3537,78 @@ h3 {
   white-space: nowrap;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* ── 管理平台（/admin）────────────────────────────── */
+
+/* 和聊天介面同樣的外框，左邊換成管理平台自己的選單。 */
+.admin-nav {
+  flex: 0 0 232px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 4px;
+  min-height: 0;
+}
+
+.admin-links {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 品牌旁的「管理平台」：紅框小標籤，一眼分得出不是聊天介面。 */
+.admin-tag {
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-pill);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* 窄螢幕：選單改成頁面上方一列，可以左右捲動。 */
+@media (max-width: 760px) {
+  .admin-app {
+    padding-top: 8px;
+  }
+  .admin-nav {
+    flex: none;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    padding: 0 0 8px;
+    overflow-x: auto;
+  }
+  /* 品牌不顯示，頁面標題列已經寫著「管理平台」。 */
+  .admin-nav .side-brand {
+    display: none;
+  }
+  .admin-links {
+    flex: none;
+    flex-direction: row;
+  }
+  .admin-nav .side-item {
+    width: auto;
+    white-space: nowrap;
+  }
+  .admin-nav .side-footer {
+    display: flex;
+    gap: 4px;
+    padding: 0 0 0 4px;
+    border-top: 0;
+    border-left: 1px solid var(--line-2);
+  }
+  .admin-nav .side-user .grow,
+  .admin-nav .side-user .badge {
+    display: none;
+  }
+  /* 管理平台沒有聊天的頂端列，頁面自己的標題要留著。 */
+  .admin-app .main-header .main-title {
+    visibility: visible;
+  }
 }

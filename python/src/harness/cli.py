@@ -318,7 +318,7 @@ def _command_web(args: argparse.Namespace, loaded: project_lib.Project) -> int:
             print(_login_note(loaded.root, password, password_note))
         agent = loaded.agents[loaded.default_agent]
         if not providers.is_ready(agent.model or llm.default_model()):
-            print("還沒有設定模型的金鑰：打開網頁後依畫面選供應商、貼上金鑰。")
+            print("還沒有設定模型的金鑰：打開網頁後到管理平台（/admin/model）選供應商、貼上金鑰。")
         print("按 Ctrl-C 結束。", flush=True)
 
     try:

@@ -1,5 +1,5 @@
 /**
- * 設定 → 成員（多人帳號模式，只有管理者看得到）：列出成員，新增成員、
+ * 管理平台 → 成員（多人帳號模式，只有管理者看得到）：列出成員，新增成員、
  * 重設密碼、換角色、停用或啟用。
  *
  * 密碼由伺服器產生，新增或重設後只顯示這一次，請管理者交給對方。
@@ -80,7 +80,7 @@ export function Members() {
     setBusy(member.id);
     try {
       replace(await api.updateMember(member.id, changes));
-      // 改了自己的角色：側欄與設定頁看得到的東西跟著變。
+      // 改了自己的角色：帳號選單與管理平台看得到的東西跟著變。
       if (member.id === me?.id) void refreshProject();
     } catch (error) {
       setRowError({ id: member.id, message: (error as Error).message });
