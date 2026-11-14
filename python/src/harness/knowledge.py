@@ -1,13 +1,21 @@
 """知識庫：讓 agent 從文件裡找答案並附上出處（RAG）。
 
 流程：
-    1. 讀取資料夾裡的文件（.md、.txt，裝了 pypdf 時也支援 .pdf）。
+    1. 讀取資料夾裡的文件，交給依副檔名選的解析器（parser）轉成文字：
+       .md、.txt、.docx、.pptx、.xlsx，裝了 pypdf 時也支援 .pdf。解析
+       是可以替換的一步（Knowledge(parsers=...)），之後要換成更好的
+       文件解析服務時，只要換掉這一步。
     2. 依段落切成片段，記下來源檔案、所在標題或頁碼。
     3. 搜尋時用關鍵字比對（BM25，不需要任何模型）；有設定 embedding
        模型時再加上語意檢索，兩者的排名合併（hybrid search）。
     4. 有設定相似度門檻時，丟掉與問題不夠相似的片段。
     5. 有設定 reranker 時，用它重新評估前幾名候選的相關度並重新排序。
     6. 以 search_knowledge 工具提供給 agent，結果附上來源讓 agent 引用。
+
+一個專案可以有好幾個知識庫（KnowledgeBase：識別碼、名稱、說明加上
+一個 Knowledge），各自有資料夾與檢索設定。search_tool 把好幾個知識庫
+包成一個 search_knowledge 工具：分別搜尋後合併排序，結果標出來自哪個
+知識庫。
 
 檔案有變動時，下次搜尋會自動重建索引。embedding 存在向量資料庫裡
 （預設是內建的 SQLite 檔案，見 harness.vectorstore），以片段內容識別，
@@ -31,9 +39,13 @@ import math
 import pathlib
 import re
 import weakref
+import zipfile
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Collection
+from collections.abc import Sequence
 from typing import Any
+from xml.etree import ElementTree
 
 import yaml
 
@@ -44,6 +56,7 @@ from harness import vectorstore
 
 TEXT_SUFFIXES = (".md", ".markdown", ".txt")
 PDF_SUFFIX = ".pdf"
+OFFICE_SUFFIXES = (".docx", ".pptx", ".xlsx")
 LABELS_FILE = "labels.yaml"
 TOOL_NAME = "search_knowledge"
 VECTOR_FILE = "vectors.sqlite3"
@@ -57,6 +70,10 @@ _B = 0.75
 _RRF_K = 60
 # 語意檢索至少取這麼多名參與排名合併。
 _VECTOR_POOL = 50
+# Office 檔是 zip：每個 XML 最多讀這麼多位元組，避免壓縮炸彈。
+_OFFICE_PART_LIMIT = 50 * 1024 * 1024
+# 試算表每個工作表最多讀幾列。
+_SHEET_ROW_LIMIT = 20_000
 
 _WORD = re.compile(
     r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
@@ -67,6 +84,27 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 EmbedFn = Callable[[list[str]], Awaitable[list[list[float]]]]
 RerankFn = Callable[[str, list[str]], Awaitable[list[float]]]
 LabelFilter = Callable[[datatypes.RunContext], list[str] | None]
+
+
+@dataclasses.dataclass
+class Section:
+    """解析器從文件讀出的一段文字，之後再切成片段。
+
+    Attributes:
+        text: 文字內容；Markdown 標題會記成片段的位置。
+        location: 在文件裡的位置（例如「第 3 頁」），沒有則為空字串。
+        labels: 文件自己帶的存取標籤（例如 Markdown 的 frontmatter）。
+    """
+
+    text: str
+    location: str = ""
+    labels: tuple[str, ...] = ()
+
+
+# 解析器：讀一個檔案，回傳它的文字段落。讀不了時丟出 OSError、
+# UnicodeDecodeError、ImportError 或 ValueError，該檔案會被略過並記在
+# warnings。
+Parser = Callable[[pathlib.Path], list[Section]]
 
 
 @dataclasses.dataclass
@@ -104,12 +142,22 @@ class Hit:
         similarity: 與查詢的語意相似度（餘弦，-1 到 1）；沒有使用
             embedding 或沒有計算時為 None。
         rerank_score: reranker 給的相關度；沒有使用 reranker 時為 None。
+        base: 來自哪個知識庫（顯示名稱）；同時搜尋好幾個知識庫時才有，
+            會出現在出處前面。
     """
 
     chunk: Chunk
     score: float
     similarity: float | None = None
     rerank_score: float | None = None
+    base: str = ""
+
+    @property
+    def citation(self) -> str:
+        """出處；有知識庫名稱時放在前面，例如「人資規章 / leave.md › 特休」。"""
+        if not self.base:
+            return self.chunk.citation
+        return f"{self.base} / {self.chunk.citation}"
 
 
 class Knowledge:
@@ -139,6 +187,10 @@ class Knowledge:
             需要 reranker。
         label_filter: 依執行環境決定可搜尋標籤的函式（例如依
             context.deps 裡的使用者部門）。回傳 None 表示不限制。
+        parsers: 依副檔名（小寫、含點）選的解析器；預設是
+            DEFAULT_PARSERS，傳入的會蓋過同副檔名的預設解析器。
+        exclude: 不讀取的子資料夾（例如放在這個知識庫資料夾裡的其他
+            知識庫）。
         warnings: 建立索引時略過的檔案與原因。
     """
 
@@ -157,6 +209,8 @@ class Knowledge:
         label_filter: LabelFilter | None = None,
         embed_fn: EmbedFn | None = None,
         rerank_fn: RerankFn | None = None,
+        parsers: dict[str, Parser] | None = None,
+        exclude: Collection[str | pathlib.Path] = (),
     ) -> None:
         if chunk_size < 100:
             raise ValueError("chunk_size 至少要 100")
@@ -186,6 +240,8 @@ class Knowledge:
         self.min_similarity = min_similarity
         self.min_rerank_score = min_rerank_score
         self.label_filter = label_filter
+        self.parsers = {**DEFAULT_PARSERS, **(parsers or {})}
+        self.exclude = tuple(pathlib.Path(item) for item in exclude)
         self.warnings: list[str] = []
         self._embed_fn = embed_fn
         self._rerank_fn = rerank_fn
@@ -410,6 +466,29 @@ class Knowledge:
             self._chunks = chunks
             self._signature = signature
 
+    def files(self) -> list[str]:
+        """知識庫資料夾裡的文件（相對路徑，含不支援的格式）。
+
+        不含隱藏檔、labels.yaml 與 exclude 的子資料夾，不需要建立索引。
+        """
+        if self.path is None:
+            return []
+        return [
+            path.relative_to(self.path).as_posix() for path in self._files()
+        ]
+
+    async def documents(self) -> dict[str, dict[str, Any]]:
+        """建立索引並回傳每份文件的片段數與標籤（以相對路徑為鍵）。"""
+        await self._ensure_index()
+        found: dict[str, dict[str, Any]] = {}
+        for chunk in self._chunks:
+            item = found.setdefault(chunk.source, {"chunks": 0, "labels": []})
+            item["chunks"] += 1
+            for label in chunk.labels:
+                if label not in item["labels"]:
+                    item["labels"].append(label)
+        return found
+
     def _current_signature(self) -> tuple[Any, ...]:
         """用檔案的修改時間與大小判斷內容有沒有變。"""
         files = []
@@ -423,19 +502,36 @@ class Knowledge:
         return (tuple(files), len(self._extra))
 
     def _files(self) -> list[pathlib.Path]:
-        """知識庫資料夾裡的所有檔案（不含隱藏檔與 labels.yaml）。"""
+        """知識庫資料夾裡的所有檔案（不含隱藏檔、labels.yaml 與 exclude
+        的子資料夾）。"""
         if self.path is None or not self.path.exists():
             return []
-        return sorted(
-            path
-            for path in self.path.rglob("*")
-            if path.is_file()
-            and path.name != LABELS_FILE
-            and not any(
-                part.startswith(".")
-                for part in path.relative_to(self.path).parts
-            )
-        )
+        excluded = [self._inside(item) for item in self.exclude]
+        found = []
+        for path in self.path.rglob("*"):
+            relative = path.relative_to(self.path)
+            if (
+                not path.is_file()
+                or relative.as_posix() == LABELS_FILE
+                or any(part.startswith(".") for part in relative.parts)
+                or any(
+                    item is not None and relative.is_relative_to(item)
+                    for item in excluded
+                )
+            ):
+                continue
+            found.append(path)
+        return sorted(found)
+
+    def _inside(self, folder: pathlib.Path) -> pathlib.Path | None:
+        """exclude 的資料夾相對於知識庫資料夾的位置；不在裡面時為 None。"""
+        assert self.path is not None
+        if not folder.is_absolute():
+            return folder
+        try:
+            return folder.resolve().relative_to(self.path.resolve())
+        except ValueError:
+            return None
 
     def _labels_path(self) -> pathlib.Path | None:
         if self.path is None:
@@ -448,37 +544,40 @@ class Knowledge:
         chunks: list[Chunk] = []
         for path in self._files():
             source = path.relative_to(self.path).as_posix()
-            suffix = path.suffix.lower()
-            if suffix not in (*TEXT_SUFFIXES, PDF_SUFFIX):
+            parser = self.parsers.get(path.suffix.lower())
+            if parser is None:
                 self.warnings.append(f"{source}：不支援的格式，已略過")
                 continue
             try:
-                chunks += self._read_file(path, source, rules)
-            except (OSError, UnicodeDecodeError, ImportError) as error:
+                sections = parser(path)
+            except (
+                OSError,
+                UnicodeDecodeError,
+                ImportError,
+                ValueError,
+                zipfile.BadZipFile,
+                ElementTree.ParseError,
+            ) as error:
                 self.warnings.append(f"{source}：{error}")
+                continue
+            chunks += self._split(sections, source, _labels_for(source, rules))
         return chunks
 
-    def _read_file(
-        self, path: pathlib.Path, source: str, rules: dict[str, list[str]]
+    def _split(
+        self, sections: list[Section], source: str, labels: list[str]
     ) -> list[Chunk]:
-        """讀取一個檔案並切成片段。"""
-        labels = set(_labels_for(source, rules))
-        if path.suffix.lower() == PDF_SUFFIX:
-            pages = _read_pdf(path)
-            chunks = []
-            for number, page in enumerate(pages, start=1):
-                chunks += split_text(
-                    page,
-                    source,
-                    tuple(sorted(labels)),
-                    self.chunk_size,
-                    location=f"第 {number} 頁",
-                )
-            return chunks
-        text = path.read_text(encoding="utf-8")
-        meta, body = _split_frontmatter(text)
-        labels.update(str(label) for label in meta.get("labels") or [])
-        return split_text(body, source, tuple(sorted(labels)), self.chunk_size)
+        """把解析出的段落切成片段，標上 labels.yaml 與文件自己的標籤。"""
+        chunks = []
+        for section in sections:
+            merged = tuple(sorted({*labels, *section.labels}))
+            chunks += split_text(
+                section.text,
+                source,
+                merged,
+                self.chunk_size,
+                location=section.location,
+            )
+        return chunks
 
     def _label_rules(self) -> dict[str, list[str]]:
         """讀取 labels.yaml。"""
@@ -608,6 +707,210 @@ class Knowledge:
         path.unlink(missing_ok=True)
 
 
+@dataclasses.dataclass
+class KnowledgeBase:
+    """專案裡的一個知識庫：識別碼、給人看的名稱與說明，加上檢索用的
+    Knowledge。
+
+    Attributes:
+        id: 識別碼（英數字、- 與 _），也是預設的資料夾名稱。
+        name: 顯示名稱，會出現在搜尋結果的出處前面。
+        description: 說明，給 agent 判斷要不要搜尋，也顯示在網頁上。
+        knowledge: 這個知識庫的文件與檢索設定。
+    """
+
+    id: str
+    name: str
+    knowledge: "Knowledge"
+    description: str = ""
+
+
+@dataclasses.dataclass
+class KnowledgeTool(tools_lib.Tool):
+    """search_tool 建立的 search_knowledge 工具，記得自己搜尋哪些知識庫。
+
+    網頁版依使用者所屬的群組與對話勾選的知識庫，用 narrow_tool 重新
+    建立範圍較小的工具。
+
+    Attributes:
+        bases: 搜尋的知識庫。
+        labels: 可以搜尋的標籤；None 表示不限制。
+        top_k: 每次搜尋最多回傳幾筆。
+    """
+
+    bases: tuple[KnowledgeBase, ...] = ()
+    labels: tuple[str, ...] | None = None
+    top_k: int = 5
+
+
+def search_tool(
+    bases: Sequence[KnowledgeBase],
+    labels: list[str] | None = None,
+    top_k: int = 5,
+) -> KnowledgeTool:
+    """把一個或好幾個知識庫包成 agent 可以呼叫的 search_knowledge 工具。
+
+    好幾個知識庫時分別搜尋再合併排序（見 search_bases），每筆結果的
+    出處前面加上知識庫名稱；工具說明會列出每個知識庫的名稱與說明，
+    讓 agent 知道裡面有什麼。
+
+    Args:
+        bases: 要搜尋的知識庫，至少一個。
+        labels: 可以搜尋的標籤；None 表示不限制。和知識庫的
+            label_filter 同時設定時，兩者都允許的標籤才搜尋得到。
+        top_k: 每次搜尋最多回傳幾筆。
+
+    Returns:
+        search_knowledge 工具。
+
+    Raises:
+        ValueError: 沒有給任何知識庫。
+    """
+    if not bases:
+        raise ValueError("search_tool 至少要有一個知識庫")
+    chosen = tuple(bases)
+    fixed = None if labels is None else tuple(labels)
+
+    async def search_knowledge(
+        context: datatypes.RunContext, query: str
+    ) -> str:
+        """搜尋知識庫，取得與問題相關的文件片段與出處。
+
+        回答公司內部規定、產品資訊等問題前先搜尋；回答時只根據
+        找到的內容，並註明出處（方括號裡的來源）。找不到時直接說
+        知識庫裡沒有相關資料，不要自己編造。
+
+        Args:
+            query: 要找的內容，寫成完整的問題或關鍵字，例如
+                「特休假怎麼計算」。
+        """
+        hits = await search_bases(
+            chosen,
+            query,
+            top_k=top_k,
+            labels=None if fixed is None else list(fixed),
+            context=context,
+        )
+        return format_hits(hits)
+
+    made = tools_lib.tool(search_knowledge, name=TOOL_NAME)
+    description = made.description
+    if len(chosen) > 1 or chosen[0].description:
+        listed = "\n".join(
+            f"- {base.name or base.id}"
+            + (f"：{base.description}" if base.description else "")
+            for base in chosen
+        )
+        description += f"\n\n會搜尋這些知識庫：\n{listed}"
+    return KnowledgeTool(
+        name=made.name,
+        description=description,
+        parameters=made.parameters,
+        func=made.func,
+        needs_approval=False,
+        args_model=made.args_model,
+        context_param=made.context_param,
+        bases=chosen,
+        labels=fixed,
+        top_k=top_k,
+    )
+
+
+def narrow_tool(
+    item: tools_lib.Tool,
+    bases: Collection[str] | None = None,
+    labels: Collection[str] | None = None,
+    replace_bases: Sequence[KnowledgeBase] | None = None,
+) -> tools_lib.Tool | None:
+    """把 search_tool 建立的工具換成範圍較小的版本。
+
+    Args:
+        item: 原本的工具；不是 KnowledgeTool 時原樣回傳。
+        bases: 只留這些識別碼的知識庫；None 表示不限制。
+        labels: 和原本的標籤取交集；None 表示不再限制。
+        replace_bases: 改搜尋這些知識庫（例如使用者在對話裡勾選的），
+            再套用 bases 的限制；None 表示沿用原本的。
+
+    Returns:
+        新的工具；一個知識庫都不剩時為 None（呼叫端應該拿掉這個工具）。
+    """
+    if not isinstance(item, KnowledgeTool):
+        return item
+    chosen = list(item.bases if replace_bases is None else replace_bases)
+    if bases is not None:
+        allowed = set(bases)
+        chosen = [base for base in chosen if base.id in allowed]
+    if not chosen:
+        return None
+    fixed = None if item.labels is None else list(item.labels)
+    merged = _combine_labels(fixed, None if labels is None else sorted(labels))
+    unchanged = (
+        replace_bases is None
+        and len(chosen) == len(item.bases)
+        and merged == fixed
+    )
+    if unchanged:
+        return item
+    return search_tool(chosen, merged, item.top_k)
+
+
+async def search_bases(
+    bases: Sequence[KnowledgeBase],
+    query: str,
+    top_k: int = 5,
+    labels: list[str] | None = None,
+    context: datatypes.RunContext | None = None,
+) -> list[Hit]:
+    """同時搜尋好幾個知識庫，合併成一份依相關度排序的結果。
+
+    各知識庫的分數彼此不能比較（切片、檢索方式不同），所以合併時：
+
+    - 每個知識庫都用同一個 reranker 時，依 rerank 分數排序；
+    - 否則依各自的名次輪流取（Reciprocal Rank Fusion），名次相同時
+      前面的知識庫優先。
+
+    Args:
+        bases: 要搜尋的知識庫。
+        query: 要找的內容。
+        top_k: 最多回傳幾筆。
+        labels: 允許的標籤；None 表示不限制。
+        context: 執行環境，用來套用各知識庫的 label_filter。
+
+    Returns:
+        合併後的結果；好幾個知識庫時每筆標上知識庫名稱（Hit.base）。
+    """
+    if not bases:
+        return []
+
+    async def one(base: KnowledgeBase) -> list[Hit]:
+        allowed = labels
+        if context is not None:
+            allowed = _combine_labels(
+                labels, base.knowledge._dynamic_labels(context)
+            )
+        return await base.knowledge.search(query, top_k=top_k, labels=allowed)
+
+    results = await asyncio.gather(*(one(base) for base in bases))
+    if len(bases) == 1:
+        return results[0]
+    for base, hits in zip(bases, results, strict=True):
+        for hit in hits:
+            hit.base = base.name or base.id
+    rerankers = {base.knowledge.reranker for base in bases}
+    hits = [hit for found in results for hit in found]
+    same_reranker = len(rerankers) == 1 and None not in rerankers
+    if same_reranker and all(hit.rerank_score is not None for hit in hits):
+        hits.sort(key=lambda hit: hit.rerank_score or 0.0, reverse=True)
+        return hits[:top_k]
+    ranked = [
+        (1 / (_RRF_K + rank + 1), -order, hit)
+        for order, found in enumerate(results)
+        for rank, hit in enumerate(found)
+    ]
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [hit for _, _, hit in ranked[:top_k]]
+
+
 def tokenize(text: str) -> list[str]:
     """把文字切成檢索用的詞。
 
@@ -707,7 +1010,7 @@ def format_hits(hits: list[Hit], show_scores: bool = False) -> str:
         return "知識庫裡沒有找到相關的內容。"
     parts = []
     for number, hit in enumerate(hits, start=1):
-        header = f"[{number}] 來源：{hit.chunk.citation}"
+        header = f"[{number}] 來源：{hit.citation}"
         if show_scores:
             header += _describe_scores(hit)
         parts.append(f"{header}\n{hit.chunk.text}")
@@ -758,8 +1061,15 @@ def _labels_for(source: str, rules: dict[str, list[str]]) -> list[str]:
     return found
 
 
-def _read_pdf(path: pathlib.Path) -> list[str]:
-    """讀取 PDF 每一頁的文字。"""
+def parse_markdown(path: pathlib.Path) -> list[Section]:
+    """Markdown 與純文字：開頭的 frontmatter 可以寫 labels: [hr]。"""
+    meta, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+    labels = tuple(str(label) for label in meta.get("labels") or [])
+    return [Section(body, labels=labels)]
+
+
+def parse_pdf(path: pathlib.Path) -> list[Section]:
+    """PDF：一頁一段，位置是頁碼。需要 pypdf。"""
     try:
         import pypdf
     except ImportError as error:
@@ -767,7 +1077,172 @@ def _read_pdf(path: pathlib.Path) -> list[str]:
             "讀取 PDF 需要 pypdf，請執行 pip install pypdf"
         ) from error
     reader = pypdf.PdfReader(str(path))
-    return [page.extract_text() or "" for page in reader.pages]
+    return [
+        Section(page.extract_text() or "", f"第 {number} 頁")
+        for number, page in enumerate(reader.pages, start=1)
+    ]
+
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_PACKAGE_R = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
+def parse_docx(path: pathlib.Path) -> list[Section]:
+    """Word：段落照順序讀出，標題樣式轉成 Markdown 標題（成為片段的
+    位置），表格每一列寫成「欄 | 欄」。只用標準函式庫。"""
+    with zipfile.ZipFile(path) as archive:
+        root = _office_xml(archive, "word/document.xml")
+    body = root.find(f"{_W}body")
+    lines: list[str] = []
+    for element in body if body is not None else []:
+        if element.tag == f"{_W}p":
+            text = _docx_text(element)
+            level = _heading_level(element)
+            if text and level:
+                text = f"{'#' * level} {text}"
+            lines.append(text)
+        elif element.tag == f"{_W}tbl":
+            for row in element.iter(f"{_W}tr"):
+                cells = [_docx_text(cell) for cell in row.iter(f"{_W}tc")]
+                lines.append(" | ".join(cells))
+            lines.append("")
+    # 段落之間空一行，split_text 才會把它們當成不同段落。
+    return [Section("\n\n".join(line for line in lines if line.strip()))]
+
+
+def parse_pptx(path: pathlib.Path) -> list[Section]:
+    """PowerPoint：一張投影片一段，位置是投影片編號。"""
+    with zipfile.ZipFile(path) as archive:
+        names = [
+            name
+            for name in archive.namelist()
+            if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+        ]
+        names.sort(key=lambda name: int(re.sub(r"\D", "", name)))
+        sections = []
+        for number, name in enumerate(names, start=1):
+            root = _office_xml(archive, name)
+            paragraphs = [
+                "".join(item.text or "" for item in paragraph.iter(f"{_A}t"))
+                for paragraph in root.iter(f"{_A}p")
+            ]
+            text = "\n".join(line for line in paragraphs if line.strip())
+            if text:
+                sections.append(Section(text, f"第 {number} 張投影片"))
+    return sections
+
+
+def parse_xlsx(path: pathlib.Path) -> list[Section]:
+    """Excel：一個工作表一段，每一列寫成以 | 分隔的一行，位置是工作表
+    名稱。公式只讀存好的結果；每個工作表最多讀 _SHEET_ROW_LIMIT 列。"""
+    with zipfile.ZipFile(path) as archive:
+        shared = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            strings = _office_xml(archive, "xl/sharedStrings.xml")
+            shared = [
+                "".join(item.text or "" for item in entry.iter(f"{_S}t"))
+                for entry in strings.iter(f"{_S}si")
+            ]
+        sections = []
+        for name, target in _xlsx_sheets(archive):
+            sheet = _office_xml(archive, target)
+            rows = []
+            for row in sheet.iter(f"{_S}row"):
+                if len(rows) >= _SHEET_ROW_LIMIT:
+                    break
+                cells = [_xlsx_cell(cell, shared) for cell in row]
+                if any(cells):
+                    rows.append(" | ".join(cells).rstrip(" |"))
+            if rows:
+                sections.append(Section("\n".join(rows), name))
+    return sections
+
+
+def _office_xml(archive: zipfile.ZipFile, name: str) -> ElementTree.Element:
+    """讀出 Office 檔裡的一個 XML；太大時拒絕（避免壓縮炸彈）。"""
+    try:
+        info = archive.getinfo(name)
+    except KeyError as error:
+        raise ValueError(f"檔案內容不完整，缺少 {name}") from error
+    if info.file_size > _OFFICE_PART_LIMIT:
+        raise ValueError("檔案內容太大，已略過")
+    with archive.open(info) as handle:
+        data = handle.read(_OFFICE_PART_LIMIT + 1)
+    if len(data) > _OFFICE_PART_LIMIT:
+        raise ValueError("檔案內容太大，已略過")
+    return ElementTree.fromstring(data)
+
+
+def _docx_text(element: ElementTree.Element) -> str:
+    """Word 元素裡的文字（含換行與定位字元）。"""
+    parts = []
+    for item in element.iter():
+        if item.tag == f"{_W}t":
+            parts.append(item.text or "")
+        elif item.tag == f"{_W}tab":
+            parts.append("\t")
+        elif item.tag in (f"{_W}br", f"{_W}cr"):
+            parts.append("\n")
+    return "".join(parts).strip()
+
+
+def _heading_level(paragraph: ElementTree.Element) -> int:
+    """段落是標題時回傳層級（1 到 6），否則 0。"""
+    style = paragraph.find(f"{_W}pPr/{_W}pStyle")
+    value = style.get(f"{_W}val", "") if style is not None else ""
+    match = re.fullmatch(r"(?i)(?:heading|標題)\s*(\d)", value)
+    if match:
+        return min(max(int(match.group(1)), 1), 6)
+    return 1 if value.lower() == "title" else 0
+
+
+def _xlsx_sheets(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
+    """工作表的名稱與在 zip 裡的位置，照活頁簿裡的順序。"""
+    workbook = _office_xml(archive, "xl/workbook.xml")
+    targets: dict[str, str] = {}
+    if "xl/_rels/workbook.xml.rels" in archive.namelist():
+        rels = _office_xml(archive, "xl/_rels/workbook.xml.rels")
+        for rel in rels.iter(f"{_PACKAGE_R}Relationship"):
+            target = rel.get("Target", "").lstrip("/")
+            if not target.startswith("xl/"):
+                target = f"xl/{target}"
+            targets[rel.get("Id", "")] = target
+    found = []
+    for number, sheet in enumerate(workbook.iter(f"{_S}sheet"), start=1):
+        target = targets.get(
+            sheet.get(f"{_R}id", ""), f"xl/worksheets/sheet{number}.xml"
+        )
+        if target in archive.namelist():
+            found.append((sheet.get("name") or f"工作表 {number}", target))
+    return found
+
+
+def _xlsx_cell(cell: ElementTree.Element, shared: list[str]) -> str:
+    """一個儲存格的值（共用字串、內嵌字串或數字）。"""
+    kind = cell.get("t")
+    if kind == "inlineStr":
+        return "".join(item.text or "" for item in cell.iter(f"{_S}t")).strip()
+    value = cell.find(f"{_S}v")
+    text = (value.text or "") if value is not None else ""
+    if kind == "s" and text.isdigit() and int(text) < len(shared):
+        return shared[int(text)].strip()
+    return text.strip()
+
+
+# 預設的解析器。要換掉某種格式（例如改用外部的文件解析服務），把
+# {副檔名: 解析器} 交給 Knowledge(parsers=...)。
+DEFAULT_PARSERS: dict[str, Parser] = {
+    ".md": parse_markdown,
+    ".markdown": parse_markdown,
+    ".txt": parse_markdown,
+    ".pdf": parse_pdf,
+    ".docx": parse_docx,
+    ".pptx": parse_pptx,
+    ".xlsx": parse_xlsx,
+}
 
 
 def _combine_labels(

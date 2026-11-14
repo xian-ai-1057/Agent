@@ -76,6 +76,21 @@ describe("describeDetail", () => {
     ).toBe('這段對話都允許 · {"path": "a.md"}');
   });
 
+  it("知識庫的上傳與設定變更", () => {
+    expect(
+      describeDetail(
+        entry("knowledge.upload", { files: ["a.md"], replace: "a.md" }),
+      ),
+    ).toBe("a.md（換掉 a.md）");
+    expect(
+      describeDetail(
+        entry("knowledge.update", {
+          changes: { chunkSize: 300, maintainers: ["u1"] },
+        }),
+      ),
+    ).toBe("修改了：切片長度、維護者");
+  });
+
   it("登入失敗顯示原因", () => {
     expect(
       describeDetail(entry("auth.login_failed", { reason: "throttled" })),

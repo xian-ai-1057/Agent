@@ -179,6 +179,11 @@ def _build_parser() -> argparse.ArgumentParser:
     knowledge.add_argument(
         "-l", "--labels", help="只搜尋這些標籤（逗號分隔），模擬受限的 agent"
     )
+    knowledge.add_argument(
+        "-b",
+        "--bases",
+        help="只看這些知識庫（識別碼，逗號分隔）；預設是全部",
+    )
     return parser
 
 
@@ -476,39 +481,55 @@ print("工作目錄可寫入：", "是" if os.access(".", os.W_OK) else "否")
 def _command_knowledge(
     args: argparse.Namespace, loaded: project_lib.Project
 ) -> int:
-    """顯示知識庫的索引概況，有查詢時再列出搜尋結果。"""
-    if loaded.knowledge is None:
+    """顯示每個知識庫的索引概況，有查詢時再列出合併後的搜尋結果。"""
+    bases = loaded.knowledge_bases
+    if not bases:
         print("這個專案沒有知識庫。建立 knowledge/ 資料夾並放入文件即可。")
         return 1
+    if args.bases:
+        wanted = [item.strip() for item in args.bases.split(",") if item]
+        unknown = [item for item in wanted if item not in bases]
+        if unknown:
+            print(f"沒有這些知識庫：{unknown}，可用的有：{list(bases)}")
+            return 1
+        bases = {key: bases[key] for key in wanted}
     labels = None
     if args.labels is not None:
         labels = [item.strip() for item in args.labels.split(",") if item]
-    return asyncio.run(_show_knowledge(loaded.knowledge, args.query, labels))
+    return asyncio.run(
+        _show_knowledge(list(bases.values()), args.query, labels)
+    )
 
 
 async def _show_knowledge(
-    kb: knowledge_lib.Knowledge, query: str | None, labels: list[str] | None
+    bases: list[knowledge_lib.KnowledgeBase],
+    query: str | None,
+    labels: list[str] | None,
 ) -> int:
-    """印出知識庫的概況與搜尋結果。"""
-    stats = await kb.stats()
-    mode = "關鍵字 + 語意（embedding）" if stats["embedding"] else "關鍵字"
-    if stats["reranker"]:
-        mode += "，再用 reranker 重新排序"
-    print(
-        f"{stats['sources']} 個檔案、{stats['chunks']} 個片段，檢索方式：{mode}"
-    )
-    thresholds = []
-    if stats["min_similarity"] is not None:
-        thresholds.append(f"相似度 ≥ {stats['min_similarity']}")
-    if stats["min_rerank_score"] is not None:
-        thresholds.append(f"rerank ≥ {stats['min_rerank_score']}")
-    if thresholds:
-        print(f"門檻：{'、'.join(thresholds)}")
-    for warning in stats["warnings"]:
-        print(f"  ⚠ {warning}")
+    """印出每個知識庫的概況與搜尋結果。"""
+    for base in bases:
+        stats = await base.knowledge.stats()
+        mode = "關鍵字 + 語意（embedding）" if stats["embedding"] else "關鍵字"
+        if stats["reranker"]:
+            mode += "，再用 reranker 重新排序"
+        if len(bases) > 1:
+            print(f"【{base.name}】（{base.id}）")
+        print(
+            f"{stats['sources']} 個檔案、{stats['chunks']} 個片段，"
+            f"檢索方式：{mode}"
+        )
+        thresholds = []
+        if stats["min_similarity"] is not None:
+            thresholds.append(f"相似度 ≥ {stats['min_similarity']}")
+        if stats["min_rerank_score"] is not None:
+            thresholds.append(f"rerank ≥ {stats['min_rerank_score']}")
+        if thresholds:
+            print(f"門檻：{'、'.join(thresholds)}")
+        for warning in stats["warnings"]:
+            print(f"  ⚠ {warning}")
     if not query:
         return 0
-    hits = await kb.search(query, labels=labels)
+    hits = await knowledge_lib.search_bases(bases, query, labels=labels)
     print()
     print(knowledge_lib.format_hits(hits, show_scores=True))
     return 0

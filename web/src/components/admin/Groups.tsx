@@ -1,7 +1,7 @@
 /**
  * 管理平台 → 群組（多人帳號模式）：管理者決定每位成員可以使用的
- * agent、工具組與知識庫標籤。模型不在這裡管：誰能用哪些模型、額度與
- * 限流由模型中台（LiteLLM Proxy）決定。
+ * agent、工具組、知識庫與知識庫裡的標籤。模型不在這裡管：誰能用哪些
+ * 模型、額度與限流由模型中台（LiteLLM Proxy）決定。
  *
  * 參考 MaiAgent 的角色與 LiteLLM 的 access group：每位成員自動屬於「所
  * 有人」，另外可以加入其他群組，能用的資源是所屬群組加起來。新建的群組
@@ -34,6 +34,7 @@ import {
   ACCESS_KINDS,
   accessSummary,
   groupDirty,
+  isKnowledgeKind,
   KIND_LABELS,
 } from "./groupAccess.ts";
 
@@ -276,6 +277,7 @@ function GroupEditor({
       description: draft.description.trim(),
       agents: draft.agents,
       toolsets: draft.toolsets,
+      knowledgeBases: draft.knowledgeBases,
       knowledge: draft.knowledge,
     };
     if (!group.builtin) changes.members = draft.members;
@@ -303,6 +305,11 @@ function GroupEditor({
       name: item.name,
       label: item.name,
       hint: item.tools.join("、"),
+    })),
+    knowledgeBases: catalog.knowledgeBases.map((item) => ({
+      name: item.id,
+      label: item.name,
+      hint: item.description || undefined,
     })),
     knowledge: catalog.knowledge.map((name) => ({ name, label: name })),
   };
@@ -342,7 +349,9 @@ function GroupEditor({
         />
       </div>
 
-      {ACCESS_KINDS.map((kind) => (
+      {ACCESS_KINDS.filter(
+        (kind) => !isKnowledgeKind(kind) || catalog.hasKnowledge,
+      ).map((kind) => (
         <AccessField
           key={kind}
           kind={kind}
@@ -426,6 +435,7 @@ function emptyText(kind: AccessKind, catalog: GroupCatalog): string {
       ? "知識庫裡的文件都沒有標籤，所有人都搜尋得到。"
       : "這個專案沒有知識庫。";
   }
+  if (kind === "knowledgeBases") return "這個專案沒有知識庫。";
   return `這個專案沒有${KIND_LABELS[kind]}。`;
 }
 
@@ -470,7 +480,7 @@ function AccessField({
         {all
           ? `所有${KIND_LABELS[kind]}都能用，之後新增的也一樣。`
           : kind === "knowledge"
-            ? "只能搜尋勾選的標籤；沒有標籤的文件所有人都搜尋得到。"
+            ? "細部過濾：在開放的知識庫裡，只能搜尋勾選的標籤；沒有標籤的文件所有人都搜尋得到。"
             : chosen.length === 0
               ? `沒有勾選：這個群組不開放任何${KIND_LABELS[kind]}。`
               : `已勾選 ${chosen.length} 項。`}

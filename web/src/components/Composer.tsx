@@ -339,8 +339,10 @@ export function Composer({
 const CHIP_EXIT_MS = 140;
 /** 「已停用 N 個工具」標籤的 key（skill 名稱不會以冒號開頭）。 */
 const TOOLS_CHIP = ":tools";
+/** 「知識庫：…」標籤的 key。 */
+const KNOWLEDGE_CHIP = ":knowledge";
 
-/** 選了的 skills 與停用的工具，顯示成可以移除的小標籤。 */
+/** 選了的 skills、另外勾選的知識庫與停用的工具，顯示成可以移除的小標籤。 */
 function OptionChips({ options }: { options: ComposerOptions }) {
   const [leaving, setLeaving] = useState<string[]>([]);
   // 淡出後才真的移除。連續移除好幾個時，每次都要從最新的選項算起，
@@ -359,12 +361,21 @@ function OptionChips({ options }: { options: ComposerOptions }) {
     value.tools === null
       ? 0
       : tools.filter((tool) => !value.tools?.includes(tool.name)).length;
-  if (value.skills.length === 0 && disabled === 0) return null;
+  const picked = value.knowledge
+    ? options.knowledgeBases
+        .filter((base) => value.knowledge?.includes(base.id))
+        .map((base) => base.name)
+    : undefined;
+  if (value.skills.length === 0 && disabled === 0 && !picked) return null;
 
   const apply = (key: string) => {
     const current = latest.current;
     if (key === TOOLS_CHIP) {
       current.onChange({ tools: null });
+      return;
+    }
+    if (key === KNOWLEDGE_CHIP) {
+      current.onChange({ knowledge: null });
       return;
     }
     current.onChange({
@@ -373,7 +384,9 @@ function OptionChips({ options }: { options: ComposerOptions }) {
   };
 
   const remove = (key: string) => {
-    if (key !== TOOLS_CHIP) removed.current.add(key);
+    if (key !== TOOLS_CHIP && key !== KNOWLEDGE_CHIP) {
+      removed.current.add(key);
+    }
     const reduce = window.matchMedia?.(
       "(prefers-reduced-motion: reduce)",
     ).matches;
@@ -406,6 +419,23 @@ function OptionChips({ options }: { options: ComposerOptions }) {
           </button>
         </li>
       ))}
+      {picked && (
+        <li
+          className={`ch-chip${leaving.includes(KNOWLEDGE_CHIP) ? " leaving" : ""}`}
+        >
+          <span className="ch-chip-kind">知識庫</span>
+          <span className="ch-chip-name">
+            {picked.length > 0 ? picked.join("、") : "不搜尋"}
+          </span>
+          <button
+            type="button"
+            aria-label="改回 agent 預設的知識庫"
+            onClick={() => remove(KNOWLEDGE_CHIP)}
+          >
+            <CloseIcon size={12} />
+          </button>
+        </li>
+      )}
       {disabled > 0 && (
         <li
           className={`ch-chip${leaving.includes(TOOLS_CHIP) ? " leaving" : ""}`}

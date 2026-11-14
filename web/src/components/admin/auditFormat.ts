@@ -29,7 +29,15 @@ const FIELD_LABELS: Record<string, string> = {
   members: "成員",
   agents: "Agent",
   toolsets: "工具組",
+  knowledgeBases: "知識庫",
   knowledge: "知識庫標籤",
+  maintainers: "維護者",
+  embeddingModel: "Embedding 模型",
+  chunkSize: "切片長度",
+  reranker: "Reranker",
+  rerankCandidates: "候選數",
+  minSimilarity: "相似度門檻",
+  minRerankScore: "Rerank 分數門檻",
   displayName: "顯示名稱",
   role: "角色",
   disabled: "狀態",
@@ -108,6 +116,18 @@ export function describeDetail(entry: AuditEntry): string {
       return describeChanges(detail.changes);
     case "group.update":
       return `修改了：${fieldList(detail.changes)}`;
+    case "knowledge.create":
+      return `名稱：${String(detail.name ?? "")}`;
+    case "knowledge.update":
+      return `修改了：${fieldList(detail.changes)}`;
+    case "knowledge.upload": {
+      const files = Array.isArray(detail.files) ? detail.files.join("、") : "";
+      return detail.replace
+        ? `${files}（換掉 ${String(detail.replace)}）`
+        : files;
+    }
+    case "knowledge.document_delete":
+      return String(detail.path ?? "");
     case "approval.decide": {
       const decision =
         DECISION_LABELS[String(detail.decision)] ?? String(detail.decision);

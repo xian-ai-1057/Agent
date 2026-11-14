@@ -15,6 +15,7 @@ import {
 import { createPortal } from "react-dom";
 import { api } from "../../api.ts";
 import {
+  canAdmin,
   currentUser,
   initialOf,
   MIN_PASSWORD,
@@ -31,7 +32,8 @@ import { FloatingMenu } from "./FloatingMenu.tsx";
 import { showToast } from "./toast.tsx";
 
 export function UserMenu() {
-  const user = useStore((s) => currentUser(s.project));
+  const project = useStore((s) => s.project);
+  const user = currentUser(project);
   const inAdmin = useRoute().page === "admin";
   const [anchor, setAnchor] = useState<HTMLElement>();
   const [changing, setChanging] = useState(false);
@@ -61,7 +63,7 @@ export function UserMenu() {
           label="帳號選項"
           onClose={close}
         >
-          {user.role === "admin" && !inAdmin && (
+          {canAdmin(project) && !inAdmin && (
             <button
               type="button"
               role="menuitem"

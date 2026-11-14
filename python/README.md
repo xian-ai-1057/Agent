@@ -639,6 +639,13 @@ knowledge: true       # 這個 agent 可以用 search_knowledge 搜尋知識庫
 agent 會得到 `search_knowledge` 工具，搜尋結果附上來源檔案與所在標題
 （PDF 則是頁碼），例如 `[1] 來源：hr/leave.md › 請假規定 › 特休`。
 
+文件多了以後，可以依主題或部門分成好幾個知識庫（`harness.yaml` 的
+`knowledgeBases`），各自有資料夾、檢索設定與維護者；agent 寫
+`knowledge: [hr, it]` 就同時搜尋兩個，結果合併排序並標出知識庫名稱。
+網頁版可以在「管理平台 → 知識庫」新增知識庫、上傳文件與試搜尋，
+群組決定成員能搜尋哪些知識庫（見
+[說明文件的「分成好幾個知識庫」](https://agent-harness-docs-ten.vercel.app/advanced/knowledge#分成好幾個知識庫)）。
+
 - **檢索方式。** 預設用關鍵字比對（BM25），不需要任何模型，中文也能
   用（以單字與相鄰兩字比對，不用另外斷詞）。設定 `embeddingModel` 後
   再加上語意檢索，兩者的排名合併（hybrid search），同義詞、換句話說
@@ -650,8 +657,11 @@ agent 會得到 `search_knowledge` 工具，搜尋結果附上來源檔案與所
   相似的片段丟掉；也可以用 reranker 重新評估前幾名的相關度（見
   [相似度門檻與 reranker](#相似度門檻與-reranker)）。
 - **切片。** 依段落切成約 `chunkSize` 字的片段，不會從段落中間切開。
-- 支援 `.md`、`.txt`、`.pdf`；其他格式會略過，用 `pyharness knowledge`
-  可以看到哪些檔案被略過。讀取 PDF 需要 pypdf：
+- 支援 `.md`、`.txt`、`.pdf`、`.docx`、`.pptx`、`.xlsx`；其他格式會略過，
+  用 `pyharness knowledge` 可以看到哪些檔案被略過。Word、PowerPoint、
+  Excel 用 Python 內建的套件讀取；解析器可以替換（見
+  [說明文件的「文件解析」](https://agent-harness-docs-ten.vercel.app/advanced/knowledge#文件解析)）。
+  讀取 PDF 需要 pypdf：
 
   ```bash
   pip install "agent-harness[pdf] @ git+https://github.com/xian-ai-1057/AgentHarness.git#subdirectory=python"
@@ -746,7 +756,8 @@ labels: [hr]
 ...
 ```
 
-或在 `knowledge/labels.yaml` 用路徑樣式指定（PDF 只能用這種寫法）：
+或在知識庫資料夾的 `labels.yaml` 用路徑樣式指定（PDF、Office 檔案只能
+用這種寫法）：
 
 ```yaml
 "hr/*": [hr]
@@ -1274,7 +1285,8 @@ pyharness run "<訊息>"       執行一次後結束（適合排程與腳本）
 pyharness run -c /compact    壓縮最新的對話（聊天時直接輸入 /compact）
 pyharness memory             查看長期記憶（forget <識別碼> / clear）
 pyharness knowledge ["查詢"]  檢查知識庫索引，或試著搜尋
-                             （-l hr,sales 模擬受限的 agent）
+                             （-l hr,sales 模擬受限的 agent，
+                             -b hr,it 只搜尋這幾個知識庫）
 pyharness web                開啟網頁版（--port、--host、--allowed-host、
                              --trusted-proxy、--max-upload-mb，見下一
                              節）；資料夾是空的時自動建立可以直接使用的
@@ -1400,10 +1412,10 @@ Python 版另外會處理：
 - 至少要留一位可以使用的管理者。停用的人立刻被登出，他正在執行的對話
   也會停下來；改變角色時同樣停下來，權限判斷每次都讀最新的角色。
 - 管理者在「管理平台 → 群組」（`/admin/groups`）決定每位成員能用哪些
-  模型、agent、工具組與知識庫標籤。每位成員都屬於內建的「所有人」群組
-  （剛升級時什麼都開放），新建的群組預設什麼都沒有；一個人能用的是所屬
-  群組加起來的範圍，管理者不受限制。限制在伺服器上執行：模型選單、agent、
-  工具與知識庫搜尋都只剩開放的部分，直接呼叫 API 也一樣（見
+  agent、工具組、知識庫與知識庫標籤（模型由模型中台決定）。每位成員都屬於
+  內建的「所有人」群組（剛升級時什麼都開放），新建的群組預設什麼都沒有；
+  一個人能用的是所屬群組加起來的範圍，管理者不受限制。限制在伺服器上執行：
+  agent、工具與知識庫搜尋都只剩開放的部分，直接呼叫 API 也一樣（見
   [說明文件的「存取群組」](https://agent-harness-docs-ten.vercel.app/guide/web#存取群組)）。
 - 成員只看得到自己的對話、「我的檔案」與被開放的共用資料夾，不能修改
   模型連線、全站權限與成員，也不能讓對話「全部直接執行」（bypass）。

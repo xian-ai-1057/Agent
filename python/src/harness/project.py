@@ -7,13 +7,14 @@
     ├── agents/*.md     一個檔案一個 agent：frontmatter 是設定，內文是指示
     ├── tools/*.py      用 @tool 包裝的函式，檔名就是 toolset 名稱
     ├── skills/*/       一個資料夾一個 skill（SKILL.md 加參考檔案）
-    ├── knowledge/      知識庫文件（.md、.txt、.pdf）
+    ├── knowledge/      知識庫文件（.md、.txt、.pdf、.docx…）；每個子資料夾
+    │                   可以在 harness.yaml 的 knowledgeBases 設成獨立的知識庫
     └── workspace/      沙盒（sandbox）掛載的資料夾，名稱可以設定
 
 agent 的 frontmatter 可以用 subagents 與 handoffs 列出其他 agent 的名稱，
 讓它把工作交出去或把對話轉交出去（見 delegation 模組）；用 skills 列出
 可用的 skill（專案的 skills/ 或內建的 skill，見 builtin 模組）；用
-knowledge 掛上知識庫。
+knowledge 掛上知識庫（true 是預設知識庫，或列出知識庫的識別碼）。
 
 內建的 toolsets（files、shell、plan、web）與內建 skills 都要明確列出才會
 給 agent。專案裡有同名的 toolset 或 skill 時，以專案的為準。
@@ -35,6 +36,7 @@ Python 檔（同一個專案同時給兩個版本用時的寫法），Python 版
 import dataclasses
 import importlib.util
 import pathlib
+import re
 import sys
 from typing import Any
 
@@ -59,6 +61,12 @@ SESSIONS_DIR = DATA_DIR / "sessions"
 MEMORY_FILE = DATA_DIR / "memory.json"
 KNOWLEDGE_CACHE_DIR = DATA_DIR / "knowledge"
 DEFAULT_KNOWLEDGE_DIR = "knowledge"
+# 預設知識庫：harness.yaml 的 knowledge 區塊（或 knowledge/ 資料夾）。
+DEFAULT_KNOWLEDGE_ID = "default"
+DEFAULT_KNOWLEDGE_NAME = "預設知識庫"
+# 其他知識庫寫在 harness.yaml 的這個區塊，以識別碼為鍵。
+KNOWLEDGE_BASES_KEY = "knowledgeBases"
+KNOWLEDGE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 
 
 @dataclasses.dataclass
@@ -73,7 +81,12 @@ class Project:
         permissions: 專案的權限設定。
         default_agent: 沒指定時使用的 agent 名稱。
         skills: 專案 skills/ 底下所有的 skill，以名稱為鍵。
-        knowledge: 專案的知識庫，沒有設定時為 None。
+        knowledge: 預設知識庫（harness.yaml 的 knowledge 區塊或
+            knowledge/ 資料夾），沒有時為 None。
+        knowledge_bases: 專案所有的知識庫（預設知識庫排第一），以識別碼
+            為鍵。
+        agent_knowledge: 有設定 knowledge 的 agent 預設搜尋哪些知識庫，
+            以 agent 名稱為鍵。
         memory: 長期記憶，harness.yaml 沒有開啟 memory 時為 None。
         hooks: 依 guardrails 設定建立的 hooks，執行時傳給 run；也可以
             再加上自己的處理函式。
@@ -96,6 +109,12 @@ class Project:
         default_factory=dict
     )
     knowledge: knowledge_lib.Knowledge | None = None
+    knowledge_bases: dict[str, knowledge_lib.KnowledgeBase] = dataclasses.field(
+        default_factory=dict
+    )
+    agent_knowledge: dict[str, "KnowledgeSetting"] = dataclasses.field(
+        default_factory=dict
+    )
     memory: memory_lib.MemoryStore | None = None
     hooks: hooks_lib.Hooks = dataclasses.field(default_factory=hooks_lib.Hooks)
     compaction: compaction_lib.Compaction | None = None
@@ -184,9 +203,9 @@ def _assemble(
         toolsets[sandbox_lib.TOOLSET] = sandbox.tools()
 
     project_skills = _load_skills(root / "skills", toolsets, project_tools)
-    knowledge = _load_knowledge(root, config.get("knowledge"))
+    bases = load_knowledge_bases(root, config)
     resources = _Resources(
-        toolsets, project_tools, project_skills, knowledge, builtin_skills()
+        toolsets, project_tools, project_skills, bases, builtin_skills()
     )
 
     shared = _read_optional(root / "AGENTS.md")
@@ -196,6 +215,11 @@ def _assemble(
         agent, meta = _load_agent(agent_path, config, shared, resources)
         loaded[agent.name] = agent
         metas[agent.name] = meta
+    agent_knowledge = {
+        name: setting
+        for name, meta in metas.items()
+        if (setting := knowledge_setting(name, meta.get("knowledge"), bases))
+    }
     if not loaded:
         raise ValueError(f"{root / 'agents'} 裡沒有任何 agent（*.md）")
     _link_agents(loaded, metas)
@@ -211,7 +235,11 @@ def _assemble(
         permissions=_load_permissions(config.get("permissions") or {}),
         default_agent=default_agent,
         skills=project_skills,
-        knowledge=knowledge,
+        knowledge=default.knowledge
+        if (default := bases.get(DEFAULT_KNOWLEDGE_ID))
+        else None,
+        knowledge_bases=bases,
+        agent_knowledge=agent_knowledge,
         memory=memory_lib.MemoryStore(root / MEMORY_FILE)
         if config.get("memory")
         else None,
@@ -230,8 +258,23 @@ class _Resources:
     toolsets: dict[str, list[tools_lib.Tool]]
     project_tools: dict[str, tools_lib.Tool]
     skills: dict[str, skills_lib.Skill]
-    knowledge: knowledge_lib.Knowledge | None
+    knowledge_bases: dict[str, knowledge_lib.KnowledgeBase]
     builtin_skills: dict[str, skills_lib.Skill]
+
+
+@dataclasses.dataclass(frozen=True)
+class KnowledgeSetting:
+    """agent 設定的 knowledge 欄位。
+
+    Attributes:
+        bases: 預設搜尋的知識庫識別碼。
+        labels: 只能搜尋這些標籤（與沒有標籤）的文件；None 表示不限制。
+        top_k: 每次搜尋最多回傳幾筆。
+    """
+
+    bases: tuple[str, ...]
+    labels: tuple[str, ...] | None = None
+    top_k: int = 5
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -408,9 +451,17 @@ def _load_agent(
             for item in resources.project_tools.values()
             if item.name not in skill_owned
         ]
-    knowledge_tool = _knowledge_tool(name, meta, resources.knowledge)
-    if knowledge_tool is not None:
-        agent_tools.append(knowledge_tool)
+    setting = knowledge_setting(
+        name, meta.get("knowledge"), resources.knowledge_bases
+    )
+    if setting is not None:
+        agent_tools.append(
+            knowledge_lib.search_tool(
+                [resources.knowledge_bases[i] for i in setting.bases],
+                None if setting.labels is None else list(setting.labels),
+                setting.top_k,
+            )
+        )
     instructions = "\n\n".join(part for part in (body, shared) if part)
     agent = agents.Agent(
         name=name,
@@ -451,36 +502,65 @@ def _resolve_skills(
     return selected
 
 
-def _knowledge_tool(
+def knowledge_setting(
     agent_name: str,
-    meta: dict[str, Any],
-    knowledge: knowledge_lib.Knowledge | None,
-) -> tools_lib.Tool | None:
-    """依 agent 設定的 knowledge 欄位建立 search_knowledge 工具。
+    setting: Any,
+    bases: dict[str, knowledge_lib.KnowledgeBase],
+) -> KnowledgeSetting | None:
+    """解析 agent 設定的 knowledge 欄位。
 
-    knowledge: true 表示可以搜尋整個知識庫；knowledge: {labels: [...]}
-    限定只能搜尋這些標籤（與沒有標籤）的文件。
+    寫法：
+        knowledge: true              預設知識庫（沒有預設知識庫時是全部）
+        knowledge: [hr, it]          這些知識庫
+        knowledge:
+          bases: [hr]                省略時同 true
+          labels: [hr]               只搜尋這些標籤與沒有標籤的文件
+          topK: 5
+
+    Returns:
+        設定；沒有寫或寫 false 時為 None。
+
+    Raises:
+        ValueError: 寫法不對，或引用不存在的知識庫。
     """
-    setting = meta.get("knowledge")
     if not setting:
         return None
-    if knowledge is None:
+    if not bases:
         raise ValueError(
             f"agent {agent_name} 設定了 knowledge，但專案沒有知識庫：請建立 "
             f"{DEFAULT_KNOWLEDGE_DIR}/ 資料夾，或在 {CONFIG_FILE} 設定 "
-            "knowledge.path"
+            f"knowledge 或 {KNOWLEDGE_BASES_KEY}"
         )
+    fallback = (
+        [DEFAULT_KNOWLEDGE_ID] if DEFAULT_KNOWLEDGE_ID in bases else list(bases)
+    )
     if setting is True:
-        return knowledge.as_tool()
+        return KnowledgeSetting(tuple(fallback))
+    if isinstance(setting, list):
+        setting = {"bases": setting}
     if not isinstance(setting, dict):
         raise ValueError(
-            f"agent {agent_name} 的 knowledge 必須是 true 或 {{labels: [...]}}"
+            f"agent {agent_name} 的 knowledge 必須是 true、知識庫清單或 "
+            "{bases: [...], labels: [...]}"
+        )
+    chosen = setting.get("bases")
+    if chosen is None:
+        chosen = fallback
+    if not isinstance(chosen, list) or not chosen:
+        raise ValueError(f"agent {agent_name} 的 knowledge.bases 必須是清單")
+    names = [str(item) for item in chosen]
+    unknown = [item for item in names if item not in bases]
+    if unknown:
+        raise ValueError(
+            f"agent {agent_name} 引用不存在的知識庫：{unknown}，"
+            f"可用的有：{list(bases)}"
         )
     labels = setting.get("labels")
-    top_k = setting.get("topK") or 5
-    if labels is None:
-        return knowledge.as_tool(top_k=top_k)
-    return knowledge.as_tool(labels=[str(item) for item in labels], top_k=top_k)
+    return KnowledgeSetting(
+        tuple(dict.fromkeys(names)),
+        None if labels is None else tuple(str(item) for item in labels),
+        setting.get("topK") or 5,
+    )
 
 
 def builtin_skills() -> dict[str, skills_lib.Skill]:
@@ -529,38 +609,131 @@ def _load_skills(
     return loaded
 
 
-def _load_knowledge(
-    root: pathlib.Path, config: Any
-) -> knowledge_lib.Knowledge | None:
-    """依 harness.yaml 的 knowledge 區塊（或 knowledge/ 資料夾）建立知識庫。"""
-    if config is None and not (root / DEFAULT_KNOWLEDGE_DIR).is_dir():
-        return None
-    if config is False:
-        return None
-    settings = config if isinstance(config, dict) else {}
-    path = root / str(settings.get("path") or DEFAULT_KNOWLEDGE_DIR)
-    if not path.is_dir():
-        raise ValueError(f"找不到知識庫資料夾：{path}")
-    unknown = sorted(set(settings) - _KNOWLEDGE_FIELDS)
+def load_knowledge_bases(
+    root: pathlib.Path, config: dict[str, Any]
+) -> dict[str, knowledge_lib.KnowledgeBase]:
+    """依 harness.yaml 建立專案的知識庫。
+
+    - 預設知識庫：knowledge 區塊（或 knowledge/ 資料夾），識別碼是
+      default；knowledge: false 時沒有。
+    - 其他知識庫：knowledgeBases 區塊，以識別碼為鍵，資料夾預設是
+      knowledge/<識別碼>/。沒寫的檢索設定（embeddingModel 等）沿用
+      knowledge 區塊的。
+
+    知識庫的資料夾在另一個知識庫的資料夾裡面時（例如 knowledge/hr/ 在
+    預設知識庫的 knowledge/ 裡），外面的知識庫不讀它。
+
+    Args:
+        root: 專案根目錄。
+        config: harness.yaml 的內容。
+
+    Returns:
+        以識別碼為鍵的知識庫，預設知識庫排第一。
+
+    Raises:
+        ValueError: 設定有誤或找不到資料夾。
+    """
+    shared = config.get("knowledge")
+    defaults = shared if isinstance(shared, dict) else {}
+    specs: dict[str, dict[str, Any]] = {}
+    if shared is not False and (
+        shared is not None or (root / DEFAULT_KNOWLEDGE_DIR).is_dir()
+    ):
+        _check_fields(defaults, "knowledge", _KNOWLEDGE_FIELDS)
+        specs[DEFAULT_KNOWLEDGE_ID] = {
+            **defaults,
+            "path": defaults.get("path") or DEFAULT_KNOWLEDGE_DIR,
+            "name": defaults.get("name") or DEFAULT_KNOWLEDGE_NAME,
+        }
+    others = config.get(KNOWLEDGE_BASES_KEY) or {}
+    if not isinstance(others, dict):
+        raise ValueError(
+            f"{CONFIG_FILE} 的 {KNOWLEDGE_BASES_KEY} 必須是「識別碼: 設定」"
+        )
+    for base_id, settings in others.items():
+        base_id = str(base_id)
+        where = f"{KNOWLEDGE_BASES_KEY}.{base_id}"
+        if not KNOWLEDGE_ID_PATTERN.match(base_id):
+            raise ValueError(
+                f"{CONFIG_FILE} 的知識庫識別碼 {base_id} 只能用小寫英文、"
+                "數字、- 與 _（40 字以內）"
+            )
+        if base_id == DEFAULT_KNOWLEDGE_ID:
+            raise ValueError(
+                f"知識庫識別碼 {DEFAULT_KNOWLEDGE_ID} 保留給預設知識庫，"
+                f"請改用 {CONFIG_FILE} 的 knowledge 區塊"
+            )
+        settings = settings or {}
+        if not isinstance(settings, dict):
+            raise ValueError(f"{CONFIG_FILE} 的 {where} 必須是設定區塊")
+        _check_fields(settings, where, _KNOWLEDGE_FIELDS)
+        inherited = {
+            key: value
+            for key, value in defaults.items()
+            if key in _RETRIEVAL_FIELDS
+        }
+        specs[base_id] = {
+            **inherited,
+            **settings,
+            "path": settings.get("path")
+            or f"{DEFAULT_KNOWLEDGE_DIR}/{base_id}",
+            "name": settings.get("name") or base_id,
+        }
+
+    paths: dict[str, pathlib.Path] = {}
+    for base_id, spec in specs.items():
+        path = (root / str(spec["path"])).resolve()
+        if not path.is_dir():
+            raise ValueError(f"找不到知識庫 {base_id} 的資料夾：{path}")
+        for other, used in paths.items():
+            if used == path:
+                raise ValueError(
+                    f"知識庫 {base_id} 和 {other} 用了同一個資料夾：{path}"
+                )
+        paths[base_id] = path
+
+    bases = {}
+    for base_id, spec in specs.items():
+        path = paths[base_id]
+        cache = root / KNOWLEDGE_CACHE_DIR
+        if base_id != DEFAULT_KNOWLEDGE_ID:
+            cache = cache / "bases" / base_id
+        bases[base_id] = knowledge_lib.KnowledgeBase(
+            id=base_id,
+            name=str(spec["name"]),
+            description=str(spec.get("description") or ""),
+            knowledge=knowledge_lib.Knowledge(
+                path,
+                embedding_model=spec.get("embeddingModel"),
+                chunk_size=spec.get("chunkSize") or 800,
+                cache_dir=cache,
+                reranker=spec.get("reranker"),
+                rerank_candidates=spec.get("rerankCandidates") or 20,
+                min_similarity=spec.get("minSimilarity"),
+                min_rerank_score=spec.get("minRerankScore"),
+                exclude=[
+                    other
+                    for other in paths.values()
+                    if other != path and other.is_relative_to(path)
+                ],
+            ),
+        )
+    return bases
+
+
+def _check_fields(
+    settings: dict[str, Any], where: str, fields: set[str]
+) -> None:
+    unknown = sorted(set(settings) - fields)
     if unknown:
         raise ValueError(
-            f"{CONFIG_FILE} 的 knowledge 有不認得的設定：{unknown}，"
-            f"可用的有：{sorted(_KNOWLEDGE_FIELDS)}"
+            f"{CONFIG_FILE} 的 {where} 有不認得的設定：{unknown}，"
+            f"可用的有：{sorted(fields)}"
         )
-    return knowledge_lib.Knowledge(
-        path,
-        embedding_model=settings.get("embeddingModel"),
-        chunk_size=settings.get("chunkSize") or 800,
-        cache_dir=root / KNOWLEDGE_CACHE_DIR,
-        reranker=settings.get("reranker"),
-        rerank_candidates=settings.get("rerankCandidates") or 20,
-        min_similarity=settings.get("minSimilarity"),
-        min_rerank_score=settings.get("minRerankScore"),
-    )
 
 
-_KNOWLEDGE_FIELDS = {
-    "path",
+# 檢索設定：knowledgeBases 裡沒寫時沿用 knowledge 區塊的值。
+_RETRIEVAL_FIELDS = {
     "embeddingModel",
     "chunkSize",
     "reranker",
@@ -568,6 +741,7 @@ _KNOWLEDGE_FIELDS = {
     "minSimilarity",
     "minRerankScore",
 }
+_KNOWLEDGE_FIELDS = {"path", "name", "description", *_RETRIEVAL_FIELDS}
 
 
 _COMPACTION_FIELDS = {

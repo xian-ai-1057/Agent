@@ -12,7 +12,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { SessionOptions } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
-import { canAdmin } from "../auth.ts";
+import { isAdmin } from "../auth.ts";
 import { activeFolder, foldersEnabled } from "../folders.ts";
 import { navigate, useSearchParam } from "../router.ts";
 import { upsertSummary, useStore } from "../store.ts";
@@ -21,6 +21,7 @@ import { Composer } from "./Composer.tsx";
 import { PendingView } from "./Conversation.tsx";
 import { FolderContext } from "./chat/folder.ts";
 import {
+  agentKnowledge,
   agentTools,
   type ComposerOptions,
   EMPTY_OPTIONS,
@@ -75,7 +76,7 @@ export function NewChat() {
   const nothingOpen =
     !agent ||
     (project.features?.groups === true &&
-      !canAdmin(project) &&
+      !isAdmin(project) &&
       (project.models?.length ?? 0) === 0);
   if (nothingOpen) {
     return (
@@ -102,7 +103,7 @@ export function NewChat() {
   const { connection } = project.model;
   if (connection && !connection.ready) {
     // 每個人看到同一張說明卡；管理者多一個前往管理平台的按鈕。
-    const admin = canAdmin(project);
+    const admin = isAdmin(project);
     return (
       <main className="main">
         <div className="new-chat ch-new">
@@ -144,6 +145,8 @@ export function NewChat() {
         models: project.models ?? [],
         skills: project.skills ?? [],
         tools: agentTools(project, agent),
+        knowledgeBases: project.knowledgeBases ?? [],
+        defaultKnowledge: agentKnowledge(project, agent),
         value: options,
         fallbackModel: agent.model,
         onChange: (change) =>

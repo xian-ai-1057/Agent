@@ -6,13 +6,24 @@ import type {
   GroupCatalog,
 } from "../../../../src/web/protocol.ts";
 
-export const ACCESS_KINDS: AccessKind[] = ["agents", "toolsets", "knowledge"];
+export const ACCESS_KINDS: AccessKind[] = [
+  "agents",
+  "toolsets",
+  "knowledgeBases",
+  "knowledge",
+];
 
 export const KIND_LABELS: Record<AccessKind, string> = {
   agents: "Agent",
   toolsets: "工具組",
+  knowledgeBases: "知識庫",
   knowledge: "知識庫標籤",
 };
+
+/** 和知識庫有關的類別：專案沒有知識庫時不顯示。 */
+export function isKnowledgeKind(kind: AccessKind): boolean {
+  return kind === "knowledgeBases" || kind === "knowledge";
+}
 
 /** 一類資源的簡短說明：「全部」、「無」或「2 / 5」。 */
 export function kindSummary(value: string[] | null, total: number): string {
@@ -29,10 +40,11 @@ export function accessSummary(
   const totals: Record<AccessKind, number> = {
     agents: catalog.agents.length,
     toolsets: catalog.toolsets.length,
+    knowledgeBases: catalog.knowledgeBases.length,
     knowledge: catalog.knowledge.length,
   };
   return ACCESS_KINDS.filter(
-    (kind) => kind !== "knowledge" || catalog.hasKnowledge,
+    (kind) => !isKnowledgeKind(kind) || catalog.hasKnowledge,
   )
     .map(
       (kind) =>

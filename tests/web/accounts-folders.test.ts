@@ -149,6 +149,29 @@ describe("帳號模式與角色", () => {
     expect(canAdmin(member)).toBe(false);
   });
 
+  it("有多個知識庫時多了知識庫；維護者只看得到知識庫", () => {
+    const admin = project(
+      { accounts: true, groups: true, knowledgeBases: true },
+      { auth: { mode: "accounts", user: user("admin") } },
+    );
+    const maintainer = project(
+      { accounts: true, knowledgeBases: true },
+      {
+        auth: { mode: "accounts", user: user("member") },
+        manageKnowledge: true,
+      },
+    );
+    expect(adminSections(admin)).toEqual([
+      "model",
+      "permissions",
+      "knowledge",
+      "members",
+      "groups",
+    ]);
+    expect(canAdmin(maintainer)).toBe(true);
+    expect(adminSections(maintainer)).toEqual(["knowledge"]);
+  });
+
   it("頭像用名稱的第一個字", () => {
     expect(initialOf({ displayName: "amy", username: "a" })).toBe("A");
     expect(initialOf({ displayName: "王小明", username: "ming" })).toBe("王");

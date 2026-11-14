@@ -53,6 +53,13 @@ permissions:
 #   minSimilarity: 0.3            # 相似度低於這個值的片段不回傳
 #   reranker: cohere/rerank-v3.5  # 用 rerank 模型重新排序前幾名
 #   minRerankScore: 0.2           # rerank 分數低於這個值的片段不回傳
+#
+# 依主題或部門分成好幾個知識庫（資料夾預設是 knowledge/<識別碼>/），
+# 沒寫的檢索設定沿用上面的 knowledge；網頁版可以在管理平台新增。
+# knowledgeBases:
+#   hr:
+#     name: 人資規章
+#     description: 請假、出勤、薪資與福利
 
 # 對話壓縮（預設開啟）：對話接近模型上限時，把較舊的歷史濃縮成檢查點。
 # 用 litellm 查不到上限的模型（例如自架端點）要寫 contextWindow。
@@ -100,7 +107,8 @@ tools:
 # 也可以列出內建的 skill：skill-creator、code-review、debugging、
 # planning、web-research、git-commit。
 # skills: [refund, code-review]
-# 搜尋知識庫（knowledge/ 資料夾）；用 {labels: [hr]} 限定可搜尋的範圍。
+# 搜尋預設知識庫（knowledge/ 資料夾）；[hr, it] 搜尋這幾個知識庫，
+# {bases: [hr], labels: [manager]} 再限定可搜尋的標籤。
 # knowledge: true
 ---
 你是 {name} 的助手。用使用者的語言回答，需要資料時就呼叫工具，不要

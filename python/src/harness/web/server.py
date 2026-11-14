@@ -31,6 +31,18 @@
     POST   /api/admin/groups             新增存取群組（管理者）
     PATCH  /api/admin/groups/{id}        改名稱、說明、資源或成員（管理者）
     DELETE /api/admin/groups/{id}        刪除存取群組（管理者）
+    GET    /api/knowledge                知識庫與設定（管理者，或維護者看自己
+                                         維護的）
+    POST   /api/knowledge                新增知識庫（管理者）
+    PATCH  /api/knowledge/{id}           改名稱、說明、檢索設定或維護者
+                                         （管理者）
+    DELETE /api/knowledge/{id}           從 harness.yaml 拿掉知識庫（管理者）
+    GET    /api/knowledge/{id}/documents 文件與索引概況（管理者或維護者）
+    POST   /api/knowledge/{id}/documents 上傳文件（multipart；?dir= 子資料夾，
+                                         ?replace= 換掉的文件）
+    DELETE /api/knowledge/{id}/documents?path=
+                                         刪除文件
+    POST   /api/knowledge/{id}/search    搜尋測試，{"query", "topK"?}
 
 登入方式（見 auth_mode）：
 
@@ -75,6 +87,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import re
 import secrets
 import urllib.parse
 from collections.abc import Iterable
@@ -91,6 +104,7 @@ from harness.web import audit as audit_lib
 from harness.web import files as files_lib
 from harness.web import folders as folders_lib
 from harness.web import groups as groups_lib
+from harness.web import knowledge_admin
 from harness.web import office as office_lib
 from harness.web import uploads as uploads_lib
 from harness.web import workspace as workspace_lib
@@ -105,6 +119,8 @@ UPLOAD_PATH = "/api/uploads"
 # 上傳必須帶這個標頭：自訂標頭會觸發 CORS 預檢，其他網站的表單或
 # 腳本因此無法借用使用者的登入狀態上傳檔案。
 UPLOAD_HEADER = "X-Harness-Upload"
+# 上傳文件到知識庫也是 multipart（和 UPLOAD_PATH 一樣的檢查）。
+_KNOWLEDGE_UPLOAD = re.compile(r"^/api/knowledge/[\w-]+/documents$")
 _UPLOAD_CHUNK = 256 * 1024
 _FILE_CHUNK = 256 * 1024
 COOKIE = "harness_session"
@@ -303,6 +319,11 @@ def create_app(
             if mode == "accounts"
             else None
         ),
+        maintainers=(
+            knowledge_admin.MaintainerStore.for_project(project.root)
+            if mode == "accounts"
+            else None
+        ),
     )
     if owner is not None:
         workspace.migrate(owner)
@@ -339,6 +360,7 @@ def create_app(
     _file_routes(routes)
     _account_routes(routes, mode)
     _group_routes(routes)
+    _knowledge_routes(routes)
     _settings_routes(routes)
     _audit_routes(routes)
 
@@ -834,6 +856,108 @@ def _group_routes(routes: web.RouteTableDef) -> None:
         group = _ws(request).delete_group(request.match_info["group_id"])
         _audit(request, "group.delete", target=group["name"], detail=group)
         return _json({"ok": True})
+
+
+def _knowledge_routes(routes: web.RouteTableDef) -> None:
+    """知識庫：管理者管理全部；維護者只能管理自己維護的知識庫的文件。"""
+    base = "/api/knowledge/{base_id:[\\w-]+}"
+
+    @routes.get("/api/knowledge")
+    async def list_knowledge(request: web.Request) -> web.Response:
+        return _json(await _ws(request).list_knowledge(_user(request)))
+
+    @routes.post("/api/knowledge")
+    async def create_knowledge(request: web.Request) -> web.Response:
+        _require_admin(request)
+        body = await _body(request)
+        created = _ws(request).create_knowledge(body)
+        _audit(
+            request,
+            "knowledge.create",
+            target=str(body.get("id", "")),
+            detail=body,
+        )
+        return _json(created, status=201)
+
+    @routes.patch(base)
+    async def update_knowledge(request: web.Request) -> web.Response:
+        _require_admin(request)
+        body = await _body(request)
+        base_id = request.match_info["base_id"]
+        updated = _ws(request).update_knowledge(base_id, body)
+        _audit(
+            request,
+            "knowledge.update",
+            target=base_id,
+            detail={"changes": body},
+        )
+        return _json(updated)
+
+    @routes.delete(base)
+    async def delete_knowledge(request: web.Request) -> web.Response:
+        _require_admin(request)
+        base_id = request.match_info["base_id"]
+        _ws(request).delete_knowledge(base_id)
+        _audit(request, "knowledge.delete", target=base_id)
+        return _json({"ok": True})
+
+    @routes.get(f"{base}/documents")
+    async def list_documents(request: web.Request) -> web.Response:
+        return _json(
+            await _ws(request).knowledge_documents(
+                _user(request), request.match_info["base_id"]
+            )
+        )
+
+    @routes.post(f"{base}/documents")
+    async def upload_documents(request: web.Request) -> web.Response:
+        workspace = _ws(request)
+        user = _user(request)
+        base_id = request.match_info["base_id"]
+        replace = request.query.get("replace") or None
+        saved = []
+        async for filename, chunks in _iter_files(request):
+            saved.append(
+                await workspace.save_knowledge_document(
+                    user,
+                    base_id,
+                    filename,
+                    chunks,
+                    directory=request.query.get("dir", ""),
+                    replace=replace,
+                )
+            )
+            if replace is not None:
+                break
+        if not saved:
+            raise workspace_lib.WebError(400, "沒有收到檔案")
+        detail: dict[str, Any] = {"files": [item["path"] for item in saved]}
+        if replace is not None:
+            detail["replace"] = replace
+        _audit(request, "knowledge.upload", target=base_id, detail=detail)
+        return _json({"files": saved}, status=201)
+
+    @routes.delete(f"{base}/documents")
+    async def delete_document(request: web.Request) -> web.Response:
+        base_id = request.match_info["base_id"]
+        path = request.query.get("path", "")
+        _ws(request).delete_knowledge_document(_user(request), base_id, path)
+        _audit(
+            request,
+            "knowledge.document_delete",
+            target=base_id,
+            detail={"path": path},
+        )
+        return _json({"ok": True})
+
+    @routes.post(f"{base}/search")
+    async def try_search(request: web.Request) -> web.Response:
+        body = await _body(request)
+        return _json(
+            await _ws(request).try_knowledge(
+                _user(request), request.match_info["base_id"], body
+            )
+        )
 
 
 def _settings_routes(routes: web.RouteTableDef) -> None:
@@ -1345,26 +1469,35 @@ async def _receive_uploads(request: web.Request) -> list[dict[str, Any]]:
     uploads = _ws(request).uploads_for(
         _user(request), request.query.get("folder")
     )
-    try:
-        reader = await request.multipart()
-    except (AssertionError, ValueError) as error:
-        raise workspace_lib.WebError(400, "請求不是 multipart 表單") from error
     saved = []
     try:
-        while (part := await reader.next()) is not None:
-            if not isinstance(part, BodyPartReader) or not part.filename:
-                continue
-
-            async def chunks(part: BodyPartReader = part):
-                while chunk := await part.read_chunk(_UPLOAD_CHUNK):
-                    yield chunk
-
-            saved.append(await uploads.save(part.filename, chunks()))
+        async for filename, chunks in _iter_files(request):
+            saved.append(await uploads.save(filename, chunks))
     except uploads_lib.UploadError as error:
         raise workspace_lib.WebError(error.status, str(error)) from error
     if not saved:
         raise workspace_lib.WebError(400, "沒有收到檔案")
     return saved
+
+
+async def _iter_files(request: web.Request):
+    """依序讀出 multipart 表單裡的每個檔案：(檔名, 內容的 async iterator)。
+
+    內容邊讀邊交給呼叫端，不整個放進記憶體；要讀完一個再拿下一個。
+    """
+    try:
+        reader = await request.multipart()
+    except (AssertionError, ValueError) as error:
+        raise workspace_lib.WebError(400, "請求不是 multipart 表單") from error
+    while (part := await reader.next()) is not None:
+        if not isinstance(part, BodyPartReader) or not part.filename:
+            continue
+
+        async def chunks(part: BodyPartReader = part):
+            while chunk := await part.read_chunk(_UPLOAD_CHUNK):
+                yield chunk
+
+        yield part.filename, chunks()
 
 
 def _guard_middleware(host: str, allowed_hosts: list[str], needs_login: bool):
@@ -1384,7 +1517,9 @@ def _guard_middleware(host: str, allowed_hosts: list[str], needs_login: bool):
             hostname = raw_host.split("]")[0] + "]"
         if not any_host and hostname.lower() not in accepted:
             raise workspace_lib.WebError(403, "不接受這個 Host 的請求")
-        if request.path == UPLOAD_PATH and request.method == "POST":
+        if request.method == "POST" and (
+            request.path == UPLOAD_PATH or _KNOWLEDGE_UPLOAD.match(request.path)
+        ):
             _check_upload(request, raw_host)
             return await handler(request)
         if request.path.startswith("/api/") and request.method != "GET":

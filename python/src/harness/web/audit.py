@@ -48,6 +48,11 @@ ACTIONS = {
     "settings.model": "修改預設模型",
     "settings.connection": "修改模型連線",
     "settings.models": "修改可選的模型",
+    "knowledge.create": "新增知識庫",
+    "knowledge.update": "修改知識庫",
+    "knowledge.delete": "拿掉知識庫",
+    "knowledge.upload": "上傳知識庫文件",
+    "knowledge.document_delete": "刪除知識庫文件",
     "approval.decide": "工具核准",
     "audit.export": "匯出稽核紀錄",
 }
@@ -56,6 +61,7 @@ CATEGORIES = {
     "member": "成員",
     "group": "群組",
     "settings": "設定",
+    "knowledge": "知識庫",
     "approval": "工具核准",
     "audit": "稽核紀錄",
 }

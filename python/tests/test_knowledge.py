@@ -144,14 +144,16 @@ class TestSearch:
         assert _sources(await kb.search("保固")) == ["warranty.md"]
 
     async def test_unsupported_files_are_reported(self, kb_dir):
-        (kb_dir / "data.xlsx").write_bytes(b"x")
+        (kb_dir / "data.bin").write_bytes(b"x")
+        (kb_dir / "broken.xlsx").write_bytes(b"x")
         (kb_dir / ".hidden.md").write_text("秘密", encoding="utf-8")
         kb = harness.Knowledge(kb_dir)
 
         stats = await kb.stats()
 
         assert stats["sources"] == 2
-        assert stats["warnings"] == ["data.xlsx：不支援的格式，已略過"]
+        assert stats["warnings"][0].startswith("broken.xlsx：")
+        assert stats["warnings"][1] == "data.bin：不支援的格式，已略過"
 
     async def test_add_text_is_searchable(self):
         kb = harness.Knowledge()

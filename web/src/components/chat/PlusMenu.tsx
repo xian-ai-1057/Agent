@@ -1,12 +1,13 @@
 /**
- * 輸入框左下角的 ＋ 選單：上傳檔案、選 skills、勾選這段對話可以用的工具。
+ * 輸入框左下角的 ＋ 選單：上傳檔案、選 skills、勾選這段對話要搜尋的知識庫
+ * 與可以用的工具。
  *
  * Skills 與工具在同一個彈出框裡換頁顯示，手機上也好點。可以複選，所以
  * 勾選後選單不關；送出訊息時（closeSignal 改變）才關。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckIcon, ChevronIcon } from "../Icons.tsx";
+import { BookIcon, CheckIcon, ChevronIcon } from "../Icons.tsx";
 import {
   BackIcon,
   PlusIcon,
@@ -15,10 +16,14 @@ import {
   ToolIcon,
   UploadIcon,
 } from "./icons.tsx";
-import type { ComposerOptions } from "./options.ts";
+import {
+  type ComposerOptions,
+  chosenKnowledge,
+  toggleKnowledge,
+} from "./options.ts";
 import { focusTrigger, Popover } from "./Popover.tsx";
 
-type View = "main" | "skills" | "tools";
+type View = "main" | "skills" | "knowledge" | "tools";
 
 export function PlusMenu({
   options,
@@ -54,8 +59,9 @@ export function PlusMenu({
     returnTo.current = undefined;
   }, [view]);
 
-  const { skills, tools, value } = options;
+  const { skills, tools, value, knowledgeBases, defaultKnowledge } = options;
   const enabledTools = value.tools ?? tools.map((tool) => tool.name);
+  const searched = chosenKnowledge(value, defaultKnowledge);
 
   const toggleSkill = (name: string) => {
     const next = value.skills.includes(name)
@@ -80,7 +86,7 @@ export function PlusMenu({
         className="icon-btn ch-plus-btn"
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label="更多選項：上傳檔案、skills、工具"
+        aria-label="更多選項：上傳檔案、skills、知識庫、工具"
         onClick={() => (open ? close() : setOpen(true))}
       >
         <PlusIcon />
@@ -129,6 +135,24 @@ export function PlusMenu({
                 <ChevronIcon size={14} />
               </button>
             )}
+            {knowledgeBases.length > 0 && (
+              <button
+                type="button"
+                role="menuitem"
+                className="ch-pop-item"
+                data-view="knowledge"
+                onClick={() => setView("knowledge")}
+              >
+                <BookIcon />
+                <span className="ch-pop-main">
+                  <span className="ch-pop-title">知識庫</span>
+                </span>
+                <span className="ch-count">
+                  {searched.length}/{knowledgeBases.length}
+                </span>
+                <ChevronIcon size={14} />
+              </button>
+            )}
             {tools.length > 0 && (
               <button
                 type="button"
@@ -162,6 +186,29 @@ export function PlusMenu({
             onBack={() => back("skills")}
           />
         )}
+        {view === "knowledge" && (
+          <Checklist
+            title="知識庫"
+            hint="勾選的知識庫，agent 回答前會一起搜尋，並標出資料來自哪個知識庫。"
+            items={knowledgeBases.map((base) => ({
+              name: base.id,
+              label: base.name,
+              description: base.description,
+              checked: searched.includes(base.id),
+            }))}
+            onToggle={(id) =>
+              options.onChange({
+                knowledge: toggleKnowledge(
+                  value,
+                  defaultKnowledge,
+                  knowledgeBases,
+                  id,
+                ),
+              })
+            }
+            onBack={() => back("knowledge")}
+          />
+        )}
         {view === "tools" && (
           <Checklist
             title="工具"
@@ -192,7 +239,13 @@ function Checklist({
 }: {
   title: string;
   hint: string;
-  items: { name: string; description: string; checked: boolean }[];
+  items: {
+    name: string;
+    /** 顯示的名稱；沒有時顯示 name。 */
+    label?: string;
+    description: string;
+    checked: boolean;
+  }[];
   onToggle: (name: string) => void;
   onBack: () => void;
 }) {
@@ -203,7 +256,9 @@ function Checklist({
   const needle = query.trim().toLowerCase();
   const shown = needle
     ? items.filter((item) =>
-        `${item.name} ${item.description}`.toLowerCase().includes(needle),
+        `${item.name} ${item.label ?? ""} ${item.description}`
+          .toLowerCase()
+          .includes(needle),
       )
     : items;
   return (
@@ -252,7 +307,9 @@ function Checklist({
               {item.checked && <CheckIcon size={12} />}
             </span>
             <span className="ch-pop-main">
-              <span className="ch-pop-title mono">{item.name}</span>
+              <span className={`ch-pop-title${item.label ? "" : " mono"}`}>
+                {item.label ?? item.name}
+              </span>
               {item.description && (
                 <span className="ch-pop-sub clamp">{item.description}</span>
               )}

@@ -75,6 +75,7 @@ from harness.web import categories as categories_lib
 from harness.web import config as config_lib
 from harness.web import folders as folders_lib
 from harness.web import groups as groups_lib
+from harness.web import knowledge_admin
 from harness.web import migration
 from harness.web import uploads as uploads_lib
 
@@ -239,6 +240,7 @@ class Workspace:
         folders: folders_lib.Folders | None = None,
         users: Callable[[str], accounts_lib.User | None] | None = None,
         groups: groups_lib.GroupStore | None = None,
+        maintainers: knowledge_admin.MaintainerStore | None = None,
     ) -> None:
         """建立 Workspace。
 
@@ -251,7 +253,9 @@ class Workspace:
             users: 依識別碼查目前的帳號（帳號資料庫的 get_user）；權限
                 判斷用它讀最新的角色。None 時沿用這一輪開始時的帳號。
             groups: 存取群組（帳號模式才有）；決定每位成員可以使用的
-                agent、工具組與知識庫標籤。None 時不限制。
+                agent、工具組、知識庫與知識庫標籤。None 時不限制。
+            maintainers: 知識庫的維護者（帳號模式才有）；None 時只有
+                管理者能管理知識庫。
 
         Raises:
             ValueError: harness.yaml 的 workspaces 寫錯。
@@ -268,6 +272,7 @@ class Workspace:
         self.max_upload_bytes = max_upload_bytes
         self._users = users
         self._groups = groups if auth_mode == "accounts" else None
+        self._maintainers = maintainers if auth_mode == "accounts" else None
         self._model_fn = model_fn or llm.complete
         self._states: dict[str, _State] = {}
         # close() 停下的對話保留「執行中」的記錄，下次啟動時標成中斷。
@@ -372,6 +377,7 @@ class Workspace:
         hidden = self._hidden_tools(user, access)
         agents = self._visible_agents(access)
         models = self._model_options(access)
+        bases = self._visible_bases(access)
         info = {
             "name": project.name,
             "root": str(project.root) if user.is_admin else "",
@@ -383,9 +389,21 @@ class Workspace:
                 else (agents[0] if agents else project.default_agent)
             ),
             "agents": [
-                self._agent_info(name, hidden, models, access)
+                {
+                    **self._agent_info(name, hidden, models, access),
+                    "knowledge": self._agent_bases(name, bases),
+                }
                 for name in agents
             ],
+            "knowledgeBases": [
+                {
+                    "id": base.id,
+                    "name": base.name,
+                    "description": base.description,
+                }
+                for base in bases
+            ],
+            "manageKnowledge": bool(self._managed_bases(user)),
             "toolsets": [
                 {
                     "name": name,
@@ -412,6 +430,7 @@ class Workspace:
                 "folders": self.auth_mode == "accounts",
                 "categories": True,
                 "groups": self._groups is not None,
+                "knowledgeBases": True,
                 "audit": True,
             },
             "auth": {
@@ -457,10 +476,10 @@ class Workspace:
         """
         store = self._require_groups()
         project = self.project
-        labels: list[str] = []
-        if project.knowledge is not None:
+        labels: set[str] = set()
+        for base in project.knowledge_bases.values():
             with contextlib.suppress(Exception):
-                labels = await project.knowledge.labels()
+                labels.update(await base.knowledge.labels())
         return {
             "groups": [item.info() for item in store.list_groups()],
             "catalog": {
@@ -472,8 +491,16 @@ class Workspace:
                     {"name": name, "tools": [item.name for item in items]}
                     for name, items in project.toolsets.items()
                 ],
-                "knowledge": labels,
-                "hasKnowledge": project.knowledge is not None,
+                "knowledgeBases": [
+                    {
+                        "id": base.id,
+                        "name": base.name,
+                        "description": base.description,
+                    }
+                    for base in project.knowledge_bases.values()
+                ],
+                "knowledge": sorted(labels),
+                "hasKnowledge": bool(project.knowledge_bases),
             },
         }
 
@@ -484,7 +511,11 @@ class Workspace:
             group = store.create_group(
                 body.get("name"),
                 body.get("description") or "",
-                {kind: body[kind] for kind in groups_lib.KINDS if kind in body},
+                {
+                    kind: body[api]
+                    for kind, api in groups_lib.API_NAMES.items()
+                    if api in body
+                },
                 body.get("members") or [],
             )
         self.refresh_project()
@@ -495,11 +526,20 @@ class Workspace:
     ) -> dict[str, Any]:
         """修改存取群組，馬上通知瀏覽器重新讀取（成員看到的清單跟著變）。"""
         store = self._require_groups()
-        allowed = {"name", "description", "members", *groups_lib.KINDS}
+        changes = {
+            key: body[key]
+            for key in ("name", "description", "members")
+            if key in body
+        }
+        changes.update(
+            {
+                kind: body[api]
+                for kind, api in groups_lib.API_NAMES.items()
+                if api in body
+            }
+        )
         with _group_errors():
-            group = store.update_group(
-                group_id, {k: v for k, v in body.items() if k in allowed}
-            )
+            group = store.update_group(group_id, changes)
         self.refresh_project()
         return group.info()
 
@@ -512,6 +552,337 @@ class Workspace:
         self.refresh_project()
         assert group is not None
         return group.info()
+
+    async def list_knowledge(self, user: accounts_lib.User) -> dict[str, Any]:
+        """管理平台的知識庫頁：這個人可以管理的知識庫。
+
+        管理者看到全部（含維護者與設定），維護者只看到自己維護的。
+
+        Raises:
+            WebError: 沒有可以管理的知識庫（403）。
+        """
+        managed = self._managed_bases(user)
+        if not managed and not self._live_admin(user):
+            raise WebError(403, "你沒有可以管理的知識庫")
+        admin = self._live_admin(user)
+        default_spec, specs = knowledge_admin.config_blocks(self.project.root)
+        maintainers = self._maintainers.all() if self._maintainers else {}
+        items = []
+        for base in self.project.knowledge_bases.values():
+            if base.id not in managed:
+                continue
+            builtin_base = base.id == project_lib.DEFAULT_KNOWLEDGE_ID
+            spec = default_spec if builtin_base else specs.get(base.id, {})
+            knowledge = base.knowledge
+            assert knowledge.path is not None
+            item: dict[str, Any] = {
+                "id": base.id,
+                "name": base.name,
+                "description": base.description,
+                "builtin": builtin_base,
+                "path": _relative(knowledge.path, self.project.root),
+                "documents": len(knowledge.files()),
+                "settings": knowledge_admin.describe_settings(spec),
+                "retrieval": {
+                    "embeddingModel": knowledge.embedding_model,
+                    "chunkSize": knowledge.chunk_size,
+                    "reranker": knowledge.reranker,
+                    "rerankCandidates": knowledge.rerank_candidates,
+                    "minSimilarity": knowledge.min_similarity,
+                    "minRerankScore": knowledge.min_rerank_score,
+                },
+                "agents": [
+                    name
+                    for name, setting in self.project.agent_knowledge.items()
+                    if base.id in setting.bases
+                ],
+            }
+            if admin:
+                item["maintainers"] = maintainers.get(base.id, [])
+            items.append(item)
+        return {
+            "bases": items,
+            "canCreate": admin,
+            "maintainers": self._maintainers is not None,
+            "formats": sorted(
+                {
+                    suffix
+                    for base in self.project.knowledge_bases.values()
+                    for suffix in base.knowledge.parsers
+                }
+                or knowledge_lib.DEFAULT_PARSERS
+            ),
+        }
+
+    def create_knowledge(self, body: dict[str, Any]) -> dict[str, Any]:
+        """新增知識庫：寫進 harness.yaml 的 knowledgeBases，建立資料夾。
+
+        資料夾是 knowledge/<識別碼>/；已經存在時（例如原本是預設知識庫的
+        子資料夾），裡面的文件改屬新的知識庫。
+
+        Raises:
+            WebError: 識別碼或設定不對、識別碼重複。
+        """
+        with _knowledge_errors():
+            base_id = knowledge_admin.checked_id(body.get("id"))
+            if base_id in self.project.knowledge_bases:
+                raise WebError(400, f"已經有識別碼是 {base_id} 的知識庫")
+            changes = {
+                key: body[key]
+                for key in knowledge_admin.SETTING_KEYS
+                if key in body
+            }
+            changes.setdefault("name", base_id)
+            values = knowledge_admin.checked_settings(changes)
+            default_spec, specs = knowledge_admin.config_blocks(
+                self.project.root
+            )
+            folder = (
+                self.project.root / project_lib.DEFAULT_KNOWLEDGE_DIR / base_id
+            )
+            created = not folder.exists()
+            folder.mkdir(parents=True, exist_ok=True)
+            specs[base_id] = knowledge_admin.merged({}, values)
+            try:
+                knowledge_admin.write_config(self.project.root, None, specs)
+            except knowledge_admin.KnowledgeAdminError:
+                if created:
+                    with contextlib.suppress(OSError):
+                        folder.rmdir()
+                raise
+            if self._maintainers is not None and "maintainers" in body:
+                self._maintainers.replace(base_id, body["maintainers"])
+        self._reload_knowledge()
+        return {"id": base_id}
+
+    def update_knowledge(
+        self, base_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """修改知識庫的名稱、說明、檢索設定或維護者。
+
+        Raises:
+            WebError: 找不到知識庫，或設定不對。
+        """
+        self._require_base(base_id)
+        with _knowledge_errors():
+            changes = {
+                key: body[key]
+                for key in knowledge_admin.SETTING_KEYS
+                if key in body
+            }
+            if changes:
+                values = knowledge_admin.checked_settings(changes)
+                default_spec, specs = knowledge_admin.config_blocks(
+                    self.project.root
+                )
+                if base_id == project_lib.DEFAULT_KNOWLEDGE_ID:
+                    default_spec = knowledge_admin.merged(default_spec, values)
+                    knowledge_admin.write_config(
+                        self.project.root, default_spec, specs
+                    )
+                else:
+                    specs[base_id] = knowledge_admin.merged(
+                        specs.get(base_id, {}), values
+                    )
+                    knowledge_admin.write_config(self.project.root, None, specs)
+            if "maintainers" in body:
+                if self._maintainers is None:
+                    raise WebError(400, "要登入的帳號模式才能指定維護者")
+                self._maintainers.replace(base_id, body["maintainers"])
+        self._reload_knowledge()
+        return {"id": base_id}
+
+    def delete_knowledge(self, base_id: str) -> None:
+        """從 harness.yaml 拿掉知識庫；資料夾與文件留著（不會刪除）。
+
+        Raises:
+            WebError: 是預設知識庫、找不到，或還有 agent 設定成要用它。
+        """
+        self._require_base(base_id)
+        if base_id == project_lib.DEFAULT_KNOWLEDGE_ID:
+            raise WebError(400, "預設知識庫不能刪除")
+        using = [
+            name
+            for name, setting in self.project.agent_knowledge.items()
+            if base_id in setting.bases
+        ]
+        if using:
+            raise WebError(
+                400,
+                f"agent {'、'.join(using)} 還設定成要用這個知識庫，"
+                "請先修改 agents/ 裡它的 knowledge",
+            )
+        with _knowledge_errors():
+            _, specs = knowledge_admin.config_blocks(self.project.root)
+            specs.pop(base_id, None)
+            knowledge_admin.write_config(self.project.root, None, specs)
+            if self._maintainers is not None:
+                self._maintainers.remove(base_id)
+        self._reload_knowledge()
+
+    async def knowledge_documents(
+        self, user: accounts_lib.User, base_id: str
+    ) -> dict[str, Any]:
+        """知識庫的文件與索引概況（會建立索引）。
+
+        Raises:
+            WebError: 不能管理這個知識庫。
+        """
+        base = self._require_manager(user, base_id)
+        documents = knowledge_admin.list_documents(base)
+        index: dict[str, Any]
+        try:
+            details = await base.knowledge.documents()
+            stats = await base.knowledge.stats()
+            index = {
+                "chunks": stats["chunks"],
+                "embedding": stats["embedding"],
+                "reranker": stats["reranker"],
+                "warnings": stats["warnings"],
+            }
+        except Exception as error:  # 例如 embedding 模型連不上。
+            details = {}
+            index = {"error": _describe(error)}
+        for item in documents:
+            found = details.get(item["path"])
+            item["chunks"] = found["chunks"] if found else 0
+            item["labels"] = found["labels"] if found else []
+        return {"documents": documents, "index": index}
+
+    async def save_knowledge_document(
+        self,
+        user: accounts_lib.User,
+        base_id: str,
+        filename: str,
+        chunks: Any,
+        directory: str = "",
+        replace: str | None = None,
+    ) -> dict[str, Any]:
+        """上傳（或換掉）知識庫裡的一份文件。
+
+        Raises:
+            WebError: 不能管理這個知識庫，或檔案不能存。
+        """
+        base = self._require_manager(user, base_id)
+        with _knowledge_errors():
+            return await knowledge_admin.save_document(
+                base,
+                filename,
+                chunks,
+                max_bytes=self.max_upload_bytes,
+                directory=directory,
+                replace=replace,
+            )
+
+    def delete_knowledge_document(
+        self, user: accounts_lib.User, base_id: str, path: str
+    ) -> None:
+        """刪除知識庫裡的一份文件。"""
+        base = self._require_manager(user, base_id)
+        with _knowledge_errors():
+            knowledge_admin.delete_document(base, path)
+
+    async def try_knowledge(
+        self, user: accounts_lib.User, base_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """搜尋測試：列出結果與相似度、rerank 分數，給人調整設定時參考。
+
+        Raises:
+            WebError: 不能管理這個知識庫，或查詢是空的。
+        """
+        base = self._require_manager(user, base_id)
+        query = body.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise WebError(400, "請輸入要搜尋的內容")
+        top_k = body.get("topK") or 5
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise WebError(400, "topK 必須是整數")
+        labels = body.get("labels")
+        if labels is not None:
+            labels = _string_list(labels, "labels")
+        try:
+            hits = await base.knowledge.search(
+                query.strip(), top_k=max(1, min(top_k, 20)), labels=labels
+            )
+        except Exception as error:
+            raise WebError(502, f"搜尋失敗：{_describe(error)}") from error
+        return {
+            "hits": [
+                {
+                    "source": hit.chunk.source,
+                    "location": hit.chunk.location,
+                    "text": hit.chunk.text,
+                    "labels": list(hit.chunk.labels),
+                    "similarity": hit.similarity,
+                    "rerankScore": hit.rerank_score,
+                }
+                for hit in hits
+            ]
+        }
+
+    def _reload_knowledge(self) -> None:
+        """依 harness.yaml 重新建立知識庫，並通知瀏覽器重新讀取專案資訊。
+
+        agent 的 search_knowledge 每一輪都會換成最新的知識庫（見
+        _knowledge_converter），不必重新載入整個專案。
+        """
+        config = config_lib.read_config(self.project.root)
+        try:
+            bases = project_lib.load_knowledge_bases(self.project.root, config)
+        except ValueError as error:
+            raise WebError(400, str(error)) from error
+        self.project.knowledge_bases = bases
+        default = bases.get(project_lib.DEFAULT_KNOWLEDGE_ID)
+        self.project.knowledge = default.knowledge if default else None
+        self.refresh_project()
+
+    def _require_base(self, base_id: str) -> knowledge_lib.KnowledgeBase:
+        base = self.project.knowledge_bases.get(base_id)
+        if base is None:
+            raise WebError(404, f"找不到知識庫：{base_id}")
+        return base
+
+    def _require_manager(
+        self, user: accounts_lib.User, base_id: str
+    ) -> knowledge_lib.KnowledgeBase:
+        """這個人可以管理的知識庫（管理者或它的維護者）。
+
+        Raises:
+            WebError: 找不到（404），或不能管理（403）。
+        """
+        base = self._require_base(base_id)
+        if base_id not in self._managed_bases(user):
+            raise WebError(403, "你不是這個知識庫的維護者")
+        return base
+
+    def _managed_bases(self, user: accounts_lib.User) -> set[str]:
+        """這個人可以管理的知識庫：管理者是全部，成員是自己維護的。"""
+        existing = set(self.project.knowledge_bases)
+        if self._live_admin(user):
+            return existing
+        if self._maintainers is None or not self._live_active(user):
+            return set()
+        return self._maintainers.bases_of(user.id) & existing
+
+    def _visible_bases(
+        self, access: groups_lib.Access
+    ) -> list[knowledge_lib.KnowledgeBase]:
+        """這個人在對話裡可以勾選的知識庫。"""
+        return [
+            base
+            for base in self.project.knowledge_bases.values()
+            if access.allows("knowledge_bases", base.id)
+        ]
+
+    def _agent_bases(
+        self, agent: str, visible: list[knowledge_lib.KnowledgeBase]
+    ) -> list[str] | None:
+        """agent 預設搜尋的知識庫（只留這個人可以用的）；沒有設定時 None。"""
+        setting = self.project.agent_knowledge.get(agent)
+        if setting is None:
+            return None
+        ids = {base.id for base in visible}
+        return [base_id for base_id in setting.bases if base_id in ids]
 
     def _require_groups(self) -> groups_lib.GroupStore:
         if self._groups is None:
@@ -944,7 +1315,8 @@ class Workspace:
             changes: 要改的欄位：model（ProjectInfo.models 裡的名稱，null
                 表示跟著 agent）、tools（agent 的工具名稱，null 表示全部）、
                 skills（一定要用的 skill 名稱）、folder（FolderInfo.id，
-                null 表示「我的檔案」）。沒給的欄位不變。
+                null 表示「我的檔案」）、knowledge（要搜尋的知識庫識別碼，
+                null 表示跟著 agent）。沒給的欄位不變。
 
         Returns:
             設定後完整的選項。
@@ -2114,6 +2486,19 @@ class Workspace:
             if self.folders.find(user, folder_id) is None:
                 raise WebError(400, f"沒有 {folder_id} 這個工作資料夾")
             options["folder"] = folder_id
+        if "knowledge" in changes:
+            bases = changes["knowledge"]
+            if bases is not None:
+                bases = _string_list(bases, "knowledge")
+                visible = {
+                    base.id for base in self._visible_bases(self._access(user))
+                }
+                unknown = [item for item in bases if item not in visible]
+                if unknown:
+                    raise WebError(
+                        400, f"沒有這些知識庫可以選：{'、'.join(unknown)}"
+                    )
+            options["knowledge"] = bases
         return options
 
     def _active_agent(self, state: _State):
@@ -2132,12 +2517,38 @@ class Workspace:
         agent = self._with_options(
             state, active, self._run_model(state, active), {}
         )
+        user = state.run_user or accounts_lib.LOCAL_USER
+        agent = _map_tools(agent, self._knowledge_converter(user), {})
         if self.auth_mode == "local":
             # 和加入帳號之前一樣：專案根目錄、專案自己的沙盒設定。
             return agent
-        user = state.run_user or accounts_lib.LOCAL_USER
         assert state.run_folder is not None
         return self._scoped_agent(agent, user, state.run_folder)
+
+    def _knowledge_converter(
+        self, user: accounts_lib.User
+    ) -> Callable[[tools_lib.Tool], tools_lib.Tool | None]:
+        """把 search_knowledge 換成這一輪的版本：搜尋最新的知識庫設定
+        （管理平台可能改過），並只留下群組開放的知識庫與標籤；一個都
+        不剩時拿掉這個工具。"""
+        access = self._access(user)
+        current = self.project.knowledge_bases
+
+        def convert(item: tools_lib.Tool) -> tools_lib.Tool | None:
+            if not isinstance(item, knowledge_lib.KnowledgeTool):
+                return item
+            return knowledge_lib.narrow_tool(
+                item,
+                bases=access.knowledge_bases,
+                labels=access.knowledge,
+                replace_bases=[
+                    current[base.id]
+                    for base in item.bases
+                    if base.id in current
+                ],
+            )
+
+        return convert
 
     def _scoped_agent(
         self,
@@ -2178,20 +2589,13 @@ class Workspace:
         sandboxed = not user.is_admin or (
             self.auth_mode != "local" and folder.kind != "private"
         )
-        # 存取群組：沒開放的工具組拿掉，知識庫只搜尋開放的標籤。
+        # 存取群組：沒開放的工具組拿掉（知識庫在 _knowledge_converter）。
         access = self._access(user)
         hidden = self._hidden_tools(user, access)
-        labels = None if access.knowledge is None else sorted(access.knowledge)
 
         def convert(item: tools_lib.Tool) -> tools_lib.Tool | None:
             if id(item) in hidden and item is not shell.run_command:
                 return None
-            if (
-                labels is not None
-                and item.name == knowledge_lib.TOOL_NAME
-                and project.knowledge is not None
-            ):
-                return project.knowledge.narrowed(item, labels) or item
             if legacy and (
                 item is shell.run_command
                 or any(item is known for known in box_tools)
@@ -2297,6 +2701,10 @@ class Workspace:
             )
         else:
             hint = ""
+        if options.get("knowledge") is not None:
+            copy.tools = self._chosen_knowledge(
+                agent.name, copy.tools, options["knowledge"]
+            )
         copy.instructions = "\n\n".join(
             part
             for part in (agent.instructions, hint, WEB_INSTRUCTIONS)
@@ -2307,6 +2715,35 @@ class Workspace:
             for target in agent.handoffs
         ]
         return copy
+
+    def _chosen_knowledge(
+        self, agent: str, tools: list[tools_lib.Tool], chosen: list[str]
+    ) -> list[tools_lib.Tool]:
+        """把 agent 的 search_knowledge 換成搜尋這段對話勾選的知識庫。
+
+        agent 原本沒有知識庫時也加上這個工具；一個都沒勾時拿掉。標籤與
+        筆數沿用 agent 的設定，群組的限制之後再套用（見
+        _knowledge_converter）。
+        """
+        kept = [
+            item
+            for item in tools
+            if not isinstance(item, knowledge_lib.KnowledgeTool)
+        ]
+        bases = [
+            self.project.knowledge_bases[base_id]
+            for base_id in chosen
+            if base_id in self.project.knowledge_bases
+        ]
+        if not bases:
+            return kept
+        setting = self.project.agent_knowledge.get(agent)
+        labels = None
+        top_k = 5
+        if setting is not None:
+            labels = None if setting.labels is None else list(setting.labels)
+            top_k = setting.top_k
+        return [*kept, knowledge_lib.search_tool(bases, labels, top_k)]
 
     def _chosen_model(self, state: _State) -> str | None:
         """這段對話自己選的模型；已經不在可選清單裡時不使用。"""
@@ -2703,6 +3140,23 @@ def _group_errors():
 
 
 @contextlib.contextmanager
+def _knowledge_errors():
+    """把 KnowledgeAdminError 轉成 WebError 的 with 區塊。"""
+    try:
+        yield
+    except knowledge_admin.KnowledgeAdminError as error:
+        raise WebError(error.status, str(error)) from error
+
+
+def _relative(path: pathlib.Path, root: pathlib.Path) -> str:
+    """相對於專案根目錄的路徑；在專案外面時用原本的路徑。"""
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+@contextlib.contextmanager
 def _category_errors():
     """把 CategoryError 轉成 WebError。"""
     try:
@@ -2755,6 +3209,7 @@ def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
         tools = options.get("tools")
         chosen = options.get("skills")
         folder = options.get("folder")
+        bases = options.get("knowledge")
         state.options = {
             "model": model if isinstance(model, str) else None,
             "tools": tools if _is_string_list(tools) else None,
@@ -2762,6 +3217,7 @@ def _restore_meta(state: _State, meta: dict[str, Any]) -> None:
             "folder": folder
             if isinstance(folder, str) and folder
             else folders_lib.PRIVATE_ID,
+            "knowledge": bases if _is_string_list(bases) else None,
         }
     if state.options["tools"] is not None:
         # 沒有記錄的舊檔案：當時只能在起始 agent 上設定。
@@ -2864,6 +3320,8 @@ def _default_options() -> dict[str, Any]:
         "tools": None,
         "skills": [],
         "folder": folders_lib.PRIVATE_ID,
+        # 這段對話要搜尋的知識庫；None 表示跟著 agent 的設定。
+        "knowledge": None,
     }
 
 
