@@ -1349,12 +1349,14 @@ class Workspace:
         else:
             return
         if step is not None:
+            # 送出當下的副本：事件排進佇列後才轉成 JSON，送出前工具可能已經
+            # 跑完、把同一個 step 改成 done，畫面就收不到 running。
             self._emit(
                 {
                     "type": "subagent_step",
                     "sessionId": state.session.id,
                     "callId": call_id,
-                    "step": step,
+                    "step": dict(step),
                 }
             )
         activity["agent"] = " › ".join(path)
