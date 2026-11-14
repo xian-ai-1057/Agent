@@ -197,6 +197,8 @@ class Knowledge:
         self._avg_length = 0.0
         # 每個片段在向量資料庫裡的鍵；沒有使用 embedding 時是空的。
         self._keys: list[str] = []
+        # as_tool 建立的工具與它的設定（標籤、筆數），narrowed 依此重建。
+        self._made: dict[int, tuple[tools_lib.Tool, list[str] | None, int]] = {}
         self._locks: weakref.WeakKeyDictionary[Any, asyncio.Lock] = (
             weakref.WeakKeyDictionary()
         )
@@ -306,6 +308,36 @@ class Knowledge:
             search_knowledge 工具。
         """
 
+        made = self._search_tool(labels, top_k)
+        self._made[id(made)] = (made, labels, top_k)
+        return made
+
+    def narrowed(
+        self, item: tools_lib.Tool, labels: list[str] | None
+    ) -> tools_lib.Tool | None:
+        """把 as_tool 建立的工具再限定在 labels 裡（和原本的標籤取交集）。
+
+        網頁版依使用者所屬的群組限制可以搜尋的標籤時使用。
+
+        Args:
+            item: 原本的 search_knowledge 工具。
+            labels: 這個人可以搜尋的標籤；None 表示不再限制。
+
+        Returns:
+            新的工具；item 不是這個知識庫建立的時為 None。
+        """
+        found = self._made.get(id(item))
+        if found is None or found[0] is not item:
+            return None
+        if labels is None:
+            return item
+        _, fixed, top_k = found
+        # 不經過 as_tool：每一輪都會重建，不能留在 _made 裡越積越多。
+        return self._search_tool(_combine_labels(fixed, labels), top_k)
+
+    def _search_tool(
+        self, labels: list[str] | None, top_k: int
+    ) -> tools_lib.Tool:
         async def search_knowledge(
             context: datatypes.RunContext, query: str
         ) -> str:
@@ -324,6 +356,13 @@ class Knowledge:
             return format_hits(hits)
 
         return tools_lib.tool(search_knowledge, name=TOOL_NAME)
+
+    async def labels(self) -> list[str]:
+        """知識庫裡用到的所有標籤（排序過）。"""
+        await self._ensure_index()
+        return sorted(
+            {label for chunk in self._chunks for label in chunk.labels}
+        )
 
     async def stats(self) -> dict[str, Any]:
         """建立索引並回傳概況，方便確認文件有沒有被讀到。

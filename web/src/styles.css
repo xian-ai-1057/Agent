@@ -3612,3 +3612,49 @@ h3 {
     visibility: visible;
   }
 }
+
+/* ── 管理平台 → 群組 ──────────────────────────────── */
+
+/* 整列都可以點，進入群組的編輯。 */
+.group-row {
+  padding: 0;
+}
+
+.group-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 12px 16px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--r-md);
+}
+
+.group-open:hover {
+  background: var(--hover);
+}
+
+.group-open .group-chevron {
+  flex: none;
+  color: var(--muted);
+}
+
+.group-back {
+  margin: 0 0 8px -10px;
+}
+
+.access-field .segmented {
+  width: fit-content;
+  margin: 4px 0 6px;
+}
+
+.group-danger {
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}

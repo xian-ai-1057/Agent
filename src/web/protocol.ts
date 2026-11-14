@@ -243,6 +243,12 @@ export interface ServerFeatures {
    * POST /api/sessions 的 category、POST /api/sessions/bulk（見 BulkRequest）。
    */
   categories?: boolean;
+  /**
+   * 存取群組（帳號模式）：管理者決定每位成員可以用哪些模型、agent、工具
+   * 組與知識庫標籤（見 AccessGroup）。成員拿到的 ProjectInfo 已經只列出
+   * 開放給他的部分。
+   */
+  groups?: boolean;
 }
 
 /**
@@ -316,6 +322,48 @@ export interface MemberInfo extends CurrentUser {
 export interface IssuedPassword {
   user: MemberInfo;
   password: string;
+}
+
+/** 存取群組可以控制的資源類別。 */
+export type AccessKind = "models" | "agents" | "toolsets" | "knowledge";
+
+/**
+ * 存取群組（Python 版帳號模式，只有管理者能讀寫）。每一類資源是名稱清單，
+ * 或 null 表示全部。每位成員自動屬於內建的「所有人」（id 為 "everyone"，
+ * members 是空的、不能刪除或改名），能用的資源是所屬群組的聯集；管理者
+ * 不受限制。新建的群組沒有給的類別是空的（什麼都不能用）。
+ *   GET    /api/admin/groups → {groups: AccessGroup[], catalog: GroupCatalog}
+ *   POST   /api/admin/groups {name, description?, members?, models?, …}
+ *   PATCH  /api/admin/groups/:id {name?, description?, members?, models?, …}
+ *   DELETE /api/admin/groups/:id
+ */
+export interface AccessGroup {
+  id: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  /** 成員的 id（MemberInfo.id）。 */
+  members: string[];
+  models: string[] | null;
+  agents: string[] | null;
+  toolsets: string[] | null;
+  /** 可以搜尋的知識庫標籤；沒有標籤的文件所有人都搜尋得到。 */
+  knowledge: string[] | null;
+}
+
+/** 群組頁可以勾選的資源。 */
+export interface GroupCatalog {
+  models: { name: string; label: string }[];
+  agents: { name: string; description: string }[];
+  toolsets: { name: string; tools: string[] }[];
+  knowledge: string[];
+  /** 專案有沒有知識庫。 */
+  hasKnowledge: boolean;
+}
+
+export interface GroupList {
+  groups: AccessGroup[];
+  catalog: GroupCatalog;
 }
 
 /**

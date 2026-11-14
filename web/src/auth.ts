@@ -79,6 +79,9 @@ export function adminSections(
 ): AdminSection[] {
   const sections: AdminSection[] = ["model", "permissions"];
   if (accountsMode(project)) sections.push("members");
+  if (accountsMode(project) && project?.features?.groups) {
+    sections.push("groups");
+  }
   return sections;
 }
 

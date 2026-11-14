@@ -117,6 +117,19 @@ describe("帳號模式與角色", () => {
     expect(adminSections(admin)).toEqual(["model", "permissions", "members"]);
   });
 
+  it("伺服器支援存取群組時多了群組", () => {
+    const admin = project(
+      { accounts: true, groups: true },
+      { auth: { mode: "accounts", user: user("admin") } },
+    );
+    expect(adminSections(admin)).toEqual([
+      "model",
+      "permissions",
+      "members",
+      "groups",
+    ]);
+  });
+
   it("成員不能用管理平台", () => {
     const member = accounts("member");
     expect(isMember(member)).toBe(true);

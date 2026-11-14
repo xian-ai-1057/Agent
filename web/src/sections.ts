@@ -10,10 +10,11 @@ export type SettingsSection = "tools" | "agents";
 
 export const SETTINGS_SECTIONS: SettingsSection[] = ["tools", "agents"];
 
-export type AdminSection = "model" | "permissions" | "members";
+export type AdminSection = "model" | "permissions" | "members" | "groups";
 
 export const ADMIN_SECTIONS: AdminSection[] = [
   "model",
   "permissions",
   "members",
+  "groups",
 ];

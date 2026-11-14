@@ -71,7 +71,33 @@ export function NewChat() {
   );
 
   if (!project) return <main className="main" aria-busy="true" />;
-  if (!agent) return <main className="main" />;
+  // 存取群組沒有開放任何 agent 或模型給這個人：說明原因，不顯示輸入框。
+  const nothingOpen =
+    !agent ||
+    (project.features?.groups === true &&
+      !canAdmin(project) &&
+      (project.models?.length ?? 0) === 0);
+  if (nothingOpen) {
+    return (
+      <main className="main">
+        <div className="new-chat ch-new">
+          <div className="new-chat-inner ch-new-inner anim-in">
+            <section className="error-card ch-interrupted" role="status">
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <span className="ch-error-icon">
+                  <AlertIcon />
+                </span>
+                <p className="body" style={{ margin: 0 }}>
+                  管理者還沒有開放可以使用的{agent ? "模型" : " agent"}
+                  給你，請聯絡管理者。
+                </p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   const { connection } = project.model;
   if (connection && !connection.ready) {

@@ -19,11 +19,13 @@ import {
   CheckIcon,
   ChipIcon,
   ShieldIcon,
+  UserIcon,
   UsersIcon,
 } from "../Icons.tsx";
 import { Members } from "../Members.tsx";
 import { Link } from "../Sidebar.tsx";
 import { UserMenu } from "../shell/UserMenu.tsx";
+import { Groups } from "./Groups.tsx";
 import {
   type Draft,
   ModelSection,
@@ -35,12 +37,14 @@ export const ADMIN_LABELS: Record<AdminSection, string> = {
   model: "模型",
   permissions: "權限",
   members: "成員",
+  groups: "群組",
 };
 
 const ADMIN_ICONS: Record<AdminSection, typeof ChipIcon> = {
   model: ChipIcon,
   permissions: ShieldIcon,
-  members: UsersIcon,
+  members: UserIcon,
+  groups: UsersIcon,
 };
 
 export function AdminApp({ section }: { section?: AdminSection }) {
@@ -158,7 +162,7 @@ function AdminMain({ section }: { section: AdminSection }) {
         <div className="main-title">
           <h1>管理平台</h1>
           <span className="subtle mono">
-            {section === "members"
+            {section === "members" || section === "groups"
               ? project.name
               : `${project.name} / harness.yaml`}
           </span>
@@ -183,6 +187,7 @@ function AdminMain({ section }: { section: AdminSection }) {
               />
             )}
             {section === "members" && <Members />}
+            {section === "groups" && <Groups />}
           </div>
         </div>
       </div>

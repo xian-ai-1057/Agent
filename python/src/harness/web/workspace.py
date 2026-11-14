@@ -53,6 +53,7 @@ from harness import compaction as compaction_lib
 from harness import credentials
 from harness import datatypes
 from harness import delegation
+from harness import knowledge as knowledge_lib
 from harness import llm
 from harness import loop
 from harness import memory as memory_lib
@@ -72,6 +73,7 @@ from harness.web import accounts as accounts_lib
 from harness.web import categories as categories_lib
 from harness.web import config as config_lib
 from harness.web import folders as folders_lib
+from harness.web import groups as groups_lib
 from harness.web import migration
 from harness.web import uploads as uploads_lib
 
@@ -229,6 +231,7 @@ class Workspace:
         auth_mode: str = "local",
         folders: folders_lib.Folders | None = None,
         users: Callable[[str], accounts_lib.User | None] | None = None,
+        groups: groups_lib.GroupStore | None = None,
     ) -> None:
         """建立 Workspace。
 
@@ -240,6 +243,8 @@ class Workspace:
             folders: 工作資料夾；預設依 harness.yaml 建立。
             users: 依識別碼查目前的帳號（帳號資料庫的 get_user）；權限
                 判斷用它讀最新的角色。None 時沿用這一輪開始時的帳號。
+            groups: 存取群組（帳號模式才有）；決定每位成員可以使用的
+                模型、agent、工具組與知識庫標籤。None 時不限制。
 
         Raises:
             ValueError: harness.yaml 的 workspaces 寫錯。
@@ -255,6 +260,7 @@ class Workspace:
         )
         self.max_upload_bytes = max_upload_bytes
         self._users = users
+        self._groups = groups if auth_mode == "accounts" else None
         self._model_fn = model_fn or llm.complete
         self._states: dict[str, _State] = {}
         # close() 停下的對話保留「執行中」的記錄，下次啟動時標成中斷。
@@ -353,15 +359,23 @@ class Workspace:
         供應商清單），工具清單也只列出他實際能用的。
         """
         project = self.project
-        hidden = self._hidden_tools(user)
+        access = self._access(user)
+        hidden = self._hidden_tools(user, access)
+        agents = self._visible_agents(access)
+        models = self._model_options(access)
         info = {
             "name": project.name,
             "root": str(project.root) if user.is_admin else "",
             "runtime": "python",
             "uploads": {"maxBytes": self.max_upload_bytes},
-            "defaultAgent": project.default_agent,
+            "defaultAgent": (
+                project.default_agent
+                if project.default_agent in agents
+                else (agents[0] if agents else project.default_agent)
+            ),
             "agents": [
-                self._agent_info(name, hidden) for name in project.agents
+                self._agent_info(name, hidden, models, access)
+                for name in agents
             ],
             "toolsets": [
                 {
@@ -375,6 +389,7 @@ class Workspace:
                     ],
                 }
                 for name, items in project.toolsets.items()
+                if access.allows("toolsets", name)
             ],
             "permissions": self._permission_settings(),
             "features": {
@@ -387,13 +402,14 @@ class Workspace:
                 "accounts": True,
                 "folders": self.auth_mode == "accounts",
                 "categories": True,
+                "groups": self._groups is not None,
             },
             "auth": {
                 "mode": self.auth_mode,
                 "user": accounts_lib.current_user(user),
             },
             "folders": [item.info() for item in self.folders.for_user(user)],
-            "models": self._model_options(),
+            "models": models,
             "skills": [
                 {
                     "name": item.name,
@@ -422,6 +438,76 @@ class Workspace:
         if not user.is_admin:
             info["model"] = self._member_model_info(info["model"])
         return info
+
+    async def list_groups(self) -> dict[str, Any]:
+        """存取群組與可以勾選的資源（管理平台的群組頁）。
+
+        Raises:
+            WebError: 不是帳號模式（沒有群組）。
+        """
+        store = self._require_groups()
+        project = self.project
+        labels: list[str] = []
+        if project.knowledge is not None:
+            with contextlib.suppress(Exception):
+                labels = await project.knowledge.labels()
+        return {
+            "groups": [item.info() for item in store.list_groups()],
+            "catalog": {
+                "models": [
+                    {"name": item["name"], "label": item["label"]}
+                    for item in self._model_options()
+                ],
+                "agents": [
+                    {"name": name, "description": agent.description}
+                    for name, agent in project.agents.items()
+                ],
+                "toolsets": [
+                    {"name": name, "tools": [item.name for item in items]}
+                    for name, items in project.toolsets.items()
+                ],
+                "knowledge": labels,
+                "hasKnowledge": project.knowledge is not None,
+            },
+        }
+
+    def create_group(self, body: dict[str, Any]) -> dict[str, Any]:
+        """建立存取群組；沒有給的資源類別是空的（什麼都不能用）。"""
+        store = self._require_groups()
+        with _group_errors():
+            group = store.create_group(
+                body.get("name"),
+                body.get("description") or "",
+                {kind: body[kind] for kind in groups_lib.KINDS if kind in body},
+                body.get("members") or [],
+            )
+        self.refresh_project()
+        return group.info()
+
+    def update_group(
+        self, group_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """修改存取群組，馬上通知瀏覽器重新讀取（成員看到的清單跟著變）。"""
+        store = self._require_groups()
+        allowed = {"name", "description", "members", *groups_lib.KINDS}
+        with _group_errors():
+            group = store.update_group(
+                group_id, {k: v for k, v in body.items() if k in allowed}
+            )
+        self.refresh_project()
+        return group.info()
+
+    def delete_group(self, group_id: str) -> None:
+        """刪除存取群組。"""
+        store = self._require_groups()
+        with _group_errors():
+            store.delete_group(group_id)
+        self.refresh_project()
+
+    def _require_groups(self) -> groups_lib.GroupStore:
+        if self._groups is None:
+            raise WebError(400, "要登入的帳號模式才有存取群組")
+        return self._groups
 
     def _member_model_info(self, model: dict[str, Any]) -> dict[str, Any]:
         """成員看到的模型設定：只留畫面需要的部分（連線是否就緒）。"""
@@ -505,10 +591,14 @@ class Workspace:
         if session_id:
             state = self._require(user, session_id)
             chosen = state.options
+            self._check_run_allowed(user, state.agent)
         else:
-            agent = agent or self.project.default_agent
+            if agent is None:
+                visible = self._visible_agents(self._access(user))
+                agent = visible[0] if visible else self.project.default_agent
             if agent not in self.project.agents:
                 raise WebError(400, f"沒有 {agent} 這個 agent")
+            self._check_run_allowed(user, agent)
             # 先檢查選項，不合法時不會留下空的對話。
             chosen = self._checked_options(
                 user, options or {}, _default_options(), agent
@@ -595,6 +685,7 @@ class Workspace:
         """
         state = self._require(user, session_id)
         self._assert_idle(state)
+        self._check_run_allowed(user, state.agent)
         if not _resumable(state.session.messages):
             raise WebError(400, "這段對話沒有需要重試的內容")
         folder = self._run_folder(user, state.options["folder"])
@@ -1687,17 +1778,104 @@ class Workspace:
             if "maxTurns" not in own:
                 agent.max_turns = self._settings["maxTurns"] or 20
 
-    def _hidden_tools(self, user: accounts_lib.User) -> set[int]:
-        """用不到的工具（以 id() 表示）：沒有沙盒時成員不能用 run_command。"""
-        if user.is_admin or self.project.sandbox is not None:
-            return set()
-        return {id(shell.run_command)}
+    def _hidden_tools(
+        self,
+        user: accounts_lib.User,
+        access: groups_lib.Access | None = None,
+    ) -> set[int]:
+        """用不到的工具（以 id() 表示）。
+
+        - 沒有沙盒時成員不能用 run_command。
+        - 所屬群組沒有開放的工具組裡的工具（同一個工具也在開放的工具組
+          裡時照樣能用）。
+        """
+        hidden: set[int] = set()
+        if not user.is_admin and self.project.sandbox is None:
+            hidden.add(id(shell.run_command))
+        access = access or self._access(user)
+        if access.toolsets is not None:
+            toolsets = self.project.toolsets
+            allowed = {
+                id(item)
+                for name, items in toolsets.items()
+                if name in access.toolsets
+                for item in items
+            }
+            hidden.update(
+                id(item)
+                for items in toolsets.values()
+                for item in items
+                if id(item) not in allowed
+            )
+        return hidden
+
+    def _access(self, user: accounts_lib.User) -> groups_lib.Access:
+        """這個人可以使用的資源（見 groups.py）；管理者與本機模式不受限制。
+
+        每次都讀最新的群組與角色，管理者在管理平台改了群組，下一次讀取
+        專案或下一輪對話就生效。
+        """
+        if self._groups is None or self._live_admin(user):
+            return groups_lib.FULL_ACCESS
+        return self._groups.access_for(user)
+
+    def _visible_agents(self, access: groups_lib.Access) -> list[str]:
+        """可以開始對話的 agent 名稱，預設 agent 排第一。"""
+        names = [
+            name
+            for name in self.project.agents
+            if access.allows("agents", name)
+        ]
+        default = self.project.default_agent
+        if default in names:
+            names.remove(default)
+            names.insert(0, default)
+        return names
+
+    def _usable_model(
+        self, access: groups_lib.Access, model: str | None
+    ) -> str | None:
+        """這一輪實際要用的模型：model（None 表示 agent 自己的）不在群組
+        開放的範圍時，換成開放清單的第一個。
+
+        Raises:
+            WebError: 群組沒有開放任何模型。
+        """
+        if access.models is None:
+            return model
+        if model is not None and model in access.models:
+            return model
+        options = self._model_options(access)
+        if not options:
+            raise WebError(403, "管理者還沒有開放任何模型給你，請聯絡管理者。")
+        return options[0]["name"]
+
+    def _check_run_allowed(self, user: accounts_lib.User, agent: str) -> None:
+        """這個人能不能用這個 agent 開始一輪對話。
+
+        Raises:
+            WebError: 所屬群組沒有開放這個 agent，或沒有開放任何模型。
+        """
+        access = self._access(user)
+        if not access.allows("agents", agent):
+            raise WebError(
+                403, f"管理者沒有開放 {agent} 給你使用，請聯絡管理者。"
+            )
+        self._usable_model(access, None)
 
     def _agent_info(
-        self, name: str, hidden: set[int] | None = None
+        self,
+        name: str,
+        hidden: set[int] | None = None,
+        models: list[dict[str, Any]] | None = None,
+        access: groups_lib.Access = groups_lib.FULL_ACCESS,
     ) -> dict[str, Any]:
         agent = self.project.agents[name]
         hidden = hidden or set()
+        model = agent.model or llm.default_model()
+        # 群組沒有開放 agent 自己的模型時，畫面上顯示實際會用的模型。
+        if access.models is not None and model not in access.models:
+            model = models[0]["name"] if models else model
         own = self._overrides.get(name, {})
         env_model = os.environ.get("HARNESS_MODEL")
         if "model" in own:
@@ -1720,17 +1898,20 @@ class Workspace:
             "tools": [
                 item.name for item in agent.tools if id(item) not in hidden
             ],
-            "model": agent.model or llm.default_model(),
+            "model": model,
             "modelSource": model_source,
             "maxTurns": agent.max_turns,
             "maxTurnsSource": turns_source,
         }
 
-    def _model_options(self) -> list[dict[str, Any]]:
+    def _model_options(
+        self, access: groups_lib.Access = groups_lib.FULL_ACCESS
+    ) -> list[dict[str, Any]]:
         """輸入框可以選的模型。
 
         依序是專案預設的模型、各 agent 的模型與 harness.yaml 的 models，
-        名稱重複的只留第一個。
+        名稱重複的只留第一個。群組有限制時只留開放的模型；預設的模型
+        不在其中時，第一個開放的模型當作預設。
         """
         default = self._settings["model"] or llm.default_model()
         choices = [{"name": default, "isDefault": True}]
@@ -1755,7 +1936,13 @@ class Workspace:
             if choice.get("isDefault"):
                 option["isDefault"] = True
             options[name] = option
-        return list(options.values())
+        found = list(options.values())
+        if access.models is None:
+            return found
+        found = [item for item in found if item["name"] in access.models]
+        if found and not any(item.get("isDefault") for item in found):
+            found[0] = {**found[0], "isDefault": True}
+        return found
 
     def _available_skills(self) -> dict[str, tuple[skills_lib.Skill, bool]]:
         """專案的 skills 加上內建 skills；同名時以專案的為準。
@@ -1787,7 +1974,8 @@ class Workspace:
             if model is not None and not isinstance(model, str):
                 raise WebError(400, "model 必須是字串或 null")
             model = (model or "").strip() or None
-            names = [item["name"] for item in self._model_options()]
+            access = self._access(user)
+            names = [item["name"] for item in self._model_options(access)]
             if model is not None and model not in names:
                 raise WebError(400, f"沒有 {model} 這個模型可以選")
             options["model"] = model
@@ -1834,8 +2022,9 @@ class Workspace:
         換成套用過選項的副本，執行到一半轉交時仍然用這段對話選的模型與
         skills。
         """
+        active = self._active_agent(state)
         agent = self._with_options(
-            state, self._active_agent(state), self._chosen_model(state), {}
+            state, active, self._run_model(state, active), {}
         )
         if self.auth_mode == "local":
             # 和加入帳號之前一樣：專案根目錄、專案自己的沙盒設定。
@@ -1883,8 +2072,20 @@ class Workspace:
         sandboxed = not user.is_admin or (
             self.auth_mode != "local" and folder.kind != "private"
         )
+        # 存取群組：沒開放的工具組拿掉，知識庫只搜尋開放的標籤。
+        access = self._access(user)
+        hidden = self._hidden_tools(user, access)
+        labels = None if access.knowledge is None else sorted(access.knowledge)
 
         def convert(item: tools_lib.Tool) -> tools_lib.Tool | None:
+            if id(item) in hidden and item is not shell.run_command:
+                return None
+            if (
+                labels is not None
+                and item.name == knowledge_lib.TOOL_NAME
+                and project.knowledge is not None
+            ):
+                return project.knowledge.narrowed(item, labels) or item
             if legacy and (
                 item is shell.run_command
                 or any(item is known for known in box_tools)
@@ -2008,6 +2209,19 @@ class Workspace:
             return None
         names = [item["name"] for item in self._model_options()]
         return model if model in names else None
+
+    def _run_model(self, state: _State, agent: agents_lib.Agent) -> str | None:
+        """這一輪的模型：對話選的，或 agent 自己的；群組有限制時換成開放
+        的模型（見 _usable_model）。None 表示用 agent 自己的。"""
+        chosen = self._chosen_model(state)
+        if self.auth_mode == "local":
+            return chosen
+        access = self._access(state.run_user or accounts_lib.LOCAL_USER)
+        if access.models is None:
+            return chosen
+        current = chosen or agent.model or llm.default_model()
+        usable = self._usable_model(access, current)
+        return None if usable == agent.model and chosen is None else usable
 
     def _sessions_dir(self, owner: str) -> pathlib.Path:
         """一個人存放對話紀錄的資料夾；本機模式和 CLI 共用專案的。"""
@@ -2371,6 +2585,15 @@ def _write_json(path: pathlib.Path, data: Any) -> None:
     temporary = path.with_name(f"{path.name}.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
     os.replace(temporary, path)
+
+
+@contextlib.contextmanager
+def _group_errors():
+    """把 GroupError 轉成 WebError 的 with 區塊。"""
+    try:
+        yield
+    except groups_lib.GroupError as error:
+        raise WebError(error.status, str(error)) from error
 
 
 @contextlib.contextmanager
