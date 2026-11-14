@@ -148,6 +148,42 @@ def save_model_choices(
     _write_checked(root, lines, matches)
 
 
+def save_block(root: pathlib.Path, key: str, value: Any) -> None:
+    """把頂層的一整個區塊換成 value（寫成多行的 YAML）；None 時刪掉。
+
+    區塊原本的位置不變（沒有的話加在檔案最後），區塊裡的註解會消失，
+    其他內容保持原樣。
+
+    Raises:
+        ValueError: 檔案格式特殊，無法安全地只改這個區塊。
+    """
+    lines = _read_lines(root)
+    pattern = re.compile(rf"^{re.escape(key)}\s*:")
+    start = next(
+        (i for i, line in enumerate(lines) if pattern.match(line)), None
+    )
+    _remove_block(lines, key)
+    if value is not None:
+        text = yaml.safe_dump(
+            {key: value},
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+        block = text.rstrip("\n").splitlines()
+        if start is None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(block)
+        else:
+            lines[start:start] = block
+
+    def matches(config: dict[str, Any]) -> bool:
+        return config.get(key) == value
+
+    _write_checked(root, lines, matches)
+
+
 def _remove_block(lines: list[str], key: str) -> None:
     """刪掉頂層的 key 和它底下縮排的內容（多行的清單或設定）。"""
     pattern = re.compile(rf"^{re.escape(key)}\s*:")

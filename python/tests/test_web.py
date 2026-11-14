@@ -1619,6 +1619,7 @@ class TestProjectChoices:
             "categories": True,
             # 本機模式只有自己一個人，沒有存取群組。
             "groups": False,
+            "knowledgeBases": True,
         }
         assert info["auth"] == {
             "mode": "local",
@@ -1730,6 +1731,7 @@ class TestSessionOptions:
             "tools": ["read_file"],
             "skills": ["planning"],
             "folder": "private",
+            "knowledge": None,
         }
 
     async def test_shared_agent_is_not_changed(self, start):
@@ -1867,6 +1869,7 @@ class TestSessionOptions:
             "tools": ["read_file"],
             "skills": [],
             "folder": "private",
+            "knowledge": None,
         }
         _, listed = await h.api("GET", "/sessions")
         assert listed[0]["model"] == "m2"
