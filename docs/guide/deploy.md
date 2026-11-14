@@ -27,6 +27,8 @@ docker compose logs harness      # 看網址與管理者 admin 自動產生的�
 
 要調整時，把 `.env.example` 複製成 `.env` 再修改，然後重新執行 `docker compose up -d`。
 
+要接上透過 LiteLLM Proxy 提供的 MCP 工具（例如網頁搜尋），見[連接 MCP 伺服器 → 用 Docker 部署時](/guide/mcp#litellm-docker)。
+
 ## 透過 proxy 連外
 
 公司網路要透過 proxy 才能連外時，在 `.env` 寫上：

@@ -21,6 +21,7 @@ import { type Agent, defineAgent } from "./agent.ts";
 import { BUILTIN_TOOLSETS } from "./builtin/index.ts";
 import {
   connectMcpServer,
+  expandServerConfig,
   type McpConnection,
   type McpServerConfig,
 } from "./mcp.ts";
@@ -79,7 +80,13 @@ export async function loadProject(path = "."): Promise<Project> {
       McpServerConfig
     >;
     for (const [name, serverConfig] of Object.entries(servers)) {
-      connections.push(await connectMcpServer(name, serverConfig, root));
+      connections.push(
+        await connectMcpServer(
+          name,
+          expandServerConfig(name, serverConfig ?? {}),
+          root,
+        ),
+      );
     }
     const projectToolsets: Toolsets = {
       ...Object.fromEntries(connections.map((item) => [item.name, item.tools])),

@@ -1,5 +1,11 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: 測試 harness.yaml 裡 ${NAME} 的寫法
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { connectMcpServer, type McpConnection } from "../src/mcp.ts";
+import {
+  connectMcpServer,
+  expandEnv,
+  expandServerConfig,
+  type McpConnection,
+} from "../src/mcp.ts";
 import { ToolError } from "../src/tool.ts";
 import { contextIn, FIXTURE_DIR, MCP_FIXTURE } from "./helpers.ts";
 
@@ -95,5 +101,37 @@ describe("connectMcpServer：失敗情況", () => {
     await expect(connectMcpServer("empty", {}, here)).rejects.toThrow(
       /必須設定 command 或 url/,
     );
+  });
+});
+
+describe("expandEnv：設定裡的環境變數", () => {
+  it("換成環境變數的值，沒有設定時用預設值", () => {
+    process.env.DEMO_KEY = "sk-123";
+    delete process.env.DEMO_MISSING;
+
+    expect(expandEnv("Bearer ${DEMO_KEY}")).toBe("Bearer sk-123");
+    expect(expandEnv("${DEMO_MISSING:-http://x}/mcp")).toBe("http://x/mcp");
+    expect(expandEnv("沒有變數 $HOME")).toBe("沒有變數 $HOME");
+  });
+
+  it("沒有設定也沒有預設值時，錯誤訊息指出變數名稱", () => {
+    delete process.env.DEMO_MISSING;
+
+    expect(() => expandEnv("${DEMO_MISSING}", "mcpServers.web")).toThrow(
+      /mcpServers.web.*DEMO_MISSING/,
+    );
+  });
+
+  it("透過 LiteLLM Proxy 的設定：網址與金鑰都從環境變數來", () => {
+    process.env.LITELLM_PROXY_URL = "http://proxy:4000";
+    process.env.LITELLM_API_KEY = "sk-test";
+
+    const config = expandServerConfig("webiq", {
+      url: "${LITELLM_PROXY_URL}/webiq/mcp",
+      headers: { "x-litellm-api-key": "Bearer ${LITELLM_API_KEY}" },
+    });
+
+    expect(config.url).toBe("http://proxy:4000/webiq/mcp");
+    expect(config.headers).toEqual({ "x-litellm-api-key": "Bearer sk-test" });
   });
 });

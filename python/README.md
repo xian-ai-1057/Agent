@@ -351,8 +351,18 @@ mcpServers:
     timeoutSeconds: 120     # 選用，單次工具呼叫最多等幾秒，預設 300
   search:
     url: https://example.com/mcp           # 遠端伺服器（Streamable HTTP）
-    headers: {X-Team: sales}               # 選用，附帶的 HTTP 標頭
+    headers:                               # 選用，附帶的 HTTP 標頭
+      Authorization: Bearer ${SEARCH_API_KEY}
+  webiq:                                   # 透過 LiteLLM Proxy 的網頁搜尋
+    url: ${LITELLM_PROXY_URL}/webiq/mcp
+    headers:
+      x-litellm-api-key: Bearer ${LITELLM_API_KEY}
 ```
+
+`args`、`env`、`url`、`headers` 裡的 `${環境變數名稱}` 會在載入時換成
+環境變數的值（`${NAME:-預設值}` 可以給預設值），金鑰不必寫進
+`harness.yaml`。LiteLLM Proxy 的設定與 Docker 部署的步驟見
+[文件](https://agent-harness-docs-ten.vercel.app/guide/mcp#litellm-proxy)。
 
 從 Claude Code、Cursor 等工具複製過來的設定可以直接用，裡面的 `type`
 （`stdio`、`http`）會被接受；舊的 `sse` 傳輸不支援，請改用伺服器的

@@ -35,6 +35,54 @@ export interface McpConnection {
 
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const STDERR_TAIL_CHARS = 2000;
+// 設定裡的 ${NAME} 或 ${NAME:-預設值} 換成環境變數，金鑰就不必寫進
+// harness.yaml。
+const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+
+/**
+ * 把字串裡的 ${NAME}、${NAME:-預設值} 換成環境變數的值。
+ *
+ * @param text 設定裡的字串。
+ * @param where 錯誤訊息裡用來指出是哪一項設定。
+ * @throws 用到的環境變數沒有設定（或是空的），也沒有寫預設值時。
+ */
+export function expandEnv(text: string, where = "設定"): string {
+  return text.replace(
+    ENV_REFERENCE,
+    (_match, variable: string, fallback: string | undefined) => {
+      const value = process.env[variable];
+      if (value) return value;
+      if (fallback !== undefined) return fallback;
+      throw new Error(
+        `${where} 用到環境變數 ${variable}，但它沒有設定；請在 .env 或啟動前的環境變數設定它`,
+      );
+    },
+  );
+}
+
+/**
+ * 把 harness.yaml 裡一個伺服器設定的 args、env、url、headers 中的
+ * ${NAME} 換成環境變數的值。
+ */
+export function expandServerConfig(
+  name: string,
+  config: McpServerConfig,
+): McpServerConfig {
+  const where = `mcpServers.${name}`;
+  const expand = (value: unknown) => expandEnv(String(value), where);
+  const expandValues = (record?: Record<string, string>) =>
+    record &&
+    Object.fromEntries(
+      Object.entries(record).map(([key, value]) => [key, expand(value)]),
+    );
+  return {
+    ...config,
+    args: config.args?.map(expand),
+    env: expandValues(config.env),
+    url: config.url ? expand(config.url) : config.url,
+    headers: expandValues(config.headers),
+  };
+}
 
 /**
  * 連上一個 MCP 伺服器並取得它的工具。
