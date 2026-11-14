@@ -9,11 +9,10 @@ import {
 } from "../../web/src/components/admin/groupAccess.ts";
 
 const CATALOG: GroupCatalog = {
-  models: [
-    { name: "a", label: "A" },
-    { name: "b", label: "B" },
+  agents: [
+    { name: "main", description: "" },
+    { name: "writer", description: "" },
   ],
-  agents: [{ name: "main", description: "" }],
   toolsets: [
     { name: "files", tools: ["read_file"] },
     { name: "shell", tools: ["run_command"] },
@@ -28,8 +27,7 @@ const GROUP: AccessGroup = {
   description: "",
   builtin: false,
   members: ["u1", "u2"],
-  models: ["a"],
-  agents: null,
+  agents: ["main"],
   toolsets: [],
   knowledge: ["hr"],
 };
@@ -43,9 +41,9 @@ describe("kindSummary", () => {
 });
 
 describe("accessSummary", () => {
-  it("列出四類資源", () => {
+  it("列出三類資源（模型由模型中台管，不在群組裡）", () => {
     expect(accessSummary(GROUP, CATALOG)).toBe(
-      "模型 1 / 2 · Agent 全部 · 工具組 無 · 知識庫標籤 1 / 1",
+      "Agent 1 / 2 · 工具組 無 · 知識庫標籤 1 / 1",
     );
   });
 
@@ -63,7 +61,7 @@ describe("groupDirty", () => {
 
   it("全部與空清單不一樣", () => {
     expect(groupDirty(GROUP, { ...GROUP, toolsets: null })).toBe(true);
-    expect(groupDirty(GROUP, { ...GROUP, agents: [] })).toBe(true);
+    expect(groupDirty(GROUP, { ...GROUP, agents: null })).toBe(true);
   });
 
   it("名稱、說明、成員改了都算", () => {

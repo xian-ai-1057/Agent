@@ -3064,6 +3064,106 @@ h3 {
   margin: 4px 0 0 38px;
 }
 
+/* 管理平台 → 稽核紀錄。 */
+.audit-exports {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.audit-verify-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.audit-verify-text > span {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.audit-icon {
+  flex: none;
+  margin-top: 3px;
+}
+
+.audit-ok {
+  color: var(--ink);
+}
+
+.audit-icon-ok {
+  color: var(--accent);
+}
+
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.audit-filters .label {
+  font-size: 13px;
+}
+
+.audit-filters .field {
+  width: 100%;
+  min-width: 0;
+}
+
+.audit-filter-actions {
+  display: flex;
+  gap: 6px;
+  height: 44px;
+  align-items: center;
+}
+
+.audit-row {
+  padding-right: 16px;
+}
+
+.audit-target {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.audit-detail {
+  font-size: 13px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
+
+.audit-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.audit-results > p {
+  margin: 0;
+}
+
+.audit-more {
+  align-self: center;
+}
+
+@media (max-width: 760px) {
+  .audit-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .audit-filter-actions {
+    grid-column: 1 / -1;
+  }
+}
+
 /* 只顯示一次的密碼。 */
 .issued-password {
   display: flex;

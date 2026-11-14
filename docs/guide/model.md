@@ -50,6 +50,8 @@ export HARNESS_API_KEY=...                      # 上面那個 LITELLM_MASTER_KE
 export HARNESS_MODEL=claude
 ```
 
+多人使用網頁版（Python 版要登入時）時，每個模型呼叫都會帶上使用者的帳號名稱（OpenAI 的 `user` 欄位與 LiteLLM 的 `x-litellm-end-user-id` 標頭），每個人的預算、限流與可用的模型就能在 LiteLLM 設定，模型選單也只列出 LiteLLM 允許的模型。見[網頁版 → 模型中台](/guide/web#模型中台)。
+
 ## 直接連模型供應商 <span class="badge-py">Python 版</span> {#直接連模型供應商}
 
 Python 版不設 `HARNESS_BASE_URL` 時，用 litellm 直接連供應商。模型名稱用 `供應商/模型` 的格式，金鑰用該供應商的環境變數：

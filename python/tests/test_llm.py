@@ -110,6 +110,7 @@ class _FakeEndpoint(http.server.BaseHTTPRequestHandler):
                 "body": body,
                 "auth": self.headers.get("Authorization"),
                 "path": self.path,
+                "headers": dict(self.headers),
             }
         )
         if self.path.endswith("/embeddings"):
@@ -307,3 +308,102 @@ def test_model_names_are_untouched_without_endpoint(monkeypatch):
 
     assert llm._endpoint_model("openai/gpt-5") == "openai/gpt-5"
     assert llm._endpoint_model("litellm_proxy/x") == "litellm_proxy/x"
+
+
+_ALICE = llm.Caller(
+    user="alice", session="s-1", metadata=(("agent", "main"), ("app", "x"))
+)
+
+
+async def test_caller_identity_reaches_the_endpoint(endpoint):
+    with llm.acting_as(_ALICE):
+        [_ async for _ in llm.complete("my-model", _MESSAGES, [], {})]
+        await llm.embed("embed-model", ["一段"])
+        await llm.rerank("rerank-model", "q", ["文件"])
+
+    chat, embedding, rerank = endpoint.received
+    for sent in (chat, embedding, rerank):
+        headers = {k.lower(): v for k, v in sent["headers"].items()}
+        assert headers["x-litellm-end-user-id"] == "alice"
+        assert headers["x-litellm-trace-id"] == "s-1"
+        assert json.loads(headers["x-litellm-spend-logs-metadata"]) == {
+            "agent": "main",
+            "app": "x",
+        }
+    assert chat["body"]["user"] == "alice"
+    assert embedding["body"]["user"] == "alice"
+    assert "user" not in rerank["body"]
+
+
+async def test_no_identity_without_a_caller(endpoint):
+    [_ async for _ in llm.complete("my-model", _MESSAGES, [], {})]
+
+    sent = endpoint.received[0]
+    assert "user" not in sent["body"]
+    headers = {k.lower() for k in sent["headers"]}
+    assert "x-litellm-end-user-id" not in headers
+
+
+def test_identity_is_only_sent_to_an_endpoint(monkeypatch):
+    monkeypatch.delenv("HARNESS_BASE_URL", raising=False)
+
+    with llm.acting_as(_ALICE):
+        assert llm.identity_options() == {}
+    monkeypatch.setenv("HARNESS_BASE_URL", "http://proxy/v1")
+    with llm.acting_as(_ALICE):
+        assert llm.identity_options()["extra_body"] == {"user": "alice"}
+    assert llm.current_caller() is None
+
+
+def test_identity_headers_are_ascii():
+    caller = llm.Caller(user="王小明", metadata=(("agent", "寫作"),))
+
+    headers = caller.headers()
+
+    assert all(value.isascii() for value in headers.values())
+    assert json.loads(f'"{headers["x-litellm-end-user-id"]}"') == "王小明"
+    assert "x-litellm-trace-id" not in headers
+
+
+class _Status(Exception):
+    def __init__(self, message, status_code, headers=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = type("R", (), {"headers": headers or {}})()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            _Status("Budget has been exceeded! Current cost: 3", 400),
+            "額度已經用完",
+        ),
+        (
+            _Status("ExceededBudget: End User=alice over budget.", 400),
+            "額度已經用完",
+        ),
+        (_Status("You exceeded your current quota", 429), "模型服務的額度"),
+        (
+            _Status("Rate limit", 429, {"retry-after": "30"}),
+            "等 30 秒後再按「重試」",
+        ),
+        (_Status("Rate limit", 429), "稍等一分鐘"),
+        (
+            _Status("team not allowed to access model. Tried gpt-x", 401),
+            "沒有使用這個模型的權限",
+        ),
+        (
+            _Status("Invalid model name passed in model=gpt-x", 400),
+            "找不到這個模型",
+        ),
+        (_Status("Authentication Error, Invalid proxy token", 401), "金鑰"),
+    ],
+)
+def test_explain_error(error, expected):
+    assert expected in llm.explain_error(error)
+
+
+def test_explain_error_leaves_other_errors_alone():
+    assert llm.explain_error(RuntimeError("connection reset")) is None
+    assert llm.explain_error(_Status("bad request", 400)) is None

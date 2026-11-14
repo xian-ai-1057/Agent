@@ -130,6 +130,19 @@ describe("帳號模式與角色", () => {
     ]);
   });
 
+  it("伺服器有稽核紀錄時多了稽核紀錄（本機模式也有）", () => {
+    const admin = project(
+      { accounts: true, groups: true, audit: true },
+      { auth: { mode: "accounts", user: user("admin") } },
+    );
+    const local = project(
+      { accounts: true, audit: true },
+      { auth: { mode: "local", user: user("admin") } },
+    );
+    expect(adminSections(admin).at(-1)).toBe("audit");
+    expect(adminSections(local)).toEqual(["model", "permissions", "audit"]);
+  });
+
   it("成員不能用管理平台", () => {
     const member = accounts("member");
     expect(isMember(member)).toBe(true);

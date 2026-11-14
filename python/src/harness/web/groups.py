@@ -1,9 +1,12 @@
-"""存取群組：管理者決定每位成員可以使用哪些模型、agent、工具與知識庫。
+"""存取群組：管理者決定每位成員可以使用哪些 agent、工具與知識庫。
 
 做法參考 MaiAgent 的角色與 LiteLLM 的 access group：
 
-    - 群組列出可以使用的資源：模型、agent、工具組（toolset）與知識庫
-      標籤。每一類可以是「全部」（存成 NULL），或一份名稱清單。
+    - 群組列出可以使用的資源：agent、工具組（toolset）與知識庫標籤。
+      每一類可以是「全部」（存成 NULL），或一份名稱清單。
+    - 模型不歸群組管：誰能用哪些模型、額度與限流由模型中台（LiteLLM
+      Proxy）決定，見 workspace.py 的 refresh_model_access。資料表保留
+      舊的 models 欄位，但不再讀取。
     - 每位成員自動屬於內建的「所有人」群組（不能刪除、不能移出），另外
       可以加入其他群組。能用的資源是所屬群組的聯集。
     - 新建的群組預設什麼都不能用；「所有人」一開始是全部，升級後原本
@@ -12,7 +15,7 @@
 
 群組存在帳號資料庫（.harness/harness.db）：
 
-    access_groups   群組：識別碼、名稱、說明、四類資源（JSON 或 NULL）
+    access_groups   群組：識別碼、名稱、說明、三類資源（JSON 或 NULL）
     group_members   成員屬於哪些群組（不含「所有人」，它是隱含的）
 
 這裡只管資料；伺服器怎麼依 Access 擋下沒開放的資源見 workspace.py。
@@ -30,8 +33,8 @@ from harness.web import accounts as accounts_lib
 
 EVERYONE_ID = "everyone"
 EVERYONE_NAME = "所有人"
-# 四類資源，對應資料表的欄位與 API 的欄位。
-KINDS = ("models", "agents", "toolsets", "knowledge")
+# 群組管的三類資源，對應資料表的欄位與 API 的欄位。
+KINDS = ("agents", "toolsets", "knowledge")
 _NAME_LIMIT = 40
 _DESCRIPTION_LIMIT = 200
 _LIST_LIMIT = 500
@@ -70,7 +73,10 @@ class GroupError(Exception):
 
 @dataclasses.dataclass(frozen=True)
 class Access:
-    """一個人可以使用的資源。每一類是 None（全部）或名稱的集合。"""
+    """一個人可以使用的資源。每一類是 None（全部）或名稱的集合。
+
+    models 不是群組決定的：由 workspace 依模型中台的回覆填入。
+    """
 
     models: frozenset[str] | None = None
     agents: frozenset[str] | None = None
@@ -79,8 +85,8 @@ class Access:
 
     @property
     def unrestricted(self) -> bool:
-        """四類都是全部。"""
-        return all(getattr(self, kind) is None for kind in KINDS)
+        """每一類都是全部。"""
+        return all(getattr(self, kind) is None for kind in ("models", *KINDS))
 
     def allows(self, kind: str, name: str) -> bool:
         """這一類資源裡的 name 能不能用。"""
@@ -100,7 +106,6 @@ class Group:
         id: 識別碼；內建的「所有人」是 everyone。
         name: 顯示名稱，不分大小寫不能重複。
         description: 說明（可以空白）。
-        models: 可以使用的模型名稱；None 表示全部。
         agents: 可以開始對話的 agent；None 表示全部。
         toolsets: 可以使用的工具組；None 表示全部。
         knowledge: 可以搜尋的知識庫標籤；None 表示全部。沒有標籤的
@@ -111,7 +116,6 @@ class Group:
     id: str
     name: str
     description: str = ""
-    models: tuple[str, ...] | None = None
     agents: tuple[str, ...] | None = None
     toolsets: tuple[str, ...] | None = None
     knowledge: tuple[str, ...] | None = None
@@ -203,8 +207,8 @@ class GroupStore:
             try:
                 db.execute(
                     "INSERT INTO access_groups (id, name, description, "
-                    "models, agents, toolsets, knowledge, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "agents, toolsets, knowledge, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         group_id,
                         _checked_name(name),
@@ -339,7 +343,6 @@ def _group(row: sqlite3.Row, members: tuple[str, ...]) -> Group:
         id=row["id"],
         name=row["name"],
         description=row["description"] or "",
-        models=_decode(row["models"]),
         agents=_decode(row["agents"]),
         toolsets=_decode(row["toolsets"]),
         knowledge=_decode(row["knowledge"]),

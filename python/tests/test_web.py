@@ -1619,6 +1619,8 @@ class TestProjectChoices:
             "categories": True,
             # 本機模式只有自己一個人，沒有存取群組。
             "groups": False,
+            # 稽核紀錄本機模式也有（帳號是 local）。
+            "audit": True,
         }
         assert info["auth"] == {
             "mode": "local",

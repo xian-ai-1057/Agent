@@ -244,11 +244,16 @@ export interface ServerFeatures {
    */
   categories?: boolean;
   /**
-   * 存取群組（帳號模式）：管理者決定每位成員可以用哪些模型、agent、工具
-   * 組與知識庫標籤（見 AccessGroup）。成員拿到的 ProjectInfo 已經只列出
-   * 開放給他的部分。
+   * 存取群組（帳號模式）：管理者決定每位成員可以用哪些 agent、工具組與
+   * 知識庫標籤（見 AccessGroup）。成員拿到的 ProjectInfo 已經只列出開放
+   * 給他的部分。模型不歸群組管，見 ProjectInfo.models。
    */
   groups?: boolean;
+  /**
+   * 稽核紀錄（Python 版）：管理平台可以查詢與匯出登入、成員、群組、設定
+   * 與工具核准的紀錄（見 AuditEntry）。
+   */
+  audit?: boolean;
 }
 
 /**
@@ -324,8 +329,11 @@ export interface IssuedPassword {
   password: string;
 }
 
-/** 存取群組可以控制的資源類別。 */
-export type AccessKind = "models" | "agents" | "toolsets" | "knowledge";
+/**
+ * 存取群組可以控制的資源類別。模型不在這裡：誰能用哪些模型、額度與限流
+ * 由模型中台（LiteLLM Proxy）決定。
+ */
+export type AccessKind = "agents" | "toolsets" | "knowledge";
 
 /**
  * 存取群組（Python 版帳號模式，只有管理者能讀寫）。每一類資源是名稱清單，
@@ -333,8 +341,8 @@ export type AccessKind = "models" | "agents" | "toolsets" | "knowledge";
  * members 是空的、不能刪除或改名），能用的資源是所屬群組的聯集；管理者
  * 不受限制。新建的群組沒有給的類別是空的（什麼都不能用）。
  *   GET    /api/admin/groups → {groups: AccessGroup[], catalog: GroupCatalog}
- *   POST   /api/admin/groups {name, description?, members?, models?, …}
- *   PATCH  /api/admin/groups/:id {name?, description?, members?, models?, …}
+ *   POST   /api/admin/groups {name, description?, members?, agents?, …}
+ *   PATCH  /api/admin/groups/:id {name?, description?, members?, agents?, …}
  *   DELETE /api/admin/groups/:id
  */
 export interface AccessGroup {
@@ -344,7 +352,6 @@ export interface AccessGroup {
   builtin: boolean;
   /** 成員的 id（MemberInfo.id）。 */
   members: string[];
-  models: string[] | null;
   agents: string[] | null;
   toolsets: string[] | null;
   /** 可以搜尋的知識庫標籤；沒有標籤的文件所有人都搜尋得到。 */
@@ -353,7 +360,6 @@ export interface AccessGroup {
 
 /** 群組頁可以勾選的資源。 */
 export interface GroupCatalog {
-  models: { name: string; label: string }[];
   agents: { name: string; description: string }[];
   toolsets: { name: string; tools: string[] }[];
   knowledge: string[];
@@ -364,6 +370,58 @@ export interface GroupCatalog {
 export interface GroupList {
   groups: AccessGroup[];
   catalog: GroupCatalog;
+}
+
+/**
+ * 一筆稽核紀錄（Python 版，只有管理者能讀）。紀錄只能新增，不能修改或
+ * 刪除；每一筆有前一筆的雜湊，串成一條鏈（匯出的檔案裡有雜湊）。
+ *   GET /api/admin/audit?category&actor&since&until&before&limit → AuditPage
+ *   GET /api/admin/audit/verify → AuditVerification
+ *   GET /api/admin/audit/export?format=csv|jsonl&… → 下載檔案（匯出本身也會記一筆）
+ */
+export interface AuditEntry {
+  /** 流水號，從 1 開始，越新越大。 */
+  seq: number;
+  /** 時間（毫秒）。 */
+  at: number;
+  /** 做這件事的人；登入失敗等不知道是誰時都是空字串。 */
+  actor: { id: string; username: string };
+  /** 動作代碼，例如 auth.login、member.update、approval.decide。 */
+  action: string;
+  /** 動作的中文名稱。 */
+  label: string;
+  /** 對象：帳號、群組名稱或工具名稱。 */
+  target: string;
+  /** 其他資訊，內容依動作而不同。 */
+  detail: Record<string, unknown>;
+  /** 請求的來源 IP。 */
+  address: string;
+}
+
+/** 稽核紀錄的查詢條件；時間是毫秒，until 不包含。 */
+export interface AuditFilters {
+  /** 分類：auth、member、group、settings、approval、audit。 */
+  category?: string;
+  /** 帳號名稱（做這件事的人或對象），部分符合即可。 */
+  actor?: string;
+  since?: number;
+  until?: number;
+}
+
+export interface AuditPage {
+  /** 新的在前；下一頁用最後一筆的 seq 當 before。 */
+  entries: AuditEntry[];
+  /** 符合條件的總筆數。 */
+  total: number;
+  /** 分類代碼 → 中文名稱。 */
+  categories: Record<string, string>;
+}
+
+/** 從第一筆開始檢查雜湊鏈的結果；brokenAt 是第一筆對不上的流水號。 */
+export interface AuditVerification {
+  ok: boolean;
+  checked: number;
+  brokenAt?: number;
 }
 
 /**

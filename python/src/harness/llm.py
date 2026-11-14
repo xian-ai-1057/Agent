@@ -9,12 +9,21 @@
 
 主迴圈只認得 ModelFn 這個介面，所以測試可以換成假的模型函式，完全
 不需要連網。
+
+使用者身分：連 OpenAI 相容端點時，acting_as() 設定的 Caller 會附在這一輪
+的每個模型呼叫上（OpenAI 的 user 欄位與 LiteLLM 的 x-litellm-end-user-id
+等標頭），模型中台才能依使用者記帳、套用額度與限流。直接連供應商時不送，
+帳號名稱不會交給外部的模型供應商。
 """
 
+import contextlib
+import contextvars
+import dataclasses
 import json
 import os
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from collections.abc import Iterator
 from typing import Any
 
 from harness import datatypes
@@ -33,6 +42,102 @@ _OVERFLOW_PATTERNS = (
     "input is too long",
     "exceeds the context",
 )
+
+# LiteLLM Proxy 認得的標頭：使用者（customer / end user）、同一段對話的
+# 追蹤碼，以及另外記在花費紀錄的資訊。
+END_USER_HEADER = "x-litellm-end-user-id"
+TRACE_HEADER = "x-litellm-trace-id"
+METADATA_HEADER = "x-litellm-spend-logs-metadata"
+
+
+@dataclasses.dataclass(frozen=True)
+class Caller:
+    """發出這一輪請求的人，連模型中台時附在每個模型與 MCP 呼叫上。
+
+    Attributes:
+        user: 使用者識別（帳號名稱），中台依它記帳、套用額度與限流。
+        session: 對話識別碼，中台用它把同一段對話的呼叫串起來。
+        metadata: 另外記在中台花費紀錄的資訊（例如 agent 名稱）。
+    """
+
+    user: str
+    session: str = ""
+    metadata: tuple[tuple[str, str], ...] = ()
+
+    def headers(self) -> dict[str, str]:
+        """要附在 HTTP 請求上的標頭（值都是 ASCII）。"""
+        headers = {END_USER_HEADER: _ascii(self.user)}
+        if self.session:
+            headers[TRACE_HEADER] = _ascii(self.session)
+        if self.metadata:
+            headers[METADATA_HEADER] = json.dumps(dict(self.metadata))
+        return headers
+
+
+_CALLER: contextvars.ContextVar[Caller | None] = contextvars.ContextVar(
+    "harness_caller", default=None
+)
+
+
+def current_caller() -> Caller | None:
+    """目前這個 asyncio task（與它開出的 task）的 Caller；沒有設定時為 None。"""
+    return _CALLER.get()
+
+
+def set_caller(caller: Caller | None) -> None:
+    """設定目前這個 asyncio task 的 Caller，直到 task 結束。
+
+    只在專門執行一輪對話的 task 裡使用（網頁版每一輪都是自己的 task）；
+    其他地方用 acting_as，離開時會恢復原本的值。
+    """
+    _CALLER.set(caller)
+
+
+@contextlib.contextmanager
+def acting_as(caller: Caller | None) -> Iterator[None]:
+    """在這段程式裡發出的模型與 MCP 呼叫都附上 caller 的身分。
+
+    用 contextvars 傳遞：同一個 asyncio task 以及它開出的 task（subagent、
+    背景工具）都看得到，其他人的對話不受影響。
+
+    Args:
+        caller: 發出請求的人；None 表示不附身分。
+    """
+    token = _CALLER.set(caller)
+    try:
+        yield
+    finally:
+        _CALLER.reset(token)
+
+
+def identity_options(*, rerank: bool = False) -> dict[str, Any]:
+    """連 OpenAI 相容端點時，要加進 litellm 參數的使用者身分。
+
+    user 放在 extra_body：litellm 對它不認得的模型名稱（中台上自訂的
+    名稱）會把 user 參數當成不支援而丟掉，extra_body 則原樣送出。
+
+    Args:
+        rerank: 給 rerank 用。rerank 沒有 user 欄位，標頭也要用 headers
+            參數才會送出。
+
+    Returns:
+        litellm 的參數；沒有設定端點或沒有 Caller 時是空的。
+    """
+    caller = current_caller()
+    if caller is None or not os.environ.get("HARNESS_BASE_URL"):
+        return {}
+    if rerank:
+        return {"headers": caller.headers()}
+    return {
+        "extra_headers": caller.headers(),
+        "extra_body": {"user": caller.user},
+    }
+
+
+def _ascii(value: str) -> str:
+    """HTTP 標頭只能放 ASCII：其他字元換成 JSON 的 \\u 寫法。"""
+    return json.dumps(value)[1:-1] if not value.isascii() else value
+
 
 # 模型函式：依序產生文字片段（str），最後產生一個 ModelResponse。
 ModelFn = Callable[
@@ -90,6 +195,7 @@ async def complete(
         # 換模型時，自動略過該模型不支援的參數。
         "drop_params": True,
         **_endpoint_options(),
+        **identity_options(),
         **params,
     }
     if tools:
@@ -125,7 +231,10 @@ async def embed(model: str, texts: list[str]) -> list[list[float]]:
     for start in range(0, len(texts), EMBED_BATCH_SIZE):
         batch = texts[start : start + EMBED_BATCH_SIZE]
         response = await litellm.aembedding(
-            model=_endpoint_model(model), input=batch, **_endpoint_options()
+            model=_endpoint_model(model),
+            input=batch,
+            **_endpoint_options(),
+            **identity_options(),
         )
         rows = sorted(response.data, key=lambda row: _field(row, "index"))
         vectors += [list(_field(row, "embedding")) for row in rows]
@@ -159,6 +268,7 @@ async def rerank(model: str, query: str, documents: list[str]) -> list[float]:
         documents=documents,
         return_documents=False,
         **_rerank_endpoint_options(),
+        **identity_options(rerank=True),
     )
     scores = [0.0] * len(documents)
     for row in response.results or []:
@@ -229,6 +339,84 @@ def is_context_overflow(error: BaseException) -> bool:
         return True
     text = str(error).lower()
     return any(pattern in text for pattern in _OVERFLOW_PATTERNS)
+
+
+# 模型中台（LiteLLM Proxy）回覆的錯誤裡辨識原因用的字樣。
+_BUDGET_PATTERNS = (
+    "budget has been exceeded",
+    "over budget",
+    "budget_exceeded",
+)
+_QUOTA_PATTERNS = ("insufficient_quota", "exceeded your current quota")
+_MODEL_DENIED_PATTERNS = (
+    "not allowed to access model",
+    "not allowed to call model",
+)
+_UNKNOWN_MODEL_PATTERNS = (
+    "invalid model name",
+    "model not found",
+    "no deployments",
+)
+
+
+def explain_error(error: BaseException) -> str | None:
+    """把模型呼叫失敗的原因換成一般使用者看得懂的說明。
+
+    主要對應模型中台（LiteLLM Proxy）的回覆：額度用完、限流（429）、沒有
+    使用這個模型的權限、中台沒有這個模型、金鑰被拒絕。
+
+    Args:
+        error: 呼叫模型時發生的例外。
+
+    Returns:
+        說明文字；認不出原因時為 None（呼叫端顯示原始訊息）。
+    """
+    text = str(error).lower()
+    status = getattr(error, "status_code", None)
+    names = {item.__name__ for item in type(error).__mro__}
+    if any(pattern in text for pattern in _BUDGET_PATTERNS) or (
+        "BudgetExceededError" in names
+    ):
+        return (
+            "你的模型使用額度已經用完，暫時不能使用模型。"
+            "請聯絡管理者調整額度，或等額度重新計算後再試。"
+        )
+    if any(pattern in text for pattern in _QUOTA_PATTERNS):
+        return "模型服務的額度已經用完，請聯絡管理者。"
+    if status == 429 or "RateLimitError" in names:
+        wait = _retry_after(error)
+        when = f"等 {wait} 秒" if wait else "稍等一分鐘"
+        return (
+            "現在使用的人太多，或你短時間內送出太多請求，模型中台暫時限制了"
+            f"請求。請{when}後再按「重試」。"
+        )
+    if any(pattern in text for pattern in _MODEL_DENIED_PATTERNS):
+        return (
+            "你沒有使用這個模型的權限。請在輸入框的模型選單換一個模型，"
+            "或聯絡管理者開通。"
+        )
+    if any(pattern in text for pattern in _UNKNOWN_MODEL_PATTERNS):
+        return "模型中台找不到這個模型，請換一個模型，或請管理者確認模型名稱。"
+    if status == 401 or "AuthenticationError" in names:
+        return "模型中台拒絕了連線金鑰，請聯絡管理者確認模型連線設定。"
+    return None
+
+
+def _retry_after(error: BaseException) -> int | None:
+    """429 回覆的 Retry-After（秒）；沒有或看不懂時為 None。"""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get("retry-after")
+    except Exception:  # noqa: BLE001 - 各家 response 物件不同，拿不到就算了
+        return None
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return seconds if 0 < seconds <= 3600 else None
 
 
 def _endpoint_options() -> dict[str, Any]:

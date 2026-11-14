@@ -1,6 +1,7 @@
 /**
- * 管理平台 → 群組（多人帳號模式）：管理者決定每位成員可以使用的模型、
- * agent、工具組與知識庫標籤。
+ * 管理平台 → 群組（多人帳號模式）：管理者決定每位成員可以使用的
+ * agent、工具組與知識庫標籤。模型不在這裡管：誰能用哪些模型、額度與
+ * 限流由模型中台（LiteLLM Proxy）決定。
  *
  * 參考 MaiAgent 的角色與 LiteLLM 的 access group：每位成員自動屬於「所
  * 有人」，另外可以加入其他群組，能用的資源是所屬群組加起來。新建的群組
@@ -89,8 +90,9 @@ export function Groups() {
         <div>
           <h2 id="h-groups">群組</h2>
           <p className="lead">
-            決定每位成員可以使用哪些模型、agent、工具與知識庫。每位成員都屬於「所有人」，
-            加入其他群組後，能用的是這些群組加起來；管理者不受限制。
+            決定每位成員可以使用哪些
+            agent、工具與知識庫。每位成員都屬於「所有人」，
+            加入其他群組後，能用的是這些群組加起來；管理者不受限制。模型、額度與限流由模型中台（LiteLLM）管理。
           </p>
         </div>
         <button
@@ -272,7 +274,6 @@ function GroupEditor({
     const changes: GroupChanges = {
       name: draft.name.trim(),
       description: draft.description.trim(),
-      models: draft.models,
       agents: draft.agents,
       toolsets: draft.toolsets,
       knowledge: draft.knowledge,
@@ -293,11 +294,6 @@ function GroupEditor({
     AccessKind,
     { name: string; label: string; hint?: string }[]
   > = {
-    models: catalog.models.map((item) => ({
-      name: item.name,
-      label: item.label,
-      hint: item.label !== item.name ? item.name : undefined,
-    })),
     agents: catalog.agents.map((item) => ({
       name: item.name,
       label: item.name,
