@@ -94,6 +94,7 @@ export function adminSections(
   if (accountsMode(project) && project?.features?.groups) {
     sections.push("groups");
   }
+  if (project?.features?.audit) sections.push("audit");
   return sections;
 }
 

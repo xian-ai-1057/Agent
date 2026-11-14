@@ -3,7 +3,7 @@
  *
  * - 設定（網址 /settings/<分類>）：每個人看到的都一樣，只能看。
  * - 管理平台（網址 /admin/<分類>）：管理者改模型連線、權限、知識庫、
- *   成員與群組；知識庫的維護者只看得到知識庫。
+ *   成員與群組，查詢稽核紀錄；知識庫的維護者只看得到知識庫。
  */
 
 export type SettingsSection = "tools" | "agents";
@@ -15,7 +15,8 @@ export type AdminSection =
   | "permissions"
   | "knowledge"
   | "members"
-  | "groups";
+  | "groups"
+  | "audit";
 
 export const ADMIN_SECTIONS: AdminSection[] = [
   "model",
@@ -23,4 +24,5 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   "knowledge",
   "members",
   "groups",
+  "audit",
 ];

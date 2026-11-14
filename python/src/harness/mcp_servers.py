@@ -7,6 +7,12 @@
 close()。這樣連線就不屬於任何一個呼叫端的事件迴圈：同步的 load_project、
 每次請求各自 asyncio.run 的網頁服務、命令列的聊天都能共用同一條連線。
 
+使用者身分：forward_user 開啟時（連到模型中台同一個網址的伺服器預設開啟，
+見 from_config），每次工具呼叫都附上 llm.acting_as() 設定的使用者，以
+LiteLLM 的 x-litellm-end-user-id 等標頭送出，中台才能依使用者記錄與管控
+MCP 的使用。連線是大家共用的，所以身分放在這次呼叫的 _meta 裡，送出 HTTP
+請求前再轉成標頭（見 _identity_hook）。
+
 需要 MCP 的 Python SDK：pip install "mcp>=2"。
 """
 
@@ -22,7 +28,9 @@ import threading
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from typing import Any
+from urllib import parse
 
+from harness import llm
 from harness import tools as tools_lib
 
 DEFAULT_TIMEOUT_SECONDS = 300
@@ -34,6 +42,9 @@ _CLIENT_NAME = "agent-harness"
 # harness.yaml。
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 # Claude Code、Cursor 等工具的 MCP 設定會寫 type，值與需要的欄位對應。
+# 工具呼叫的 _meta 裡放使用者身分標頭的欄位，以及可以轉成標頭的名稱。
+_IDENTITY_META = "agentharness/identity"
+_IDENTITY_HEADERS = (llm.END_USER_HEADER, llm.TRACE_HEADER, llm.METADATA_HEADER)
 _TRANSPORT_TYPES = {
     "stdio": "command",
     "http": "url",
@@ -52,9 +63,12 @@ class McpConnection:
         tools: 伺服器提供的工具。
     """
 
-    def __init__(self, name: str, timeout_seconds: float) -> None:
+    def __init__(
+        self, name: str, timeout_seconds: float, forward_user: bool = False
+    ) -> None:
         self.name = name
         self.tools: list[tools_lib.Tool] = []
+        self.forward_user = forward_user
         self._timeout = timeout_seconds
         self._client: Any = None
         self._stop = asyncio.Event()
@@ -164,9 +178,14 @@ class McpConnection:
         client = self._client
         if client is None:
             raise tools_lib.ToolError(f"MCP 伺服器 {self.name} 已經斷線")
+        caller = llm.current_caller() if self.forward_user else None
+        meta = {_IDENTITY_META: caller.headers()} if caller else None
         future = asyncio.run_coroutine_threadsafe(
             client.call_tool(
-                tool_name, arguments, read_timeout_seconds=self._timeout
+                tool_name,
+                arguments,
+                read_timeout_seconds=self._timeout,
+                meta=meta,
             ),
             self._loop,
         )
@@ -189,6 +208,7 @@ def connect(
     headers: dict[str, str] | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
+    forward_user: bool = False,
 ) -> McpConnection:
     """連上一個 MCP 伺服器並取得它的工具。
 
@@ -214,6 +234,8 @@ def connect(
         timeout_seconds: 單次工具呼叫最多等幾秒。
         startup_timeout_seconds: 啟動並完成連線最多等幾秒（第一次用 npx
             這類指令時可能要先下載）。
+        forward_user: 遠端伺服器的工具呼叫要不要附上使用者身分標頭（見
+            模組說明）；本機程式（command）不適用。
 
     Returns:
         已連線的 McpConnection，用完要 close()。
@@ -227,7 +249,9 @@ def connect(
         raise ValueError(f"MCP 伺服器 {name} 必須設定 command 或 url（擇一）")
     mcp = _import_mcp(name)
     stderr = _StderrTail() if command else None
-    connection = McpConnection(name, timeout_seconds)
+    connection = McpConnection(
+        name, timeout_seconds, forward_user=bool(url) and forward_user
+    )
 
     @contextlib.asynccontextmanager
     async def open_client() -> AsyncIterator[Any]:
@@ -296,7 +320,7 @@ def from_config(
     """
     config = config or {}
     known = {"type", "command", "args", "env", "url", "headers"}
-    known.add("timeoutSeconds")
+    known.update({"timeoutSeconds", "forwardUser"})
     unknown = sorted(set(config) - known)
     if unknown:
         raise ValueError(
@@ -310,15 +334,40 @@ def from_config(
 
     url = config.get("url")
     headers = config.get("headers") or {}
+    forward = config.get("forwardUser")
+    if forward is not None and not isinstance(forward, bool):
+        raise ValueError(f"mcpServers.{name}.forwardUser 必須是 true 或 false")
+    expanded_url = expand(url) if url else None
+    if forward is None:
+        forward = bool(expanded_url) and _same_origin(
+            expanded_url, os.environ.get("HARNESS_BASE_URL", "")
+        )
     return connect(
         name,
         command=config.get("command"),
         args=[expand(item) for item in config.get("args") or []],
         env={k: expand(v) for k, v in (config.get("env") or {}).items()},
         cwd=cwd,
-        url=expand(url) if url else None,
+        url=expanded_url,
         headers={k: expand(v) for k, v in headers.items()},
         timeout_seconds=config.get("timeoutSeconds") or DEFAULT_TIMEOUT_SECONDS,
+        forward_user=forward,
+    )
+
+
+def _same_origin(url: str, other: str) -> bool:
+    """兩個網址是不是同一台伺服器（scheme、主機與 port 都一樣）。"""
+    if not url or not other:
+        return False
+    first, second = parse.urlsplit(url), parse.urlsplit(other)
+    return (
+        first.scheme.lower(),
+        (first.hostname or "").lower(),
+        first.port,
+    ) == (
+        second.scheme.lower(),
+        (second.hostname or "").lower(),
+        second.port,
     )
 
 
@@ -422,7 +471,36 @@ async def _http_transport(
     http_client = await stack.enter_async_context(
         streamable_http.create_mcp_http_client(headers=headers or None)
     )
+    hooks = http_client.event_hooks
+    http_client.event_hooks = {
+        **hooks,
+        "request": [*hooks.get("request", []), _identity_hook],
+    }
     return streamable_http.streamable_http_client(url, http_client=http_client)
+
+
+async def _identity_hook(request: Any) -> None:
+    """送出 HTTP 請求前，把工具呼叫 _meta 裡的使用者身分轉成標頭。
+
+    只有 forward_user 開啟的連線會在 _meta 放身分（見 McpConnection._call），
+    而且只接受 LiteLLM 的那幾個標頭名稱。
+    """
+    if request.method != "POST":
+        return
+    try:
+        body = json.loads(request.content or b"null")
+    except (ValueError, RuntimeError):
+        # RuntimeError：串流的請求內容還沒讀取，不會是工具呼叫。
+        return
+    params = body.get("params") if isinstance(body, dict) else None
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    identity = meta.get(_IDENTITY_META) if isinstance(meta, dict) else None
+    if not isinstance(identity, dict):
+        return
+    for name in _IDENTITY_HEADERS:
+        value = identity.get(name)
+        if isinstance(value, str) and value.isascii():
+            request.headers[name] = value
 
 
 def _import_mcp(name: str) -> Any:

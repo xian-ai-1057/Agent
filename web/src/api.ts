@@ -3,6 +3,9 @@
 import type {
   AccessGroup,
   ApprovalDecision,
+  AuditFilters,
+  AuditPage,
+  AuditVerification,
   BulkRequest,
   BulkResult,
   ChatCategory,
@@ -29,6 +32,7 @@ import type {
   UploadedFile,
 } from "../../src/web/protocol.ts";
 import { LOCAL_KEY_REQUIRED } from "../../src/web/protocol.ts";
+import { auditQuery } from "./components/admin/auditFormat.ts";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -230,7 +234,22 @@ export const api = {
       query,
       topK,
     }),
+  // 稽核紀錄（features.audit）。
+  audit: (filters: AuditFilters, before?: number) =>
+    request<AuditPage>(
+      "GET",
+      `/admin/audit?${auditQuery(filters, { before, limit: 50 })}`,
+    ),
+  verifyAudit: () => request<AuditVerification>("GET", "/admin/audit/verify"),
 };
+
+/** 匯出稽核紀錄的網址（瀏覽器直接下載）。 */
+export function auditExportUrl(
+  filters: AuditFilters,
+  format: "csv" | "jsonl",
+): string {
+  return `/api/admin/audit/export?${auditQuery(filters, { format })}`;
+}
 
 /** 用 multipart 上傳一個檔案（要帶 X-Harness-Upload 標頭），回傳 files。 */
 async function sendFile<T>(path: string, file: File): Promise<T[]> {

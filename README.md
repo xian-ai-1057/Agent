@@ -621,10 +621,19 @@ harness web --port 8080     # 換埠號
   選單（不必登入時是側欄底部）進入管理平台，聊天介面對管理者與成員
   都一樣（見[說明文件的「管理平台」](https://agent-harness-docs-ten.vercel.app/guide/web#管理平台)）。
 - **存取群組**（Python 版要登入時）：管理者在「管理平台 → 群組」決定每位
-  成員能用哪些模型、agent、工具組、知識庫與知識庫標籤。每位成員都屬於內建的
+  成員能用哪些 agent、工具組、知識庫與知識庫標籤。每位成員都屬於內建的
   「所有人」群組，加入其他群組後能用的是這些群組加起來的範圍；管理者不受
   限制。限制在伺服器上執行，成員直接呼叫 API 也繞不過（見
   [說明文件的「存取群組」](https://agent-harness-docs-ten.vercel.app/guide/web#存取群組)）。
+- **模型中台**（Python 版）：連 LiteLLM Proxy 時，每個模型與 MCP 呼叫都帶上
+  使用者（`user` 欄位與 `x-litellm-end-user-id` 標頭），每人預算、限流與
+  可用的模型在 LiteLLM 設定；模型選單只列 LiteLLM 允許的模型，額度用完或
+  被限流時顯示看得懂的說明（見
+  [說明文件的「模型中台」](https://agent-harness-docs-ten.vercel.app/guide/web#模型中台)）。
+- **稽核紀錄**（Python 版）：登入、成員與群組變更、權限與模型設定、工具
+  核准都記在只能新增的紀錄裡（雜湊鏈防竄改），管理平台可以篩選、檢查
+  完整性與匯出 CSV / JSON Lines（見
+  [說明文件的「稽核紀錄」](https://agent-harness-docs-ten.vercel.app/guide/web#稽核紀錄)）。
 
 Python 版的 `pyharness web` 另外支援：
 [上傳檔案](python/README.md#上傳檔案)（迴紋針、拖曳或貼上）、在空資料夾

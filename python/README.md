@@ -358,7 +358,13 @@ mcpServers:
     url: ${LITELLM_PROXY_URL}/webiq/mcp
     headers:
       x-litellm-api-key: Bearer ${LITELLM_API_KEY}
+    forwardUser: true                      # 選用，附上網頁版使用者的身分標頭
 ```
+
+`forwardUser`：網頁版要登入時，工具呼叫附上使用者的
+`x-litellm-end-user-id` 與 `x-litellm-trace-id`。網址和 `HARNESS_BASE_URL`
+同一台時預設開啟，其他伺服器預設不送（見
+[模型中台](https://agent-harness-docs-ten.vercel.app/guide/web#模型中台)）。
 
 `args`、`env`、`url`、`headers` 裡的 `${環境變數名稱}` 會在載入時換成
 環境變數的值（`${NAME:-預設值}` 可以給預設值），金鑰不必寫進
@@ -1406,10 +1412,10 @@ Python 版另外會處理：
 - 至少要留一位可以使用的管理者。停用的人立刻被登出，他正在執行的對話
   也會停下來；改變角色時同樣停下來，權限判斷每次都讀最新的角色。
 - 管理者在「管理平台 → 群組」（`/admin/groups`）決定每位成員能用哪些
-  模型、agent、工具組、知識庫與知識庫標籤。每位成員都屬於內建的「所有人」群組
-  （剛升級時什麼都開放），新建的群組預設什麼都沒有；一個人能用的是所屬
-  群組加起來的範圍，管理者不受限制。限制在伺服器上執行：模型選單、agent、
-  工具與知識庫搜尋都只剩開放的部分，直接呼叫 API 也一樣（見
+  agent、工具組、知識庫與知識庫標籤（模型由模型中台決定）。每位成員都屬於
+  內建的「所有人」群組（剛升級時什麼都開放），新建的群組預設什麼都沒有；
+  一個人能用的是所屬群組加起來的範圍，管理者不受限制。限制在伺服器上執行：
+  agent、工具與知識庫搜尋都只剩開放的部分，直接呼叫 API 也一樣（見
   [說明文件的「存取群組」](https://agent-harness-docs-ten.vercel.app/guide/web#存取群組)）。
 - 成員只看得到自己的對話、「我的檔案」與被開放的共用資料夾，不能修改
   模型連線、全站權限與成員，也不能讓對話「全部直接執行」（bypass）。

@@ -10,6 +10,7 @@ import harness
 from harness import datatypes
 from harness import knowledge as knowledge_lib
 from harness import project as project_lib
+from harness.web import audit as audit_lib
 from tests import conftest
 from tests import test_web_accounts
 from tests.test_web_accounts import AGENT
@@ -428,6 +429,35 @@ class TestAdmin:
         assert [b["id"] for b in listed["bases"]] == ["default", "hr"]
         # 拿掉知識庫不刪文件。
         assert (s.root / "knowledge" / "it" / "vpn.md").exists()
+
+    async def test_changes_are_audited(self, site):
+        s = await site(extra=BASES, prepare=add_documents)
+        boss = await s.login("boss", password_of("boss"))
+
+        await boss.api("POST", "/knowledge", {"id": "legal", "name": "法遵"})
+        await self.upload(s, boss, "legal", "a.md", "內容")
+        await self.upload(s, boss, "legal", "b.md", "新版", "?replace=a.md")
+        await boss.api("DELETE", "/knowledge/legal/documents?path=a.md")
+        await boss.api("PATCH", "/knowledge/hr", {"chunkSize": 300})
+        await boss.api("DELETE", "/knowledge/it")
+        log = audit_lib.AuditLog.for_project(s.root)
+        entries = [
+            item
+            for item in reversed(log.query(limit=50))
+            if item.action.startswith("knowledge.")
+        ]
+
+        assert [(item.action, item.target) for item in entries] == [
+            ("knowledge.create", "legal"),
+            ("knowledge.upload", "legal"),
+            ("knowledge.upload", "legal"),
+            ("knowledge.document_delete", "legal"),
+            ("knowledge.update", "hr"),
+            ("knowledge.delete", "it"),
+        ]
+        assert entries[2].detail == {"files": ["a.md"], "replace": "a.md"}
+        assert entries[3].detail == {"path": "a.md"}
+        assert all(item.actor_name == "boss" for item in entries)
 
     async def test_bases_used_by_agents_cannot_be_deleted(self, site):
         s = await site(

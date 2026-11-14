@@ -79,6 +79,8 @@ Origin 標頭，避免其他網站透過瀏覽器呼叫這裡的 API。
 
 import asyncio
 import contextlib
+import dataclasses
+import datetime
 import hmac
 import importlib
 import ipaddress
@@ -98,6 +100,7 @@ from harness import llm
 from harness import project as project_lib
 from harness.builtin import paths as paths_lib
 from harness.web import accounts as accounts_lib
+from harness.web import audit as audit_lib
 from harness.web import files as files_lib
 from harness.web import folders as folders_lib
 from harness.web import groups as groups_lib
@@ -159,6 +162,7 @@ _PROXIES = web.AppKey("proxies", tuple)
 _LOCAL_KEY = web.AppKey("local_key", object)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _OFFICE = web.AppKey("office", office_lib.OfficeConverter)
+_AUDIT = web.AppKey("audit", audit_lib.AuditLog)
 # 登入的人（aiohttp 3.13 之後建議用 RequestKey，較舊的版本用字串）。
 _USER: Any = (
     web.RequestKey("user", accounts_lib.User)
@@ -345,6 +349,7 @@ def create_app(
     app[_LOGINS] = asyncio.Semaphore(LOGIN_CONCURRENCY)
     app[_PROXIES] = proxies
     app[_LOCAL_KEY] = local_key if mode == "local" else None
+    app[_AUDIT] = audit_lib.AuditLog.for_project(project.root)
     # 本機模式（只有自己）可以用這台電腦的 LibreOffice；要登入時一律在
     # 沙盒裡轉換，別人上傳的檔案不在伺服器上解析。
     app[_OFFICE] = office_lib.OfficeConverter(
@@ -357,6 +362,7 @@ def create_app(
     _group_routes(routes)
     _knowledge_routes(routes)
     _settings_routes(routes)
+    _audit_routes(routes)
 
     @routes.get("/api/events")
     async def events(request: web.Request) -> web.StreamResponse:
@@ -383,6 +389,8 @@ def _session_routes(routes: web.RouteTableDef) -> None:
 
     @routes.get("/api/project")
     async def get_project(request: web.Request) -> web.Response:
+        # 模型選單只列模型中台允許這個人使用的模型（有快取，見 Workspace）。
+        await _ws(request).refresh_model_access(_user(request))
         info = _ws(request).project_info(_user(request))
         info["features"]["officePdf"] = request.app[_OFFICE].available
         return _json(info)
@@ -526,11 +534,25 @@ def _session_routes(routes: web.RouteTableDef) -> None:
     )
     async def decide(request: web.Request) -> web.Response:
         body = await _body(request)
-        _ws(request).resolve_approval(
+        decision = _string(body, "decision")
+        approval = _ws(request).resolve_approval(
             _user(request),
             _id(request),
             request.match_info["approval_id"],
-            _string(body, "decision"),
+            decision,
+        )
+        _audit(
+            request,
+            "approval.decide",
+            target=approval["tool"],
+            detail={
+                "decision": decision,
+                "sessionId": _id(request),
+                "folder": approval["folder"],
+                "arguments": audit_lib.summarize_arguments(
+                    approval["arguments"]
+                ),
+            },
         )
         return _json({"ok": True})
 
@@ -613,19 +635,49 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
             return _json(accounts_lib.current_user(accounts_lib.LOCAL_USER))
         # 格式不對的名稱不可能有帳號：不算密碼，也不占登入限制的記錄。
         if not accounts_lib.valid_username(username):
+            _audit(
+                request,
+                "auth.login_failed",
+                actor=None,
+                target=username.strip()[:64],
+                detail={"reason": "unknown_username"},
+            )
             raise workspace_lib.WebError(401, "帳號或密碼不正確")
         store = request.app[_ACCOUNTS]
-        user = await _checked_login(request, username, password)
+        try:
+            user = await _checked_login(request, username, password)
+        except workspace_lib.WebError as error:
+            _audit(
+                request,
+                "auth.login_failed",
+                actor=None,
+                target=username.strip(),
+                detail={"reason": "throttled", "status": error.status},
+            )
+            raise
         if user is None:
+            _audit(
+                request,
+                "auth.login_failed",
+                actor=None,
+                target=username.strip(),
+                detail={"reason": "wrong_password_or_disabled"},
+            )
             raise workspace_lib.WebError(401, "帳號或密碼不正確")
         response = _json(accounts_lib.current_user(user))
         _set_cookie(request, response, store.create_login(user.id))
+        _audit(request, "auth.login", actor=user)
         return response
 
     @routes.post("/api/auth/logout")
     async def logout(request: web.Request) -> web.Response:
         await _body(request)
-        request.app[_ACCOUNTS].end_login(request.cookies.get(COOKIE))
+        store = request.app[_ACCOUNTS]
+        token = request.cookies.get(COOKIE)
+        user = None if local else store.resolve_login(token)
+        store.end_login(token)
+        if user is not None:
+            _audit(request, "auth.logout", actor=user)
         response = _json({"ok": True})
         response.del_cookie(COOKIE, path="/")
         return response
@@ -653,6 +705,7 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
             store.set_password(user.id, new)
         except accounts_lib.AccountError as error:
             raise workspace_lib.WebError(error.status, str(error)) from error
+        _audit(request, "auth.password")
         # 換密碼會登出所有地方，這個瀏覽器重新登入。
         response = _json({"ok": True})
         _set_cookie(request, response, store.create_login(user.id))
@@ -679,6 +732,12 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
                 body.get("displayName"),
                 body.get("role", "member"),
             )
+        _audit(
+            request,
+            "member.create",
+            target=user.username,
+            detail={"displayName": user.display_name, "role": user.role},
+        )
         return _json(
             {"user": accounts_lib.member_info(user), "password": password},
             status=201,
@@ -703,6 +762,26 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
                 role=body.get("role"),
                 disabled=disabled,
             )
+        if before is not None:
+            changes = _changes(
+                {
+                    "displayName": before.display_name,
+                    "role": before.role,
+                    "disabled": before.disabled,
+                },
+                {
+                    "displayName": user.display_name,
+                    "role": user.role,
+                    "disabled": user.disabled,
+                },
+            )
+            if changes:
+                _audit(
+                    request,
+                    "member.update",
+                    target=user.username,
+                    detail={"changes": changes},
+                )
         # 停用或改變角色：那個人正在執行的對話停下來（權限另外每次都
         # 讀最新的角色）。
         if before is not None and (
@@ -726,6 +805,7 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
             store.set_password(user_id, password)
         user = store.get_user(user_id)
         assert user is not None
+        _audit(request, "member.password_reset", target=user.username)
         response = _json(
             {"user": accounts_lib.member_info(user), "password": password}
         )
@@ -752,19 +832,29 @@ def _group_routes(routes: web.RouteTableDef) -> None:
     async def create_group(request: web.Request) -> web.Response:
         _require_admin(request)
         body = await _body(request)
-        return _json(_ws(request).create_group(body), status=201)
+        group = _ws(request).create_group(body)
+        _audit(request, "group.create", target=group["name"], detail=group)
+        return _json(group, status=201)
 
     @routes.patch("/api/admin/groups/{group_id:[\\w-]+}")
     async def update_group(request: web.Request) -> web.Response:
         _require_admin(request)
         body = await _body(request)
         group_id = request.match_info["group_id"]
-        return _json(_ws(request).update_group(group_id, body))
+        group = _ws(request).update_group(group_id, body)
+        _audit(
+            request,
+            "group.update",
+            target=group["name"],
+            detail={"id": group_id, "changes": body},
+        )
+        return _json(group)
 
     @routes.delete("/api/admin/groups/{group_id:[\\w-]+}")
     async def delete_group(request: web.Request) -> web.Response:
         _require_admin(request)
-        _ws(request).delete_group(request.match_info["group_id"])
+        group = _ws(request).delete_group(request.match_info["group_id"])
+        _audit(request, "group.delete", target=group["name"], detail=group)
         return _json({"ok": True})
 
 
@@ -780,19 +870,35 @@ def _knowledge_routes(routes: web.RouteTableDef) -> None:
     async def create_knowledge(request: web.Request) -> web.Response:
         _require_admin(request)
         body = await _body(request)
-        return _json(_ws(request).create_knowledge(body), status=201)
+        created = _ws(request).create_knowledge(body)
+        _audit(
+            request,
+            "knowledge.create",
+            target=str(body.get("id", "")),
+            detail=body,
+        )
+        return _json(created, status=201)
 
     @routes.patch(base)
     async def update_knowledge(request: web.Request) -> web.Response:
         _require_admin(request)
         body = await _body(request)
         base_id = request.match_info["base_id"]
-        return _json(_ws(request).update_knowledge(base_id, body))
+        updated = _ws(request).update_knowledge(base_id, body)
+        _audit(
+            request,
+            "knowledge.update",
+            target=base_id,
+            detail={"changes": body},
+        )
+        return _json(updated)
 
     @routes.delete(base)
     async def delete_knowledge(request: web.Request) -> web.Response:
         _require_admin(request)
-        _ws(request).delete_knowledge(request.match_info["base_id"])
+        base_id = request.match_info["base_id"]
+        _ws(request).delete_knowledge(base_id)
+        _audit(request, "knowledge.delete", target=base_id)
         return _json({"ok": True})
 
     @routes.get(f"{base}/documents")
@@ -825,14 +931,22 @@ def _knowledge_routes(routes: web.RouteTableDef) -> None:
                 break
         if not saved:
             raise workspace_lib.WebError(400, "沒有收到檔案")
+        detail: dict[str, Any] = {"files": [item["path"] for item in saved]}
+        if replace is not None:
+            detail["replace"] = replace
+        _audit(request, "knowledge.upload", target=base_id, detail=detail)
         return _json({"files": saved}, status=201)
 
     @routes.delete(f"{base}/documents")
     async def delete_document(request: web.Request) -> web.Response:
-        _ws(request).delete_knowledge_document(
-            _user(request),
-            request.match_info["base_id"],
-            request.query.get("path", ""),
+        base_id = request.match_info["base_id"]
+        path = request.query.get("path", "")
+        _ws(request).delete_knowledge_document(_user(request), base_id, path)
+        _audit(
+            request,
+            "knowledge.document_delete",
+            target=base_id,
+            detail={"path": path},
         )
         return _json({"ok": True})
 
@@ -852,7 +966,15 @@ def _settings_routes(routes: web.RouteTableDef) -> None:
     @routes.put("/api/settings/permissions")
     async def save_permissions(request: web.Request) -> web.Response:
         _require_admin(request)
-        _ws(request).update_permissions(await _body(request))
+        body = await _body(request)
+        _ws(request).update_permissions(body)
+        _audit(
+            request,
+            "settings.permissions",
+            detail={
+                key: body.get(key) for key in ("mode", "allow", "ask", "deny")
+            },
+        )
         return _json({"ok": True})
 
     @routes.put("/api/settings/model")
@@ -864,12 +986,29 @@ def _settings_routes(routes: web.RouteTableDef) -> None:
         if isinstance(max_turns, float) and max_turns.is_integer():
             max_turns = int(max_turns)
         _ws(request).update_model_settings(model, max_turns)
+        _audit(
+            request,
+            "settings.model",
+            detail={"model": model, "maxTurns": max_turns},
+        )
         return _json({"ok": True})
 
     @routes.put("/api/settings/connection")
     async def save_connection(request: web.Request) -> web.Response:
         _require_admin(request)
-        await _ws(request).update_connection(await _body(request))
+        body = await _body(request)
+        await _ws(request).update_connection(body)
+        # 不記金鑰，只記有沒有換。
+        _audit(
+            request,
+            "settings.connection",
+            detail={
+                "provider": body.get("provider"),
+                "baseURL": body.get("baseURL") or None,
+                "model": body.get("model"),
+                "apiKeyChanged": bool(body.get("apiKey")),
+            },
+        )
         return _json({"ok": True})
 
     @routes.post("/api/settings/models/discover")
@@ -888,6 +1027,7 @@ def _settings_routes(routes: web.RouteTableDef) -> None:
         ):
             raise workspace_lib.WebError(400, "models 必須是字串的陣列")
         _ws(request).update_model_choices(names)
+        _audit(request, "settings.models", detail={"models": names})
         return _json({"ok": True})
 
     @routes.post("/api/settings/model/test")
@@ -895,6 +1035,136 @@ def _settings_routes(routes: web.RouteTableDef) -> None:
         _require_admin(request)
         await _body(request)
         return _json(await _ws(request).test_model())
+
+
+def _audit_routes(routes: web.RouteTableDef) -> None:
+    """稽核紀錄：只有管理者能查詢與匯出（見 audit.py）。"""
+
+    @routes.get("/api/admin/audit")
+    async def list_audit(request: web.Request) -> web.Response:
+        _require_admin(request)
+        log = request.app[_AUDIT]
+        filters = _audit_filters(request)
+        before = _int_param(request, "before")
+        limit = _int_param(request, "limit") or 50
+        entries = await asyncio.to_thread(
+            log.query, filters, before=before, limit=limit
+        )
+        total = await asyncio.to_thread(log.count, filters)
+        return _json(
+            {
+                "entries": [item.info() for item in entries],
+                "total": total,
+                "categories": audit_lib.CATEGORIES,
+            }
+        )
+
+    @routes.get("/api/admin/audit/verify")
+    async def verify_audit(request: web.Request) -> web.Response:
+        _require_admin(request)
+        return _json(await asyncio.to_thread(request.app[_AUDIT].verify))
+
+    @routes.get("/api/admin/audit/export")
+    async def export_audit(request: web.Request) -> web.StreamResponse:
+        _require_admin(request)
+        filters = _audit_filters(request)
+        kind = request.query.get("format", "csv")
+        if kind not in ("csv", "jsonl"):
+            raise workspace_lib.WebError(400, "format 必須是 csv 或 jsonl")
+        # 先記下匯出這件事，匯出的檔案裡也會有這一筆。
+        _audit(
+            request,
+            "audit.export",
+            detail={"format": kind, **_filters_detail(filters)},
+        )
+        log = request.app[_AUDIT]
+        convert = audit_lib.to_csv if kind == "csv" else audit_lib.to_jsonl
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        response = web.StreamResponse(
+            headers={
+                "Content-Type": (
+                    "text/csv; charset=utf-8"
+                    if kind == "csv"
+                    else "application/x-ndjson; charset=utf-8"
+                ),
+                "Content-Disposition": (
+                    f'attachment; filename="audit-{stamp}.{kind}"'
+                ),
+                "Cache-Control": "no-store",
+            }
+        )
+        await response.prepare(request)
+        lines = await asyncio.to_thread(
+            lambda: list(convert(log.export(filters)))
+        )
+        for start in range(0, len(lines), 500):
+            await response.write("".join(lines[start : start + 500]).encode())
+        await response.write_eof()
+        return response
+
+
+def _audit(
+    request: web.Request,
+    action: str,
+    *,
+    actor: accounts_lib.User | None | object = ...,
+    target: str = "",
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """記一筆稽核紀錄；actor 沒有指定時是登入的人。"""
+    who = _user(request) if actor is ... else actor
+    request.app[_AUDIT].record(
+        action,
+        actor=who,  # type: ignore[arg-type]
+        target=target,
+        detail=detail,
+        address=client_address(request),
+    )
+
+
+def _audit_filters(request: web.Request) -> audit_lib.Filters:
+    """查詢參數 category、actor、since、until（毫秒）轉成 Filters。"""
+    query = request.query
+    since = _int_param(request, "since")
+    until = _int_param(request, "until")
+    category = query.get("category") or None
+    if category is not None and category not in audit_lib.CATEGORIES:
+        raise workspace_lib.WebError(400, f"沒有 {category} 這個分類")
+    return audit_lib.Filters(
+        category=category,
+        actor=(query.get("actor") or "").strip()[:64] or None,
+        since=since / 1000 if since is not None else None,
+        until=until / 1000 if until is not None else None,
+    )
+
+
+def _filters_detail(filters: audit_lib.Filters) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dataclasses.asdict(filters).items()
+        if value is not None
+    }
+
+
+def _int_param(request: web.Request, name: str) -> int | None:
+    value = request.query.get(name)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError as error:
+        raise workspace_lib.WebError(400, f"{name} 必須是整數") from error
+
+
+def _changes(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, list[Any]]:
+    """改了哪些欄位：{欄位: [改之前, 改之後]}。"""
+    return {
+        key: [before[key], after[key]]
+        for key in after
+        if before.get(key) != after[key]
+    }
 
 
 async def serve(

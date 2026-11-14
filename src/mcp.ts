@@ -24,6 +24,11 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
   /** 單次工具呼叫最多等幾秒，預設 300。 */
   timeoutSeconds?: number;
+  /**
+   * Python 版網頁要登入時，工具呼叫附上使用者身分（LiteLLM 的
+   * x-litellm-end-user-id）。TypeScript 版沒有帳號，不使用這個設定。
+   */
+  forwardUser?: boolean;
 }
 
 /** 一條已建立的 MCP 連線。 */
