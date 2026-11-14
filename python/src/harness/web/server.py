@@ -27,6 +27,10 @@
     PATCH  /api/admin/users/{id}         改顯示名稱、角色或停用（管理者）
     POST   /api/admin/users/{id}/password
                                          重設成員的密碼（管理者）
+    GET    /api/admin/groups             存取群組與可以勾選的資源（管理者）
+    POST   /api/admin/groups             新增存取群組（管理者）
+    PATCH  /api/admin/groups/{id}        改名稱、說明、資源或成員（管理者）
+    DELETE /api/admin/groups/{id}        刪除存取群組（管理者）
 
 登入方式（見 auth_mode）：
 
@@ -83,6 +87,7 @@ from harness.builtin import paths as paths_lib
 from harness.web import accounts as accounts_lib
 from harness.web import files as files_lib
 from harness.web import folders as folders_lib
+from harness.web import groups as groups_lib
 from harness.web import office as office_lib
 from harness.web import uploads as uploads_lib
 from harness.web import workspace as workspace_lib
@@ -289,6 +294,11 @@ def create_app(
         max_upload_bytes=max_upload_bytes,
         auth_mode=mode,
         users=store.get_user if mode == "accounts" else None,
+        groups=(
+            groups_lib.GroupStore.for_project(project.root)
+            if mode == "accounts"
+            else None
+        ),
     )
     if owner is not None:
         workspace.migrate(owner)
@@ -323,6 +333,7 @@ def create_app(
     _session_routes(routes)
     _file_routes(routes)
     _account_routes(routes, mode)
+    _group_routes(routes)
     _settings_routes(routes)
 
     @routes.get("/api/events")
@@ -705,6 +716,34 @@ def _account_routes(routes: web.RouteTableDef, mode: str) -> None:
                 user_id, workspace_lib.ACCOUNT_CHANGED_NOTICE
             )
         return response
+
+
+def _group_routes(routes: web.RouteTableDef) -> None:
+    """存取群組（帳號模式）：只有管理者能看與修改。"""
+
+    @routes.get("/api/admin/groups")
+    async def list_groups(request: web.Request) -> web.Response:
+        _require_admin(request)
+        return _json(await _ws(request).list_groups())
+
+    @routes.post("/api/admin/groups")
+    async def create_group(request: web.Request) -> web.Response:
+        _require_admin(request)
+        body = await _body(request)
+        return _json(_ws(request).create_group(body), status=201)
+
+    @routes.patch("/api/admin/groups/{group_id:[\\w-]+}")
+    async def update_group(request: web.Request) -> web.Response:
+        _require_admin(request)
+        body = await _body(request)
+        group_id = request.match_info["group_id"]
+        return _json(_ws(request).update_group(group_id, body))
+
+    @routes.delete("/api/admin/groups/{group_id:[\\w-]+}")
+    async def delete_group(request: web.Request) -> web.Response:
+        _require_admin(request)
+        _ws(request).delete_group(request.match_info["group_id"])
+        return _json({"ok": True})
 
 
 def _settings_routes(routes: web.RouteTableDef) -> None:

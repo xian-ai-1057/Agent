@@ -1617,6 +1617,8 @@ class TestProjectChoices:
             # 本機模式沒有工作資料夾可選：和加入帳號之前一樣是專案根目錄。
             "folders": False,
             "categories": True,
+            # 本機模式只有自己一個人，沒有存取群組。
+            "groups": False,
         }
         assert info["auth"] == {
             "mode": "local",

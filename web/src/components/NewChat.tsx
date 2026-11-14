@@ -2,8 +2,8 @@
  * 新對話：打招呼、輸入框，以及幾個建議。
  *
  * 送出後先在畫面上顯示訊息與「思考中」，建立好對話再切到對話頁。
- * 第一次使用、還沒連接模型時，改成顯示連線設定；成員不能設定模型，
- * 只顯示請管理者設定的說明。
+ * 第一次使用、還沒連接模型時，改成顯示說明：模型在管理平台設定，管理
+ * 者多一個前往管理平台的按鈕。
  *
  * 伺服器支援工作資料夾時，輸入框可以選資料夾：上傳的檔案放進那個
  * 資料夾，建立對話時一起送出（SessionOptions.folder）。
@@ -12,13 +12,12 @@
 import { useEffect, useMemo, useState } from "react";
 import type { SessionOptions } from "../../../src/web/protocol.ts";
 import { api } from "../api.ts";
-import { isMember } from "../auth.ts";
+import { canAdmin } from "../auth.ts";
 import { activeFolder, foldersEnabled } from "../folders.ts";
 import { navigate, useSearchParam } from "../router.ts";
 import { upsertSummary, useStore } from "../store.ts";
 import "./chat/chat.css";
 import { Composer } from "./Composer.tsx";
-import { ConnectionForm } from "./ConnectionForm.tsx";
 import { PendingView } from "./Conversation.tsx";
 import { FolderContext } from "./chat/folder.ts";
 import {
@@ -30,6 +29,7 @@ import {
 import { handOff } from "./chat/pending.ts";
 import { Thinking } from "./chat/Thinking.tsx";
 import { AlertIcon, ChevronDownIcon, CloseIcon, FolderIcon } from "./Icons.tsx";
+import { Link } from "./Sidebar.tsx";
 
 /** 輸入框底下的建議：點了把文字填進輸入框。 */
 const SUGGESTIONS = [
@@ -71,10 +71,13 @@ export function NewChat() {
   );
 
   if (!project) return <main className="main" aria-busy="true" />;
-  if (!agent) return <main className="main" />;
-
-  const { connection } = project.model;
-  if (connection && !connection.ready && isMember(project)) {
+  // 存取群組沒有開放任何 agent 或模型給這個人：說明原因，不顯示輸入框。
+  const nothingOpen =
+    !agent ||
+    (project.features?.groups === true &&
+      !canAdmin(project) &&
+      (project.models?.length ?? 0) === 0);
+  if (nothingOpen) {
     return (
       <main className="main">
         <div className="new-chat ch-new">
@@ -85,7 +88,8 @@ export function NewChat() {
                   <AlertIcon />
                 </span>
                 <p className="body" style={{ margin: 0 }}>
-                  還沒有連接模型，請管理者到設定 → 模型完成設定。
+                  管理者還沒有開放可以使用的{agent ? "模型" : " agent"}
+                  給你，請聯絡管理者。
                 </p>
               </div>
             </section>
@@ -94,20 +98,34 @@ export function NewChat() {
       </main>
     );
   }
+
+  const { connection } = project.model;
   if (connection && !connection.ready) {
+    // 每個人看到同一張說明卡；管理者多一個前往管理平台的按鈕。
+    const admin = canAdmin(project);
     return (
       <main className="main">
         <div className="new-chat ch-new">
           <div className="new-chat-inner ch-new-inner anim-in">
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <span className="subtle mono">第一次使用</span>
-              <h1>先連接模型</h1>
-              <p className="lead">
-                選一家模型供應商並貼上金鑰，就可以開始使用。之後要更換，到「設定
-                → 模型」修改。
-              </p>
-            </div>
-            <ConnectionForm project={project} connection={connection} />
+            <section className="error-card ch-interrupted" role="status">
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <span className="ch-error-icon">
+                  <AlertIcon />
+                </span>
+                <p className="body" style={{ margin: 0 }}>
+                  {admin
+                    ? "還沒有連接模型。到管理平台選一家模型供應商並填上金鑰，就可以開始使用。"
+                    : "還沒有連接模型，請管理者到管理平台完成設定。"}
+                </p>
+              </div>
+              {admin && (
+                <div className="actions">
+                  <Link to="/admin/model" className="btn btn-accent">
+                    前往管理平台
+                  </Link>
+                </div>
+              )}
+            </section>
           </div>
         </div>
       </main>

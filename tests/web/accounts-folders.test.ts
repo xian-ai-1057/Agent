@@ -1,4 +1,4 @@
-/** 多人帳號與工作資料夾的純函式：401 判斷、表單檢查、設定分類、資料夾。 */
+/** 多人帳號與工作資料夾的純函式：401 判斷、表單檢查、管理平台、資料夾。 */
 
 import { describe, expect, it } from "vitest";
 import type {
@@ -9,6 +9,8 @@ import type {
 import { ApiError } from "../../web/src/api.ts";
 import {
   accountsMode,
+  adminSections,
+  canAdmin,
   currentUser,
   initialOf,
   isMember,
@@ -16,8 +18,6 @@ import {
   loginErrorMessage,
   memberFormErrors,
   passwordFormErrors,
-  settingsHome,
-  visibleSections,
 } from "../../web/src/auth.ts";
 import {
   activeFolder,
@@ -87,18 +87,17 @@ describe("loginErrorMessage", () => {
 });
 
 describe("帳號模式與角色", () => {
-  it("TypeScript 版沒有帳號：當成管理者，看得到原本的設定", () => {
+  it("TypeScript 版沒有帳號：當成管理者，可以用管理平台", () => {
     const ts = project();
     expect(accountsMode(ts)).toBe(false);
     expect(isMember(ts)).toBe(false);
     expect(currentUser(ts)).toBeUndefined();
-    expect(visibleSections(ts)).toEqual([
-      "model",
-      "permissions",
-      "tools",
-      "agents",
-    ]);
-    expect(settingsHome(ts)).toBe("/settings/permissions");
+    expect(canAdmin(ts)).toBe(true);
+    expect(adminSections(ts)).toEqual(["model", "permissions"]);
+  });
+
+  it("還沒讀到專案時不能用管理平台", () => {
+    expect(canAdmin(undefined)).toBe(false);
   });
 
   it("只在本機使用時不顯示使用者與成員管理", () => {
@@ -107,21 +106,34 @@ describe("帳號模式與角色", () => {
       { auth: { mode: "local", user: user("admin") } },
     );
     expect(currentUser(local)).toBeUndefined();
-    expect(visibleSections(local)).not.toContain("members");
+    expect(canAdmin(local)).toBe(true);
+    expect(adminSections(local)).not.toContain("members");
   });
 
-  it("管理者多了成員管理", () => {
+  it("管理者的管理平台多了成員管理", () => {
     const admin = accounts("admin");
     expect(currentUser(admin)?.username).toBe("amy");
-    expect(visibleSections(admin)).toContain("members");
-    expect(settingsHome(admin)).toBe("/settings/permissions");
+    expect(canAdmin(admin)).toBe(true);
+    expect(adminSections(admin)).toEqual(["model", "permissions", "members"]);
   });
 
-  it("成員只看得到工具與 agent", () => {
+  it("伺服器支援存取群組時多了群組", () => {
+    const admin = project(
+      { accounts: true, groups: true },
+      { auth: { mode: "accounts", user: user("admin") } },
+    );
+    expect(adminSections(admin)).toEqual([
+      "model",
+      "permissions",
+      "members",
+      "groups",
+    ]);
+  });
+
+  it("成員不能用管理平台", () => {
     const member = accounts("member");
     expect(isMember(member)).toBe(true);
-    expect(visibleSections(member)).toEqual(["tools", "agents"]);
-    expect(settingsHome(member)).toBe("/settings/tools");
+    expect(canAdmin(member)).toBe(false);
   });
 
   it("頭像用名稱的第一個字", () => {

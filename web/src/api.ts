@@ -1,6 +1,7 @@
 /** 呼叫 harness web 的 JSON API。 */
 
 import type {
+  AccessGroup,
   ApprovalDecision,
   BulkRequest,
   BulkResult,
@@ -9,6 +10,7 @@ import type {
   CurrentUser,
   Feedback,
   FileEntry,
+  GroupList,
   IssuedPassword,
   MemberInfo,
   ModelChoice,
@@ -192,7 +194,18 @@ export const api = {
   ) => request<MemberInfo>("PATCH", `/admin/users/${id}`, changes),
   resetPassword: (id: string) =>
     request<IssuedPassword>("POST", `/admin/users/${id}/password`, {}),
+
+  // 存取群組（features.groups）。
+  groups: () => request<GroupList>("GET", "/admin/groups"),
+  createGroup: (group: GroupChanges) =>
+    request<AccessGroup>("POST", "/admin/groups", group),
+  updateGroup: (id: string, changes: GroupChanges) =>
+    request<AccessGroup>("PATCH", `/admin/groups/${id}`, changes),
+  deleteGroup: (id: string) => request("DELETE", `/admin/groups/${id}`),
 };
+
+/** 新增或修改群組時送出的欄位。 */
+export type GroupChanges = Partial<Omit<AccessGroup, "id" | "builtin">>;
 
 function folderQuery(folder?: string | null): string {
   return folder ? `&folder=${encodeURIComponent(folder)}` : "";

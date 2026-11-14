@@ -160,6 +160,10 @@ await harness.run(agent, text, deps={"departments": ["hr"]})
 agent 設定的 `labels` 與 `label_filter` 同時存在時，兩者都允許的標籤
 才搜尋得到。
 
+用網頁版（`pyharness web`）讓多人登入時不必寫程式：管理者在「管理平台 →
+群組」為每個群組勾選可以搜尋的標籤，成員搜尋得到的是所屬群組開放的標籤，
+再和 agent 自己的 `labels` 取交集（見[存取群組](/guide/web#存取群組)）。
+
 ## 在程式裡使用
 
 ```python

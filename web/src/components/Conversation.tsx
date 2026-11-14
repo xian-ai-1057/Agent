@@ -623,8 +623,8 @@ function ErrorCard({
           重試
         </button>
         {modelProblem && canOpenSettings && (
-          <Link to="/settings/model" className="btn btn-outline">
-            開啟模型設定
+          <Link to="/admin/model" className="btn btn-outline">
+            到管理平台設定模型
           </Link>
         )}
       </div>

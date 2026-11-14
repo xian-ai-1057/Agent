@@ -6,7 +6,7 @@
  */
 
 import type { CurrentUser, ProjectInfo } from "../../src/web/protocol.ts";
-import type { SettingsSection } from "./sections.ts";
+import type { AdminSection } from "./sections.ts";
 
 /** 新密碼最少幾個字，和伺服器一致。 */
 export const MIN_PASSWORD = 10;
@@ -65,28 +65,24 @@ export function isMember(project: ProjectInfo | undefined): boolean {
   );
 }
 
-/** 設定頁看得到哪些分類，第一個是打開設定時的預設分類。 */
-export function visibleSections(
-  project: ProjectInfo | undefined,
-): SettingsSection[] {
-  if (isMember(project)) return ["tools", "agents"];
-  const sections: SettingsSection[] = [
-    "model",
-    "permissions",
-    "tools",
-    "agents",
-  ];
-  if (accountsMode(project)) sections.push("members");
-  return sections;
+/**
+ * 能不能使用管理平台。沒有帳號功能（TypeScript 版）或只在本機使用時，
+ * 使用者就是這台電腦的管理者。
+ */
+export function canAdmin(project: ProjectInfo | undefined): boolean {
+  return project !== undefined && !isMember(project);
 }
 
-/** 側欄「設定」連到的分類：管理者是權限，成員是第一個看得到的分類。 */
-export function settingsHome(project: ProjectInfo | undefined): string {
-  const sections = visibleSections(project);
-  const home = sections.includes("permissions")
-    ? "permissions"
-    : (sections[0] ?? "tools");
-  return `/settings/${home}`;
+/** 管理平台有哪些分類，第一個是打開管理平台時的預設分類。 */
+export function adminSections(
+  project: ProjectInfo | undefined,
+): AdminSection[] {
+  const sections: AdminSection[] = ["model", "permissions"];
+  if (accountsMode(project)) sections.push("members");
+  if (accountsMode(project) && project?.features?.groups) {
+    sections.push("groups");
+  }
+  return sections;
 }
 
 /** 頭像上的字：顯示名稱（沒有時帳號）的第一個字，英文字母轉大寫。 */

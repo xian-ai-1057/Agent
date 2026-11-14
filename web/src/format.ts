@@ -5,12 +5,21 @@ import type {
   Activity,
   PermissionMode,
   SessionSummary,
+  SettingSource,
 } from "../../src/web/protocol.ts";
 
 export const MODE_LABELS: Record<PermissionMode, string> = {
   ask: "先問我",
   bypass: "全部直接執行",
   dontAsk: "不問，一律拒絕",
+};
+
+/** 模型名稱、maxTurns 這類設定是從哪裡讀到的。 */
+export const SOURCE_LABELS: Record<SettingSource, string> = {
+  agent: "agent 檔案",
+  config: "harness.yaml",
+  env: "環境變數",
+  default: "預設值",
 };
 
 export const STOP_NOTICES: Record<string, string> = {
