@@ -1,4 +1,7 @@
-"""存取群組：管理者決定每位成員可以使用的模型、agent、工具組與知識庫。"""
+"""存取群組：管理者決定每位成員可以使用的 agent、工具組與知識庫。
+
+模型不歸群組管，由模型中台（LiteLLM Proxy）決定，見 TestModelsFromGateway。
+"""
 
 import pathlib
 
@@ -54,8 +57,7 @@ class TestGroupStore:
         store.update_group(
             groups_lib.EVERYONE_ID,
             {
-                "models": ["small"],
-                "agents": [],
+                "agents": ["main"],
                 "toolsets": [],
                 "knowledge": [],
             },
@@ -63,33 +65,44 @@ class TestGroupStore:
         empty = store.create_group("空的")
         it = store.create_group(
             "資訊處",
-            resources={"models": ["big"], "toolsets": ["shell"]},
+            resources={"agents": ["writer"], "toolsets": ["shell"]},
             members=["id-amy"],
         )
 
         amy = store.access_for(member("amy"))
         bob = store.access_for(member("bob"))
 
-        assert empty.models == () and empty.agents == ()
+        assert empty.agents == () and empty.toolsets == ()
         assert it.members == ("id-amy",)
-        assert amy.models == {"small", "big"}
+        assert amy.agents == {"main", "writer"}
         assert amy.toolsets == {"shell"}
-        assert bob.models == {"small"}
+        assert bob.agents == {"main"}
         assert bob.toolsets == frozenset()
+        # 模型不歸群組管：一律不限制，由模型中台決定。
+        assert amy.models is None and bob.models is None
 
     def test_one_group_with_everything_opens_that_kind(self, tmp_path):
         store = groups_of(tmp_path)
-        store.update_group(groups_lib.EVERYONE_ID, {"models": []})
+        store.update_group(groups_lib.EVERYONE_ID, {"toolsets": []})
         store.create_group(
-            "全部模型", resources={"models": None}, members=["id-amy"]
+            "全部工具", resources={"toolsets": None}, members=["id-amy"]
         )
 
-        assert store.access_for(member("amy")).models is None
-        assert store.access_for(member("bob")).models == frozenset()
+        assert store.access_for(member("amy")).toolsets is None
+        assert store.access_for(member("bob")).toolsets == frozenset()
+
+    def test_models_are_not_managed_by_groups(self, tmp_path):
+        store = groups_of(tmp_path)
+
+        store.update_group(groups_lib.EVERYONE_ID, {"models": []})
+        group = store.create_group("x", resources={"models": ["big"]})
+
+        assert "models" not in group.info()
+        assert store.access_for(member()).models is None
 
     def test_admins_are_never_limited(self, tmp_path):
         store = groups_of(tmp_path)
-        store.update_group(groups_lib.EVERYONE_ID, {"models": []})
+        store.update_group(groups_lib.EVERYONE_ID, {"agents": []})
         boss = accounts_lib.User("id-boss", "boss", "boss", "admin")
 
         assert store.access_for(boss) == groups_lib.FULL_ACCESS
@@ -114,7 +127,7 @@ class TestGroupStore:
         with pytest.raises(groups_lib.GroupError):
             store.create_group("  ")
         with pytest.raises(groups_lib.GroupError):
-            store.create_group("x", resources={"models": "big"})
+            store.create_group("x", resources={"agents": "main"})
 
     def test_delete_group(self, tmp_path):
         store = groups_of(tmp_path)
@@ -135,14 +148,14 @@ class TestGroupApi:
         calls = [
             ("GET", "/admin/groups", None),
             ("POST", "/admin/groups", {"name": "x"}),
-            ("PATCH", "/admin/groups/everyone", {"models": []}),
+            ("PATCH", "/admin/groups/everyone", {"agents": []}),
             ("DELETE", "/admin/groups/everyone", None),
         ]
         for method, path, body in calls:
             status, _ = await alice.api(method, path, body)
             assert status == 403, path
 
-        assert groups_of(s.root).access_for(member()).models is None
+        assert groups_of(s.root).access_for(member()).agents is None
 
     async def test_admin_lists_groups_with_catalog(self, site):
         s = await site(extra="models: [big-model]\n")
@@ -153,10 +166,10 @@ class TestGroupApi:
 
         assert status == 200
         assert [item["id"] for item in data["groups"]] == ["everyone"]
-        assert data["groups"][0]["models"] is None
-        assert "big-model" in [
-            item["name"] for item in data["catalog"]["models"]
-        ]
+        assert data["groups"][0]["agents"] is None
+        # 模型由模型中台管，群組頁沒有模型可以勾選。
+        assert "models" not in data["groups"][0]
+        assert "models" not in data["catalog"]
         assert [item["name"] for item in data["catalog"]["agents"]] == ["main"]
         assert "shell" in [item["name"] for item in data["catalog"]["toolsets"]]
         assert data["catalog"]["hasKnowledge"] is False
@@ -184,7 +197,7 @@ class TestGroupApi:
         missing, _ = await boss.api("DELETE", f"/admin/groups/{created['id']}")
 
         assert status == 201
-        assert created["models"] == [] and created["toolsets"] == ["shell"]
+        assert created["agents"] == [] and created["toolsets"] == ["shell"]
         assert created["members"] == [alice_id]
         assert updated["description"] == "可以執行指令"
         assert duplicate == 400
@@ -262,44 +275,6 @@ class TestEnforcement:
 
         assert status == 400
 
-    async def test_models_are_limited_and_replaced(self, site):
-        s = await site(
-            extra="model: base-model\nmodels: [big-model, small-model]\n",
-            script=[conftest.text_response("好")],
-        )
-        boss = await s.login("boss", password_of("boss"))
-        alice = await s.login("alice", password_of("alice"))
-        await boss.api(
-            "PATCH", "/admin/groups/everyone", {"models": ["small-model"]}
-        )
-
-        _, project = await alice.api("GET", "/project")
-        refused, _ = await alice.api(
-            "POST",
-            "/sessions",
-            {"text": "嗨", "options": {"model": "big-model"}},
-        )
-        _, created = await alice.api("POST", "/sessions", {"text": "嗨"})
-        await alice.wait_idle(created["id"])
-
-        assert [item["name"] for item in project["models"]] == ["small-model"]
-        assert project["models"][0]["isDefault"] is True
-        assert project["agents"][0]["model"] == "small-model"
-        assert refused == 400
-        # 預設的 base-model 沒有開放：這一輪改用開放的模型。
-        assert s.model.requests[0]["model"] == "small-model"
-
-    async def test_no_models_means_no_runs(self, site):
-        s = await site(extra="model: base-model\n")
-        boss = await s.login("boss", password_of("boss"))
-        alice = await s.login("alice", password_of("alice"))
-        await boss.api("PATCH", "/admin/groups/everyone", {"models": []})
-
-        status, error = await alice.api("POST", "/sessions", {"text": "嗨"})
-
-        assert status == 403
-        assert "模型" in error["error"]
-
     async def test_agents_are_limited(self, site):
         def add_writer(root):
             (root / "agents" / "writer.md").write_text(WRITER, "utf-8")
@@ -367,7 +342,6 @@ class TestKnowledge:
             "/admin/groups",
             {
                 "name": "人資",
-                "models": None,
                 "agents": None,
                 "toolsets": None,
                 "knowledge": ["hr"],

@@ -76,6 +76,7 @@ tools: [files, plan, web, webiq]
 - 網址是 Proxy 替每個 MCP 伺服器開的端點 `/<伺服器名稱>/mcp`。Proxy 版本較舊、這個網址連不上時，改用 `${LITELLM_PROXY_URL}/mcp`，並在 `headers` 加上 `x-mcp-servers: webiq` 指定伺服器。
 - 金鑰前面要有 `Bearer `，少了會得到 401。
 - `require_approval: never` 不用另外設定：MCP 工具除非伺服器標記為破壞性操作，預設都直接執行。想每次都先問，用 `permissions.ask` 加上工具名稱。
+- **使用者身分**（Python 版）：網頁版要登入時，工具呼叫會附上使用者的 `x-litellm-end-user-id` 與 `x-litellm-trace-id` 標頭，LiteLLM 才能依使用者記錄與管控 MCP 的使用（見[網頁版 → 模型中台](/guide/web#模型中台)）。伺服器網址和 `HARNESS_BASE_URL` 是同一台（scheme、主機、port 都相同）時自動開啟；不同台時預設不送，要送就在伺服器設定加上 `forwardUser: true`，同一台但不想送就寫 `forwardUser: false`。本機程式（`command`）的伺服器不適用。
 - **連不上 Proxy 時整個專案會載入失敗**（網頁版無法啟動），錯誤訊息會寫出網址。啟動後在網頁版「設定 → 工具」看得到 webiq 的工具，就表示連上了。
 
 ### 用 Docker 部署時 {#litellm-docker}

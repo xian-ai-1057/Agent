@@ -38,6 +38,7 @@ import datetime
 import functools
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import re
@@ -107,6 +108,12 @@ _UNTITLED = "新對話"
 _TITLE_LENGTH = 40
 _PREVIEW_LIMIT = 200_000
 _MODEL_TEST_TIMEOUT = 20
+# 向模型中台查詢這個人能用哪些模型：結果保留多久、查不到時多久後再查、
+# 最多等多久（讀取專案資訊時會等它）。
+MODEL_ACCESS_TTL = 300
+_MODEL_ACCESS_RETRY = 60
+_MODEL_ACCESS_TIMEOUT = 5
+_LOG = logging.getLogger(__name__)
 _SESSION_ID = re.compile(r"^[\w-]+$")
 # subagent 步驟的結果只是給人瀏覽的，太長的部分不保留。
 _SUBAGENT_RESULT_LIMIT = 4000
@@ -244,7 +251,7 @@ class Workspace:
             users: 依識別碼查目前的帳號（帳號資料庫的 get_user）；權限
                 判斷用它讀最新的角色。None 時沿用這一輪開始時的帳號。
             groups: 存取群組（帳號模式才有）；決定每位成員可以使用的
-                模型、agent、工具組與知識庫標籤。None 時不限制。
+                agent、工具組與知識庫標籤。None 時不限制。
 
         Raises:
             ValueError: harness.yaml 的 workspaces 寫錯。
@@ -278,6 +285,8 @@ class Workspace:
         # harness.yaml 的 models：管理者另外開放給使用者選的模型。
         self._model_choices = config_lib.read_model_choices(project.root)
         self._builtin_skills = project_lib.builtin_skills()
+        # 模型中台回覆的「這個人能用的模型」：使用者識別 → (到期時間, 名稱)。
+        self._model_access: dict[str, tuple[float, frozenset[str] | None]] = {}
 
     def subscribe(
         self, user: accounts_lib.User, listener: Listener
@@ -403,6 +412,7 @@ class Workspace:
                 "folders": self.auth_mode == "accounts",
                 "categories": True,
                 "groups": self._groups is not None,
+                "audit": True,
             },
             "auth": {
                 "mode": self.auth_mode,
@@ -454,10 +464,6 @@ class Workspace:
         return {
             "groups": [item.info() for item in store.list_groups()],
             "catalog": {
-                "models": [
-                    {"name": item["name"], "label": item["label"]}
-                    for item in self._model_options()
-                ],
                 "agents": [
                     {"name": name, "description": agent.description}
                     for name, agent in project.agents.items()
@@ -497,12 +503,15 @@ class Workspace:
         self.refresh_project()
         return group.info()
 
-    def delete_group(self, group_id: str) -> None:
-        """刪除存取群組。"""
+    def delete_group(self, group_id: str) -> dict[str, Any]:
+        """刪除存取群組，回傳被刪除的群組（稽核紀錄用）。"""
         store = self._require_groups()
         with _group_errors():
+            group = store.get_group(group_id)
             store.delete_group(group_id)
         self.refresh_project()
+        assert group is not None
+        return group.info()
 
     def _require_groups(self) -> groups_lib.GroupStore:
         if self._groups is None:
@@ -1061,11 +1070,14 @@ class Workspace:
         session_id: str,
         approval_id: str,
         decision: str,
-    ) -> None:
+    ) -> dict[str, Any]:
         """回覆一個等待中的確認。
 
         「以後都允許」：管理者寫進 harness.yaml（所有人都適用）；成員只
         記在自己的資料裡，只適用於他在同一個工作資料夾裡的對話。
+
+        Returns:
+            被回覆的確認：{"tool", "arguments", "folder"}（稽核紀錄用）。
 
         Raises:
             WebError: 決定不合法，或找不到這個等待中的確認。
@@ -1101,6 +1113,12 @@ class Workspace:
             },
         )
         pending.future.set_result(decision != "deny")
+        folder = state.run_folder
+        return {
+            "tool": approval["tool"],
+            "arguments": approval["arguments"],
+            "folder": folder.id if folder else state.options["folder"],
+        }
 
     def update_permissions(self, settings: dict[str, Any]) -> None:
         """更新權限設定並寫回 harness.yaml，下一次工具呼叫就生效。"""
@@ -1174,6 +1192,7 @@ class Workspace:
         credentials.update(self.project.root, values)
         self._settings = {**self._settings, "model": model}
         self._apply_settings()
+        self.forget_model_access()
         self._emit({"type": "project"})
 
     async def test_model(self, model: str | None = None) -> dict[str, Any]:
@@ -1265,6 +1284,10 @@ class Workspace:
                 for item in delegation.reachable_agents(agent)
             }
             state.replying = agent.name
+            # 帳號模式：這一輪的模型與 MCP 呼叫都附上使用者身分，模型中台
+            # 依使用者記帳、套用額度與限流。每一輪是自己的 asyncio task，
+            # 設定只影響這一輪（與它開出的 subagent）。
+            llm.set_caller(self._caller(user, session_id, agent.name))
             events = loop.run_stream(
                 agent,
                 text,
@@ -1293,7 +1316,10 @@ class Workspace:
         # 模型或網路出錯時停下來讓使用者重試；錯誤種類取決於供應商。
         except Exception as error:  # noqa: BLE001
             state.status = "error"
-            state.error = _describe(error)
+            explained = llm.explain_error(error)
+            if explained is not None:
+                _LOG.warning("對話 %s 的模型呼叫失敗：%s", session_id, error)
+            state.error = explained or _describe(error)
             self._emit(
                 {
                     "type": "run_error",
@@ -1695,6 +1721,7 @@ class Workspace:
         except ValueError as error:
             raise WebError(400, str(error)) from error
         self._model_choices = choices
+        self.forget_model_access()
         self._emit({"type": "project"})
 
     def _connection_values(
@@ -1810,14 +1837,93 @@ class Workspace:
         return hidden
 
     def _access(self, user: accounts_lib.User) -> groups_lib.Access:
-        """這個人可以使用的資源（見 groups.py）；管理者與本機模式不受限制。
+        """這個人可以使用的資源。
 
-        每次都讀最新的群組與角色，管理者在管理平台改了群組，下一次讀取
-        專案或下一輪對話就生效。
+        agent、工具組與知識庫看所屬群組（見 groups.py；管理者與本機模式
+        不受限制），每次都讀最新的群組與角色，管理者在管理平台改了群組，
+        下一次讀取專案或下一輪對話就生效。模型看模型中台最近一次的回覆
+        （見 refresh_model_access）。
         """
         if self._groups is None or self._live_admin(user):
-            return groups_lib.FULL_ACCESS
-        return self._groups.access_for(user)
+            access = groups_lib.FULL_ACCESS
+        else:
+            access = self._groups.access_for(user)
+        models = self._allowed_models(user)
+        if models is None:
+            return access
+        # 設定的模型一個都不在中台的清單裡，多半是名稱寫法不同（例如中台
+        # 用萬用字元開放）：不過濾，由中台在呼叫時把關。
+        if not any(item["name"] in models for item in self._model_options()):
+            return access
+        return dataclasses.replace(access, models=models)
+
+    def _caller(
+        self, user: accounts_lib.User, session_id: str, agent: str
+    ) -> llm.Caller | None:
+        """附在模型與 MCP 呼叫上的使用者身分；本機模式（只有自己）不附。"""
+        if self.auth_mode != "accounts":
+            return None
+        return llm.Caller(
+            user=user.username,
+            session=session_id,
+            metadata=(("app", "agent-harness"), ("agent", agent)),
+        )
+
+    async def refresh_model_access(self, user: accounts_lib.User) -> None:
+        """向模型中台查詢這個人可以使用哪些模型，記下來給模型選單使用。
+
+        連 OpenAI 相容端點（LiteLLM Proxy）時，用這個人的身分（帳號模式
+        附 x-litellm-end-user-id）讀 GET /models：LiteLLM 依金鑰、團隊與
+        使用者的設定只列出能用的模型。結果保留 MODEL_ACCESS_TTL 秒。
+
+        查不到（中台沒有回應、不支援列出模型）或清單是空的時不限制，
+        真正的把關仍在中台：沒有權限的請求會被拒絕，並顯示看得懂的說明
+        （見 llm.explain_error）。直接連供應商時什麼都不做。
+        """
+        if not providers.uses_endpoint():
+            return
+        key = user.username if self.auth_mode == "accounts" else ""
+        cached = self._model_access.get(key)
+        now = time.monotonic()
+        if cached is not None and cached[0] > now:
+            return
+        caller = self._caller(user, "", "")
+        headers = (
+            {llm.END_USER_HEADER: caller.headers()[llm.END_USER_HEADER]}
+            if caller is not None
+            else None
+        )
+        try:
+            found = await asyncio.wait_for(
+                model_catalog.list_models(
+                    providers.ENDPOINT, extra_headers=headers
+                ),
+                _MODEL_ACCESS_TIMEOUT,
+            )
+        # 查不到時照常使用，只是模型選單不過濾；原因記在伺服器的紀錄裡。
+        except Exception as error:  # noqa: BLE001
+            _LOG.warning("向模型中台查詢可用的模型失敗：%s", error)
+            self._model_access[key] = (now + _MODEL_ACCESS_RETRY, None)
+            return
+        names = {item.name for item in found}
+        # 設定裡可以寫成 litellm_proxy/<名稱>，兩種寫法都算。
+        names |= {llm.PROXY_PREFIX + name for name in names}
+        self._model_access[key] = (
+            now + MODEL_ACCESS_TTL,
+            frozenset(names) if names else None,
+        )
+
+    def _allowed_models(self, user: accounts_lib.User) -> frozenset[str] | None:
+        """模型中台最近一次回覆的可用模型；沒有查過或查不到時為 None。"""
+        if not providers.uses_endpoint():
+            return None
+        key = user.username if self.auth_mode == "accounts" else ""
+        cached = self._model_access.get(key)
+        return cached[1] if cached is not None else None
+
+    def forget_model_access(self) -> None:
+        """模型連線或模型清單改了：下次重新向模型中台查詢。"""
+        self._model_access.clear()
 
     def _visible_agents(self, access: groups_lib.Access) -> list[str]:
         """可以開始對話的 agent 名稱，預設 agent 排第一。"""

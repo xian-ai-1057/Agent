@@ -73,6 +73,7 @@ async def list_models(
     base_url: str = "",
     api_key: str = "",
     saved_key: bool = True,
+    extra_headers: dict[str, str] | None = None,
 ) -> list[ModelChoice]:
     """查詢一家供應商（或端點）提供的模型。
 
@@ -82,6 +83,8 @@ async def list_models(
         api_key: 金鑰；空的時用已經設定的環境變數。
         saved_key: 端點可不可以用已經存好的 HARNESS_API_KEY。網址換成別的
             端點時要傳 False，存好的金鑰不能送到新的網址。
+        extra_headers: 端點另外附帶的標頭，例如 LiteLLM 的
+            x-litellm-end-user-id：中台支援時只列出這位使用者能用的模型。
 
     Returns:
         依名稱排序的模型。
@@ -92,7 +95,7 @@ async def list_models(
     if provider_id == providers.ENDPOINT:
         if not api_key and saved_key:
             api_key = _env(providers.API_KEY_VAR)
-        return await _endpoint(base_url, api_key)
+        return await _endpoint(base_url, api_key, extra_headers or {})
     provider = providers.find(provider_id)
     if provider is None:
         raise CatalogError(f"不認得這個供應商：{provider_id}")
@@ -148,11 +151,13 @@ async def list_models(
     raise CatalogError(f"{provider.label} 不支援列出模型，請直接填模型名稱")
 
 
-async def _endpoint(base_url: str, api_key: str) -> list[ModelChoice]:
+async def _endpoint(
+    base_url: str, api_key: str, extra_headers: dict[str, str]
+) -> list[ModelChoice]:
     url = (base_url or _env(providers.BASE_URL_VAR)).rstrip("/")
     if not url:
         raise CatalogError("請先填上端點網址")
-    headers = _bearer(api_key)
+    headers = {**extra_headers, **_bearer(api_key)}
     try:
         data = await _get_json(f"{url}/models", headers)
     except _NotFound:

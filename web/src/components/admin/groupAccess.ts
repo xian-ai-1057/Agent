@@ -6,15 +6,9 @@ import type {
   GroupCatalog,
 } from "../../../../src/web/protocol.ts";
 
-export const ACCESS_KINDS: AccessKind[] = [
-  "models",
-  "agents",
-  "toolsets",
-  "knowledge",
-];
+export const ACCESS_KINDS: AccessKind[] = ["agents", "toolsets", "knowledge"];
 
 export const KIND_LABELS: Record<AccessKind, string> = {
-  models: "模型",
   agents: "Agent",
   toolsets: "工具組",
   knowledge: "知識庫標籤",
@@ -27,13 +21,12 @@ export function kindSummary(value: string[] | null, total: number): string {
   return `${value.length} / ${total}`;
 }
 
-/** 群組列表上的一行摘要，例如「模型 全部 · Agent 1 / 2 · 工具組 無」。 */
+/** 群組列表上的一行摘要，例如「Agent 1 / 2 · 工具組 無」。 */
 export function accessSummary(
   group: AccessGroup,
   catalog: GroupCatalog,
 ): string {
   const totals: Record<AccessKind, number> = {
-    models: catalog.models.length,
     agents: catalog.agents.length,
     toolsets: catalog.toolsets.length,
     knowledge: catalog.knowledge.length,

@@ -358,7 +358,13 @@ mcpServers:
     url: ${LITELLM_PROXY_URL}/webiq/mcp
     headers:
       x-litellm-api-key: Bearer ${LITELLM_API_KEY}
+    forwardUser: true                      # 選用，附上網頁版使用者的身分標頭
 ```
+
+`forwardUser`：網頁版要登入時，工具呼叫附上使用者的
+`x-litellm-end-user-id` 與 `x-litellm-trace-id`。網址和 `HARNESS_BASE_URL`
+同一台時預設開啟，其他伺服器預設不送（見
+[模型中台](https://agent-harness-docs-ten.vercel.app/guide/web#模型中台)）。
 
 `args`、`env`、`url`、`headers` 裡的 `${環境變數名稱}` 會在載入時換成
 環境變數的值（`${NAME:-預設值}` 可以給預設值），金鑰不必寫進

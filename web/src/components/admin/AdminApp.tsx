@@ -2,7 +2,7 @@
  * 管理平台（網址 /admin/<分類>）：和聊天介面分開的版面，只有管理者能用。
  *
  * 聊天介面對每個人都一樣；模型連線、全站權限與成員管理這些會影響所有
- * 人的設定集中在這裡。左邊是管理平台自己的選單，底下可以回到聊天介面。
+ * 人的設定，以及稽核紀錄，集中在這裡。左邊是管理平台自己的選單，底下可以回到聊天介面。
  * 成員打開這個網址時只看到沒有權限的說明（伺服器本來就會拒絕他們的
  * 修改）。
  *
@@ -18,6 +18,7 @@ import {
   ArrowLeftIcon,
   CheckIcon,
   ChipIcon,
+  ListIcon,
   ShieldIcon,
   UserIcon,
   UsersIcon,
@@ -25,6 +26,7 @@ import {
 import { Members } from "../Members.tsx";
 import { Link } from "../Sidebar.tsx";
 import { UserMenu } from "../shell/UserMenu.tsx";
+import { Audit } from "./Audit.tsx";
 import { Groups } from "./Groups.tsx";
 import {
   type Draft,
@@ -38,6 +40,7 @@ export const ADMIN_LABELS: Record<AdminSection, string> = {
   permissions: "權限",
   members: "成員",
   groups: "群組",
+  audit: "稽核紀錄",
 };
 
 const ADMIN_ICONS: Record<AdminSection, typeof ChipIcon> = {
@@ -45,6 +48,7 @@ const ADMIN_ICONS: Record<AdminSection, typeof ChipIcon> = {
   permissions: ShieldIcon,
   members: UserIcon,
   groups: UsersIcon,
+  audit: ListIcon,
 };
 
 export function AdminApp({ section }: { section?: AdminSection }) {
@@ -162,7 +166,9 @@ function AdminMain({ section }: { section: AdminSection }) {
         <div className="main-title">
           <h1>管理平台</h1>
           <span className="subtle mono">
-            {section === "members" || section === "groups"
+            {section === "members" ||
+            section === "groups" ||
+            section === "audit"
               ? project.name
               : `${project.name} / harness.yaml`}
           </span>
@@ -188,6 +194,7 @@ function AdminMain({ section }: { section: AdminSection }) {
             )}
             {section === "members" && <Members />}
             {section === "groups" && <Groups />}
+            {section === "audit" && <Audit />}
           </div>
         </div>
       </div>

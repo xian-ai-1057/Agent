@@ -7,6 +7,7 @@ import pytest
 
 import harness
 from harness import datatypes
+from harness import llm
 
 
 def text_response(text: str, finish_reason: str = "stop") -> Any:
@@ -52,7 +53,11 @@ def tool_response(*calls: tuple[str, dict[str, Any]]) -> Any:
 
 
 class FakeModel:
-    """依照劇本回應的假模型，並記錄每次收到的請求。"""
+    """依照劇本回應的假模型，並記錄每次收到的請求。
+
+    劇本裡的例外會在輪到它時丟出（模擬模型中台拒絕請求）。請求裡另外
+    記下當時的 llm.current_caller()（附在模型呼叫上的使用者身分）。
+    """
 
     def __init__(self, script: list[Any]) -> None:
         self.script = list(script)
@@ -65,9 +70,12 @@ class FakeModel:
                 "messages": [dict(message) for message in messages],
                 "tools": tools,
                 "params": params,
+                "caller": llm.current_caller(),
             }
         )
         response = self.script.pop(0)
+        if isinstance(response, BaseException):
+            raise response
         content = response.message.get("content")
         if content:
             yield content

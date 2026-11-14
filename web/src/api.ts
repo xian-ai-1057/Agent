@@ -3,6 +3,9 @@
 import type {
   AccessGroup,
   ApprovalDecision,
+  AuditFilters,
+  AuditPage,
+  AuditVerification,
   BulkRequest,
   BulkResult,
   ChatCategory,
@@ -25,6 +28,7 @@ import type {
   UploadedFile,
 } from "../../src/web/protocol.ts";
 import { LOCAL_KEY_REQUIRED } from "../../src/web/protocol.ts";
+import { auditQuery } from "./components/admin/auditFormat.ts";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -202,7 +206,23 @@ export const api = {
   updateGroup: (id: string, changes: GroupChanges) =>
     request<AccessGroup>("PATCH", `/admin/groups/${id}`, changes),
   deleteGroup: (id: string) => request("DELETE", `/admin/groups/${id}`),
+
+  // 稽核紀錄（features.audit）。
+  audit: (filters: AuditFilters, before?: number) =>
+    request<AuditPage>(
+      "GET",
+      `/admin/audit?${auditQuery(filters, { before, limit: 50 })}`,
+    ),
+  verifyAudit: () => request<AuditVerification>("GET", "/admin/audit/verify"),
 };
+
+/** 匯出稽核紀錄的網址（瀏覽器直接下載）。 */
+export function auditExportUrl(
+  filters: AuditFilters,
+  format: "csv" | "jsonl",
+): string {
+  return `/api/admin/audit/export?${auditQuery(filters, { format })}`;
+}
 
 /** 新增或修改群組時送出的欄位。 */
 export type GroupChanges = Partial<Omit<AccessGroup, "id" | "builtin">>;

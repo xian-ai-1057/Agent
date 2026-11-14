@@ -1,6 +1,7 @@
 """連接 MCP 伺服器：啟動、列出工具、轉送呼叫、錯誤與關閉。"""
 
 import asyncio
+import json
 import socket
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import time
 import pytest
 
 import harness
+from harness import llm
 from harness import mcp_servers
 from tests import conftest
 
@@ -16,6 +18,7 @@ pytest.importorskip("mcp")
 
 SERVER = '''\
 import asyncio
+import json
 import sys
 
 from mcp.server.mcpserver import MCPServer
@@ -363,3 +366,134 @@ def test_from_config_expands_env_in_url_and_headers(monkeypatch, tmp_path):
     assert mcp_servers.from_config("webiq", config, tmp_path) == "connection"
     assert captured["url"] == "http://proxy:4000/webiq/mcp"
     assert captured["headers"] == {"x-litellm-api-key": "Bearer sk-test"}
+
+
+WHOAMI_SERVER = """\
+import sys
+
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver import MCPServer
+
+mcp = MCPServer("who")
+
+
+@mcp.tool()
+def whoami(ctx: Context) -> str:
+    \"\"\"回傳這次請求帶的使用者標頭。\"\"\"
+    headers = ctx.request_context.request.headers
+    return "|".join(
+        str(headers.get(name))
+        for name in ("x-litellm-end-user-id", "x-litellm-trace-id")
+    )
+
+
+mcp.run("streamable-http", port=int(sys.argv[1]))
+"""
+
+
+def _start_http_server(script: str, tmp_path) -> tuple[subprocess.Popen, int]:
+    path = tmp_path / "server.py"
+    path.write_text(script, encoding="utf-8")
+    port = _free_port()
+    process = subprocess.Popen(
+        [sys.executable, str(path), str(port)],
+        stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    return process, port
+
+
+@pytest.mark.parametrize("forward", [True, False])
+def test_tool_calls_carry_the_user_when_forwarding(tmp_path, forward):
+    process, port = _start_http_server(WHOAMI_SERVER, tmp_path)
+    caller = llm.Caller(user="alice", session="s-1")
+
+    async def call(tool):
+        with llm.acting_as(caller):
+            return await tool.func()
+
+    try:
+        with mcp_servers.connect(
+            "who", url=f"http://127.0.0.1:{port}/mcp", forward_user=forward
+        ) as connection:
+            [whoami] = connection.tools
+            inside = asyncio.run(call(whoami))
+            outside = asyncio.run(whoami.func())
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+    assert inside == ("alice|s-1" if forward else "None|None")
+    assert outside == "None|None"
+
+
+class _Request:
+    def __init__(self, body: bytes, method: str = "POST") -> None:
+        self.method = method
+        self.content = body
+        self.headers: dict[str, str] = {}
+
+
+async def test_identity_hook_only_copies_known_headers():
+    identity = {
+        "x-litellm-end-user-id": "alice",
+        "authorization": "Bearer stolen",
+    }
+    body = {"params": {"_meta": {mcp_servers._IDENTITY_META: identity}}}
+    request = _Request(json.dumps(body).encode())
+
+    await mcp_servers._identity_hook(request)
+
+    assert request.headers == {"x-litellm-end-user-id": "alice"}
+
+
+async def test_identity_hook_ignores_other_requests():
+    for request in (
+        _Request(b"not json"),
+        _Request(b'{"params": {"_meta": {}}}'),
+        _Request(b"", method="GET"),
+    ):
+        await mcp_servers._identity_hook(request)
+        assert request.headers == {}
+
+
+@pytest.mark.parametrize(
+    ("base_url", "config", "expected"),
+    [
+        ("http://proxy:4000/v1", {}, True),
+        ("http://other:4000/v1", {}, False),
+        ("http://proxy:4000/v1", {"forwardUser": False}, False),
+        ("", {"forwardUser": True}, True),
+    ],
+)
+def test_from_config_forwards_user_to_the_model_gateway(
+    monkeypatch, tmp_path, base_url, config, expected
+):
+    monkeypatch.setenv("HARNESS_BASE_URL", base_url)
+    captured = {}
+
+    def fake_connect(name, **kwargs):
+        captured.update(kwargs)
+        return "connection"
+
+    monkeypatch.setattr(mcp_servers, "connect", fake_connect)
+
+    mcp_servers.from_config(
+        "webiq", {"url": "http://proxy:4000/webiq/mcp", **config}, tmp_path
+    )
+
+    assert captured["forward_user"] is expected
+
+
+def test_from_config_checks_forward_user(tmp_path):
+    with pytest.raises(ValueError, match="forwardUser"):
+        mcp_servers.from_config(
+            "x", {"url": "http://x/mcp", "forwardUser": "yes"}, tmp_path
+        )
