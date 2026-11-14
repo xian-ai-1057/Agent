@@ -324,3 +324,42 @@ async def test_agent_calls_mcp_tool_in_a_run(demo, fake_model):
     error = model.requests[1]["messages"][-1]["content"]
     assert error.startswith("[錯誤]") and "1999-01 沒有資料" in error
     assert model.requests[2]["messages"][-1]["content"] == "42"
+
+
+def test_expand_env_replaces_references(monkeypatch):
+    monkeypatch.setenv("DEMO_KEY", "sk-123")
+    monkeypatch.delenv("DEMO_MISSING", raising=False)
+
+    assert mcp_servers.expand_env("Bearer ${DEMO_KEY}") == "Bearer sk-123"
+    assert mcp_servers.expand_env("${DEMO_MISSING:-http://x}/mcp") == (
+        "http://x/mcp"
+    )
+    assert mcp_servers.expand_env("沒有變數 $HOME") == "沒有變數 $HOME"
+
+
+def test_expand_env_names_the_missing_variable(monkeypatch):
+    monkeypatch.delenv("DEMO_MISSING", raising=False)
+
+    with pytest.raises(ValueError, match="mcpServers.web.*DEMO_MISSING"):
+        mcp_servers.expand_env("${DEMO_MISSING}", "mcpServers.web")
+
+
+def test_from_config_expands_env_in_url_and_headers(monkeypatch, tmp_path):
+    # 透過 LiteLLM Proxy 使用的 MCP：網址與金鑰都從環境變數來。
+    monkeypatch.setenv("LITELLM_PROXY_URL", "http://proxy:4000")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    captured = {}
+
+    def fake_connect(name, **kwargs):
+        captured.update(kwargs, name=name)
+        return "connection"
+
+    monkeypatch.setattr(mcp_servers, "connect", fake_connect)
+    config = {
+        "url": "${LITELLM_PROXY_URL}/webiq/mcp",
+        "headers": {"x-litellm-api-key": "Bearer ${LITELLM_API_KEY}"},
+    }
+
+    assert mcp_servers.from_config("webiq", config, tmp_path) == "connection"
+    assert captured["url"] == "http://proxy:4000/webiq/mcp"
+    assert captured["headers"] == {"x-litellm-api-key": "Bearer sk-test"}

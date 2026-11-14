@@ -40,6 +40,8 @@ export {
 export { formatArguments, type RunOptions, run, runStream } from "./loop.ts";
 export {
   connectMcpServer,
+  expandEnv,
+  expandServerConfig,
   type McpConnection,
   type McpServerConfig,
 } from "./mcp.ts";

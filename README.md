@@ -108,7 +108,9 @@ litellm 直接連各家供應商。換模型只要改設定，不用改程式。
 - **工具是 TypeScript、或要嵌進 Node.js 服務**：用 TypeScript 版。
 
 兩個版本都能連接現成的 MCP 伺服器，設定方式相同（`harness.yaml` 的
-`mcpServers`）。
+`mcpServers`）。遠端伺服器的金鑰可以寫成 `${環境變數}` 從環境變數帶入，
+也能接上 LiteLLM Proxy 管理的 MCP 工具（例如網頁搜尋，見
+[文件](https://agent-harness-docs-ten.vercel.app/guide/mcp#litellm-proxy)）。
 
 `examples/report_bot` 同時提供兩種工具寫法，兩個版本都能直接執行它。
 

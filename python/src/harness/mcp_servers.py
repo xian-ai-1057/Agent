@@ -16,6 +16,7 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import sys
 import threading
 from collections.abc import AsyncIterator
@@ -29,6 +30,9 @@ DEFAULT_STARTUP_TIMEOUT_SECONDS = 300
 _STDERR_TAIL_CHARS = 2000
 _CLOSE_TIMEOUT_SECONDS = 10
 _CLIENT_NAME = "agent-harness"
+# 設定裡的 ${NAME} 或 ${NAME:-預設值} 換成環境變數，金鑰就不必寫進
+# harness.yaml。
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 # Claude Code、Cursor 等工具的 MCP 設定會寫 type，值與需要的欄位對應。
 _TRANSPORT_TYPES = {
     "stdio": "command",
@@ -283,7 +287,8 @@ def from_config(
     Args:
         name: 伺服器名稱。
         config: 設定（command、args、env、url、headers、timeoutSeconds，
-            以及從 Claude Code 等工具複製過來時會有的 type）。
+            以及從 Claude Code 等工具複製過來時會有的 type）。args、env、
+            url、headers 裡的 ${NAME} 會換成環境變數的值。
         cwd: 啟動本機伺服器時的工作目錄（專案根目錄）。
 
     Returns:
@@ -299,16 +304,54 @@ def from_config(
             f"可用的有：{sorted(known)}"
         )
     _check_type(name, config)
+
+    def expand(value: Any) -> str:
+        return expand_env(str(value), f"mcpServers.{name}")
+
+    url = config.get("url")
+    headers = config.get("headers") or {}
     return connect(
         name,
         command=config.get("command"),
-        args=[str(item) for item in config.get("args") or []],
-        env={k: str(v) for k, v in (config.get("env") or {}).items()},
+        args=[expand(item) for item in config.get("args") or []],
+        env={k: expand(v) for k, v in (config.get("env") or {}).items()},
         cwd=cwd,
-        url=config.get("url"),
-        headers={k: str(v) for k, v in (config.get("headers") or {}).items()},
+        url=expand(url) if url else None,
+        headers={k: expand(v) for k, v in headers.items()},
         timeout_seconds=config.get("timeoutSeconds") or DEFAULT_TIMEOUT_SECONDS,
     )
+
+
+def expand_env(text: str, where: str = "設定") -> str:
+    """把字串裡的 ${NAME}、${NAME:-預設值} 換成環境變數的值。
+
+    Example:
+        expand_env("Bearer ${LITELLM_API_KEY}")  # "Bearer sk-..."
+
+    Args:
+        text: 設定裡的字串。
+        where: 錯誤訊息裡用來指出是哪一項設定。
+
+    Returns:
+        換好的字串。
+
+    Raises:
+        ValueError: 用到的環境變數沒有設定（或是空的），也沒有寫預設值。
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        variable, default = match.group(1), match.group(2)
+        value = os.environ.get(variable)
+        if value:
+            return value
+        if default is not None:
+            return default
+        raise ValueError(
+            f"{where} 用到環境變數 {variable}，但它沒有設定；請在 .env 或"
+            "啟動前的環境變數設定它"
+        )
+
+    return _ENV_REFERENCE.sub(replace, text)
 
 
 def _check_type(name: str, config: dict[str, Any]) -> None:

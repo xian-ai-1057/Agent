@@ -37,6 +37,10 @@ permissions:
 #     args: ["-y", "@modelcontextprotocol/server-github"]
 #   search:        # 遠端伺服器（Streamable HTTP）
 #     url: https://example.com/mcp
+#   webiq:         # 透過 LiteLLM Proxy 的網頁搜尋；${...} 從環境變數帶入
+#     url: ${LITELLM_PROXY_URL}/webiq/mcp
+#     headers:
+#       x-litellm-api-key: Bearer ${LITELLM_API_KEY}
 
 # 長期記憶：agent 可以跨對話記住使用者的偏好（用 pyharness memory 管理）
 # memory: true
@@ -156,6 +160,14 @@ permissions:
 
 # 長期記憶：使用者說「請記住……」時，之後的對話都會記得。
 memory: true
+
+# 透過 LiteLLM Proxy 使用的網頁搜尋 MCP。在 .env 設定 LITELLM_PROXY_URL 與
+# LITELLM_API_KEY 後取消註解，並在 agents/main.md 的 tools 加上 webiq。
+# mcpServers:
+#   webiq:
+#     url: ${LITELLM_PROXY_URL}/webiq/mcp
+#     headers:
+#       x-litellm-api-key: Bearer ${LITELLM_API_KEY}
 {sandbox}"""
 
 _SANDBOX_ON = """
@@ -187,6 +199,7 @@ tools:
   - files
   - plan
   - web
+  # - webiq        # 網頁搜尋（要先在 harness.yaml 設定 mcpServers）
   {sandbox_tool}
 skills:
   - planning
